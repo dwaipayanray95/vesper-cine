@@ -1,0 +1,79 @@
+// =============================================================================
+// Project RawEdge - R-Log to Rec.709 Cinema Technical Transform (DCTL)
+// Target: Google Pixel 8 / 9 / 10 Sensor Array
+// Designed for: DaVinci Resolve Studio (Color page)
+// =============================================================================
+
+DEFINE_UI_PARAMS(exposure_comp, Exposure Compensation (Stops), DCTLUI_SLIDER_FLOAT, 0.0f, -4.0f, 4.0f, 0.1f)
+DEFINE_UI_PARAMS(highlight_rolloff, Highlight Soft Roll-off, DCTLUI_SLIDER_FLOAT, 1.0f, 0.0f, 2.0f, 0.1f)
+DEFINE_UI_PARAMS(saturation, Saturation, DCTLUI_SLIDER_FLOAT, 1.0f, 0.0f, 2.0f, 0.05f)
+
+// Inverse R-Log OETF: maps R-Log code values back to Scene-Linear Rec.2020
+__DEVICE__ float3 rlog_to_linear(float3 rlog) {
+    const float a = 0.225f;
+    const float b = 5.5555f;
+    const float c = 0.385f;
+    const float d = 0.100f;
+    const float cutoff_log = 0.10385f; // c * 0.01 + d
+
+    float3 lin;
+    lin.x = (rlog.x < cutoff_log) ? (rlog.x - d) / c : (exp((rlog.x - c) / a) - 1.0f) / b;
+    lin.y = (rlog.y < cutoff_log) ? (rlog.y - d) / c : (exp((rlog.y - c) / a) - 1.0f) / b;
+    lin.z = (rlog.z < cutoff_log) ? (rlog.z - d) / c : (exp((rlog.z - c) / a) - 1.0f) / b;
+
+    return lin;
+}
+
+// Gamut mapping matrix: Rec.2020 Linear -> Rec.709 Linear
+__DEVICE__ float3 rec2020_to_rec709(float3 rgb) {
+    float3 out;
+    out.x =  1.6605f * rgb.x - 0.1246f * rgb.y - 0.0182f * rgb.z;
+    out.y = -0.5876f * rgb.x + 1.1329f * rgb.y - 0.1006f * rgb.z;
+    out.z = -0.0728f * rgb.x - 0.0083f * rgb.y + 1.1187f * rgb.z;
+    return out;
+}
+
+// Cinema tone-mapping curve (ACES / Filmic S-curve with smooth shoulder)
+__DEVICE__ float3 filmic_tone_map(float3 lin, float rolloff) {
+    // Exposure compensation
+    float scale = pow(2.0f, exposure_comp);
+    lin.x *= scale;
+    lin.y *= scale;
+    lin.z *= scale;
+
+    float3 mapped;
+    // Filmic shoulder and toe equation
+    float a = 2.51f;
+    float b = 0.03f * rolloff;
+    float c = 2.43f;
+    float d = 0.59f;
+    float e = 0.14f;
+
+    mapped.x = clamp((lin.x * (a * lin.x + b)) / (lin.x * (c * lin.x + d) + e), 0.0f, 1.0f);
+    mapped.y = clamp((lin.y * (a * lin.y + b)) / (lin.y * (c * lin.y + d) + e), 0.0f, 1.0f);
+    mapped.z = clamp((lin.z * (a * lin.z + b)) / (lin.z * (c * lin.z + d) + e), 0.0f, 1.0f);
+
+    return mapped;
+}
+
+__DEVICE__ float3 transform(int p_Width, int p_Height, int p_X, int p_Y, float p_R, float p_G, float p_B) {
+    float3 rlog = make_float3(p_R, p_G, p_B);
+
+    // 1. Decode R-Log to scene-linear
+    float3 lin = rlog_to_linear(rlog);
+
+    // 2. Convert Rec.2020 Gamut to Rec.709
+    float3 rec709_lin = rec2020_to_rec709(lin);
+
+    // 3. Apply smooth highlight roll-off filmic tonemap
+    float3 tone_mapped = filmic_tone_map(rec709_lin, highlight_rolloff);
+
+    // 4. Saturation adjustment
+    float luma = 0.2126f * tone_mapped.x + 0.7152f * tone_mapped.y + 0.0722f * tone_mapped.z;
+    float3 final_rgb;
+    final_rgb.x = luma + saturation * (tone_mapped.x - luma);
+    final_rgb.y = luma + saturation * (tone_mapped.y - luma);
+    final_rgb.z = luma + saturation * (tone_mapped.z - luma);
+
+    return final_rgb;
+}

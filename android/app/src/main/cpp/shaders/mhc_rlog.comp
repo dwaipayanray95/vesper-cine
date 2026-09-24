@@ -1,0 +1,220 @@
+#version 450
+layout(local_size_x = 16, local_size_y = 16) in;
+
+// Input raw sensor image (sampled from imported AHardwareBuffer or storage image)
+layout(binding = 0) uniform sampler2D rawBayerTexture;
+
+// Output 1: Clean 10-bit R-Log surface for AMediaCodec (16:9 crop or 4:3 open-gate)
+layout(binding = 1, rgba16f) uniform writeonly image2D outputCodecImage;
+
+// Output 2: Viewfinder display surface (with monitoring tools)
+layout(binding = 2, rgba8) uniform writeonly image2D outputViewfinderImage;
+
+// Pipeline uniforms
+layout(push_constant) uniform UniformData {
+    vec4 blackLevel;           // R, Gr, Gb, B
+    vec4 wbGains;              // rGain, gGain, bGain, 0.0
+    mat3 sensorToXyzMatrix;    // Calibrated Sensor RGB -> CIE XYZ (D65)
+    mat3 xyzToRec2020Matrix;   // CIE XYZ -> Rec.2020 Linear
+    ivec2 rawDimensions;       // e.g. 4080, 3072
+    ivec2 outputDimensions;    // e.g. 3840, 2160 (or 3840x2880)
+    int cropMode;              // 0: 16:9 UHD center crop, 1: 4:3 open gate
+    int monitoringMode;        // 0: Flat R-Log, 1: Rec.709 Preview LUT, 2: False Color IRE, 3: Peaking, 4: Zebras
+    float zebraThreshold;      // e.g. 0.95 (95% IRE)
+    float peakingThreshold;    // e.g. 0.15 edge sharpness threshold
+    float whiteLevel;          // e.g. 1023.0
+} ubo;
+
+// R-Log OETF Transfer Function (Opto-Electronic Transfer Function)
+// Mathematical Log curve mapped to Pixel dynamic range:
+// 18% middle gray (linear ~0.18) sits at exactly 0.40 (40% IRE)
+// Sensor clipping point (linear 1.0) sits at 0.95 (95% IRE)
+vec3 linearToRLog(vec3 lin) {
+    const float a = 0.225;
+    const float b = 5.5555;
+    const float c = 0.385;
+    const float d = 0.100;
+    const float cutoff = 0.01;
+
+    vec3 logVal;
+    for (int i = 0; i < 3; ++i) {
+        float x = max(0.0, lin[i]);
+        if (x < cutoff) {
+            logVal[i] = c * x + d;
+        } else {
+            logVal[i] = a * log(b * x + 1.0) + c;
+        }
+    }
+    return clamp(logVal, 0.0, 1.0);
+}
+
+// Normalized Rec.709 Preview Transform (Viewfinder LUT)
+vec3 rLogToRec709Preview(vec3 rlog) {
+    // High-contrast S-curve filmic roll-off for live monitoring
+    vec3 x = max(vec3(0.0), (rlog - 0.10) / 0.85);
+    vec3 sCurve = (x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14);
+    // Rec.2020 to Rec.709 color gamut compression
+    const mat3 rec2020To709 = mat3(
+        1.6605, -0.1246, -0.0182,
+       -0.5876,  1.1329, -0.1006,
+       -0.0728, -0.0083,  1.1187
+    );
+    return clamp(rec2020To709 * sCurve, 0.0, 1.0);
+}
+
+// Standard IRE False Color ramp
+vec3 getFalseColor(float luma) {
+    if (luma >= ubo.zebraThreshold) return vec3(1.0, 0.0, 0.0);   // Red: Clipping (95-100% IRE)
+    if (luma >= 0.85) return vec3(1.0, 1.0, 0.0);                 // Yellow: Near-clip highlights (85-90%)
+    if (luma >= 0.50 && luma <= 0.55) return vec3(1.0, 0.4, 0.7); // Pink: Optimal Caucasian Skin tone (50-55%)
+    if (luma >= 0.38 && luma <= 0.42) return vec3(0.5, 0.5, 0.5); // 18% Middle Gray (38-42%)
+    if (luma >= 0.05 && luma <= 0.10) return vec3(0.0, 0.0, 1.0); // Blue: Near black shadows (5-10%)
+    if (luma < 0.05) return vec3(0.5, 0.0, 0.5);                  // Purple: Crushed shadows (0-5%)
+    return vec3(luma); // Grayscale passthrough for other tones
+}
+
+// Fetch raw Bayer sample with linearization and black level subtraction
+float fetchBayer(int x, int y) {
+    x = clamp(x, 0, ubo.rawDimensions.x - 1);
+    y = clamp(y, 0, ubo.rawDimensions.y - 1);
+    
+    vec2 uv = (vec2(x, y) + 0.5) / vec2(ubo.rawDimensions);
+    float raw = texture(rawBayerTexture, uv).r * ubo.whiteLevel;
+
+    // Determine CFA pattern quadrant (0: R, 1: Gr, 2: Gb, 3: B)
+    int cfaIndex = ((y & 1) << 1) | (x & 1);
+    float bl = ubo.blackLevel[cfaIndex];
+    
+    return max(0.0, (raw - bl) / (ubo.whiteLevel - bl));
+}
+
+// Malvar-He-Cutler (MHC) 5x5 gradient-corrected demosaic
+vec3 demosaicMHC(int x, int y) {
+    float p00 = fetchBayer(x, y);
+
+    int phaseX = x & 1;
+    int phaseY = y & 1;
+
+    float r = 0.0;
+    float g = 0.0;
+    float b = 0.0;
+
+    // RGGB Bayer phase cases:
+    // (phaseX=0, phaseY=0): Red
+    // (phaseX=1, phaseY=0): Green on Red row (Gr)
+    // (phaseX=0, phaseY=1): Green on Blue row (Gb)
+    // (phaseX=1, phaseY=1): Blue
+
+    if (phaseY == 0 && phaseX == 0) {
+        // Red pixel
+        r = p00;
+        // Green at Red (cross filter with 5x5 gradient correction)
+        g = 0.25 * (fetchBayer(x, y-1) + fetchBayer(x, y+1) + fetchBayer(x-1, y) + fetchBayer(x+1, y))
+          + 0.125 * (4.0 * p00 - fetchBayer(x, y-2) - fetchBayer(x, y+2) - fetchBayer(x-2, y) - fetchBayer(x+2, y));
+        // Blue at Red (diagonal filter with 5x5 correction)
+        b = 0.25 * (fetchBayer(x-1, y-1) + fetchBayer(x+1, y-1) + fetchBayer(x-1, y+1) + fetchBayer(x+1, y+1))
+          + 0.125 * (4.0 * p00 - fetchBayer(x, y-2) - fetchBayer(x, y+2) - fetchBayer(x-2, y) - fetchBayer(x+2, y));
+    }
+    else if (phaseY == 1 && phaseX == 1) {
+        // Blue pixel
+        b = p00;
+        // Green at Blue
+        g = 0.25 * (fetchBayer(x, y-1) + fetchBayer(x, y+1) + fetchBayer(x-1, y) + fetchBayer(x+1, y))
+          + 0.125 * (4.0 * p00 - fetchBayer(x, y-2) - fetchBayer(x, y+2) - fetchBayer(x-2, y) - fetchBayer(x+2, y));
+        // Red at Blue
+        r = 0.25 * (fetchBayer(x-1, y-1) + fetchBayer(x+1, y-1) + fetchBayer(x-1, y+1) + fetchBayer(x+1, y+1))
+          + 0.125 * (4.0 * p00 - fetchBayer(x, y-2) - fetchBayer(x, y+2) - fetchBayer(x-2, y) - fetchBayer(x+2, y));
+    }
+    else if (phaseY == 0 && phaseX == 1) {
+        // Green on Red row (Gr)
+        g = p00;
+        // Red has horizontal neighbors
+        r = 0.5 * (fetchBayer(x-1, y) + fetchBayer(x+1, y))
+          + 0.125 * (2.0 * p00 - fetchBayer(x-2, y) - fetchBayer(x+2, y) - fetchBayer(x, y-1) - fetchBayer(x, y+1));
+        // Blue has vertical neighbors
+        b = 0.5 * (fetchBayer(x, y-1) + fetchBayer(x, y+1))
+          + 0.125 * (2.0 * p00 - fetchBayer(x, y-2) - fetchBayer(x, y+2) - fetchBayer(x-1, y) - fetchBayer(x+1, y));
+    }
+    else {
+        // Green on Blue row (Gb)
+        g = p00;
+        // Red has vertical neighbors
+        r = 0.5 * (fetchBayer(x, y-1) + fetchBayer(x, y+1))
+          + 0.125 * (2.0 * p00 - fetchBayer(x, y-2) - fetchBayer(x, y+2) - fetchBayer(x-1, y) - fetchBayer(x+1, y));
+        // Blue has horizontal neighbors
+        b = 0.5 * (fetchBayer(x-1, y) + fetchBayer(x+1, y))
+          + 0.125 * (2.0 * p00 - fetchBayer(x-2, y) - fetchBayer(x+2, y) - fetchBayer(x, y-1) - fetchBayer(x, y+1));
+    }
+
+    return vec3(r, g, b);
+}
+
+void main() {
+    ivec2 outCoord = ivec2(gl_GlobalInvocationID.xy);
+    if (outCoord.x >= ubo.outputDimensions.x || outCoord.y >= ubo.outputDimensions.y) {
+        return;
+    }
+
+    // Remap output coordinate to sensor coordinate based on crop mode
+    int srcX = 0;
+    int srcY = 0;
+
+    if (ubo.cropMode == 0) {
+        // 16:9 UHD center crop from 4:3 sensor
+        // e.g. 3840x2160 from 4080x3072: offset Y by (3072 - (4080 * 9 / 16)) / 2
+        int activeCropHeight = (ubo.rawDimensions.x * 9) / 16;
+        int yOffset = (ubo.rawDimensions.y - activeCropHeight) / 2;
+        srcX = (outCoord.x * ubo.rawDimensions.x) / ubo.outputDimensions.x;
+        srcY = yOffset + (outCoord.y * activeCropHeight) / ubo.outputDimensions.y;
+    } else {
+        // 4:3 Open-Gate (Full sensor binned array)
+        srcX = (outCoord.x * ubo.rawDimensions.x) / ubo.outputDimensions.x;
+        srcY = (outCoord.y * ubo.rawDimensions.y) / ubo.outputDimensions.y;
+    }
+
+    // 1. Debayer with Malvar-He-Cutler 5x5
+    vec3 rawRgb = demosaicMHC(srcX, srcY);
+
+    // 2. Apply White Balance multipliers (Kelvin & Tint gains)
+    vec3 wbRgb = rawRgb * ubo.wbGains.rgb;
+
+    // 3. Sensor RGB -> CIE XYZ (D65) -> Rec.2020 Linear
+    vec3 xyz = ubo.sensorToXyzMatrix * wbRgb;
+    vec3 rec2020Linear = max(vec3(0.0), ubo.xyzToRec2020Matrix * xyz);
+
+    // 4. Transfer Function: R-Log (Scene-Linear to Log)
+    vec3 rLog = linearToRLog(rec2020Linear);
+
+    // 5. Write pure 10-bit R-Log to AMediaCodec HEVC Surface
+    imageStore(outputCodecImage, outCoord, vec4(rLog, 1.0));
+
+    // 6. Viewfinder Monitoring Stream
+    vec3 vfColor = rLog;
+    float luma = dot(rLog, vec3(0.2627, 0.6780, 0.0593)); // Rec.2020 luma
+
+    if (ubo.monitoringMode == 1) {
+        // Viewfinder Rec.709 Preview LUT
+        vfColor = rLogToRec709Preview(rLog);
+    } else if (ubo.monitoringMode == 2) {
+        // False Color (IRE scale)
+        vfColor = getFalseColor(luma);
+    } else if (ubo.monitoringMode == 3) {
+        // Focus Peaking (Sobel edge sharpness)
+        float edge = abs(luma - dot(demosaicMHC(srcX + 1, srcY), vec3(0.2627, 0.6780, 0.0593)));
+        if (edge > ubo.peakingThreshold) {
+            vfColor = vec3(0.0, 1.0, 0.2); // Bright cinema green focus peaking
+        } else {
+            vfColor = rLogToRec709Preview(rLog);
+        }
+    } else if (ubo.monitoringMode == 4) {
+        // Zebra stripes on highlights exceeding threshold
+        if (luma >= ubo.zebraThreshold) {
+            bool zebra = ((outCoord.x + outCoord.y) / 8) % 2 == 0;
+            vfColor = zebra ? vec3(0.1, 0.1, 0.1) : vec3(1.0, 1.0, 1.0);
+        } else {
+            vfColor = rLogToRec709Preview(rLog);
+        }
+    }
+
+    imageStore(outputViewfinderImage, outCoord, vec4(vfColor, 1.0));
+}
