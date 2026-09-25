@@ -1,8 +1,8 @@
-# Project RawEdge (R-Camera)
+# Vesper Cine
 
-**Project RawEdge** is an open-source, cinema-grade camera application engineered for modern Google Pixel devices (Pixel 8 / 9 / 10 series). It completely bypasses Google's hardware Image Signal Processor (ISP) computational photography pipeline—eliminating aggressive temporal smoothing, artificial edge-sharpening, multi-frame synthetic HDR tone-mapping, and blotchy low-light watercolor smearing.
+**Vesper Cine** is an open-source, cinema-grade camera application engineered for modern Google Pixel devices (Pixel 8 / 9 / 10 series). It completely bypasses OEM computational photography and hardware Image Signal Processor (ISP) processing—eliminating aggressive temporal smoothing, artificial edge-sharpening, multi-frame synthetic HDR tone-mapping, and blotchy low-light watercolor smearing.
 
-Instead, the application accesses raw uncompressed sensor data directly, applies a dedicated GPU debayering and cinema color science pipeline, and records 10-bit master footage with the **R-Log transfer curve** in wide-gamut Rec.2020 color space.
+Instead, Vesper Cine accesses raw uncompressed sensor data directly, applies a dedicated real-time GPU debayering and cinema color science pipeline, and records 10-bit master footage with the **R-Log transfer curve** in wide-gamut Rec.2020 color space.
 
 ---
 
