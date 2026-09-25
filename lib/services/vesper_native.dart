@@ -1,0 +1,252 @@
+import 'dart:convert';
+import 'dart:ffi';
+import 'dart:io';
+
+import 'package:ffi/ffi.dart';
+import 'package:flutter/services.dart';
+
+class DetectedCamera {
+  final String id;
+  final int facing;
+  final bool supportsRaw10;
+  final int rawWidth;
+  final int rawHeight;
+  final double maxFps;
+
+  DetectedCamera.fromJson(Map<String, dynamic> json)
+      : id = json['id'] as String,
+        facing = json['facing'] as int,
+        supportsRaw10 = json['supportsRaw10'] as bool,
+        rawWidth = json['rawWidth'] as int,
+        rawHeight = json['rawHeight'] as int,
+        maxFps = (json['maxFps'] as num).toDouble();
+}
+
+/// Snapshot of the native pipeline, polled by the UI.
+class EngineStatus {
+  final bool streaming;
+  final double fps;
+  final int cameraDrops;
+  final double kelvin;
+  final double tint;
+  final bool recording;
+  final int durationMs;
+  final int framesEncoded;
+  final int framesDropped;
+  final int thermal; // AThermalStatus: 0 none, 1 light, 2 moderate, 3 severe
+  final bool audio;
+  final String codec;
+  final String stopReason;
+
+  EngineStatus.fromJson(Map<String, dynamic> j)
+      : streaming = j['streaming'] as bool,
+        fps = (j['fps'] as num).toDouble(),
+        cameraDrops = j['cameraDrops'] as int,
+        kelvin = (j['kelvin'] as num).toDouble(),
+        tint = (j['tint'] as num).toDouble(),
+        recording = j['recording'] as bool,
+        durationMs = j['durationMs'] as int,
+        framesEncoded = j['framesEncoded'] as int,
+        framesDropped = j['framesDropped'] as int,
+        thermal = j['thermal'] as int,
+        audio = j['audio'] as bool,
+        codec = j['codec'] as String,
+        stopReason = j['stopReason'] as String;
+}
+
+class RecordingFile {
+  final int fd;
+  final String uri;
+  final String name;
+  RecordingFile(this.fd, this.uri, this.name);
+}
+
+/// Dart side of the Vesper engine (android/app/src/main/cpp/native_bridge.cpp).
+class VesperNative {
+  static final VesperNative instance = VesperNative._();
+  static const MethodChannel _channel = MethodChannel('com.vesper.cine/native');
+
+  late final DynamicLibrary _lib;
+  bool _loaded = false;
+  bool get isLoaded => _loaded;
+
+  late final int Function() _init;
+  late final int Function(Pointer<Utf8>, int) _enumerate;
+  late final int Function(Pointer<Utf8>) _open;
+  late final int Function() _startStream;
+  late final int Function() _stopStream;
+  late final void Function(double) _setFrameRate;
+  late final void Function(double, int) _setShutterAngle;
+  late final void Function(int, int) _setKelvinTint;
+  late final int Function(Pointer<Double>, Pointer<Double>) _lockWb;
+  late final void Function(int) _setOis;
+  late final void Function(double) _setFocus;
+  late final double Function() _minFocus;
+  late final void Function(int) _setCropMode;
+  late final void Function(int) _setResolution;
+  late final void Function(Pointer<Int32>, Pointer<Int32>) _outputSize;
+  late final void Function(int) _setMonitoringMode;
+  late final void Function(double) _setZebra;
+  late final void Function(double) _setHeadroom;
+  late final int Function(int, int, int) _startRecording;
+  late final void Function() _stopRecording;
+  late final int Function(Pointer<Utf8>, int) _status;
+  late final void Function() _close;
+
+  VesperNative._() {
+    if (!Platform.isAndroid) return;
+    try {
+      _lib = DynamicLibrary.open('libvesper_engine.so');
+      _init = _lib.lookupFunction<Int32 Function(), int Function()>('vesper_init');
+      _enumerate = _lib.lookupFunction<Int32 Function(Pointer<Utf8>, Int32), int Function(Pointer<Utf8>, int)>(
+          'vesper_enumerate_cameras');
+      _open = _lib.lookupFunction<Int32 Function(Pointer<Utf8>), int Function(Pointer<Utf8>)>('vesper_open_camera');
+      _startStream = _lib.lookupFunction<Int32 Function(), int Function()>('vesper_start_stream');
+      _stopStream = _lib.lookupFunction<Int32 Function(), int Function()>('vesper_stop_stream');
+      _setFrameRate = _lib.lookupFunction<Void Function(Double), void Function(double)>('vesper_set_frame_rate');
+      _setShutterAngle =
+          _lib.lookupFunction<Void Function(Double, Int32), void Function(double, int)>('vesper_set_shutter_angle');
+      _setKelvinTint = _lib.lookupFunction<Void Function(Int32, Int32), void Function(int, int)>('vesper_set_kelvin_tint');
+      _lockWb = _lib.lookupFunction<Int32 Function(Pointer<Double>, Pointer<Double>),
+          int Function(Pointer<Double>, Pointer<Double>)>('vesper_lock_white_balance');
+      _setOis = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_ois');
+      _setFocus = _lib.lookupFunction<Void Function(Float), void Function(double)>('vesper_set_focus');
+      _minFocus = _lib.lookupFunction<Float Function(), double Function()>('vesper_get_min_focus');
+      _setCropMode = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_crop_mode');
+      _setResolution = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_resolution');
+      _outputSize = _lib.lookupFunction<Void Function(Pointer<Int32>, Pointer<Int32>),
+          void Function(Pointer<Int32>, Pointer<Int32>)>('vesper_get_output_size');
+      _setMonitoringMode = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_monitoring_mode');
+      _setZebra = _lib.lookupFunction<Void Function(Float), void Function(double)>('vesper_set_zebra_threshold');
+      _setHeadroom = _lib.lookupFunction<Void Function(Float), void Function(double)>('vesper_set_highlight_headroom');
+      _startRecording = _lib.lookupFunction<Int32 Function(Int32, Int32, Int32), int Function(int, int, int)>(
+          'vesper_start_recording');
+      _stopRecording = _lib.lookupFunction<Void Function(), void Function()>('vesper_stop_recording');
+      _status = _lib.lookupFunction<Int32 Function(Pointer<Utf8>, Int32), int Function(Pointer<Utf8>, int)>(
+          'vesper_get_status');
+      _close = _lib.lookupFunction<Void Function(), void Function()>('vesper_close');
+      _loaded = true;
+    } catch (_) {
+      _loaded = false;
+    }
+  }
+
+  bool initialize() => _loaded && _init() == 0;
+
+  String? _readJson(int Function(Pointer<Utf8>, int) fn) {
+    const maxLen = 8192;
+    final buf = calloc<Uint8>(maxLen).cast<Utf8>();
+    try {
+      return fn(buf, maxLen) > 0 ? buf.toDartString() : null;
+    } finally {
+      calloc.free(buf);
+    }
+  }
+
+  List<DetectedCamera> enumerateCameras() {
+    if (!_loaded) return [];
+    final json = _readJson(_enumerate);
+    if (json == null) return [];
+    return (jsonDecode(json) as List).map((e) => DetectedCamera.fromJson(e as Map<String, dynamic>)).toList();
+  }
+
+  bool openCamera(String id) {
+    if (!_loaded) return false;
+    final p = id.toNativeUtf8();
+    try {
+      return _open(p) == 0;
+    } finally {
+      calloc.free(p);
+    }
+  }
+
+  bool startStream() => _loaded && _startStream() == 0;
+  void stopStream() => _loaded ? _stopStream() : null;
+  void setFrameRate(double fps) => _loaded ? _setFrameRate(fps) : null;
+  void setShutterAngle(double angle, int iso) => _loaded ? _setShutterAngle(angle, iso) : null;
+  void setKelvinTint(int kelvin, int tint) => _loaded ? _setKelvinTint(kelvin, tint) : null;
+  void setOis(bool on) => _loaded ? _setOis(on ? 1 : 0) : null;
+  void setFocus(double diopters) => _loaded ? _setFocus(diopters) : null;
+  double get minFocusDiopters => _loaded ? _minFocus() : 0;
+  void setCropMode(int mode) => _loaded ? _setCropMode(mode) : null;
+  void setResolution(int res) => _loaded ? _setResolution(res) : null;
+  void setMonitoringMode(int mode) => _loaded ? _setMonitoringMode(mode) : null;
+  void setZebraThreshold(double t) => _loaded ? _setZebra(t) : null;
+
+  /// Stops of highlight headroom above 18% grey before sensor clip (3-6.3).
+  void setHighlightHeadroom(double stops) => _loaded ? _setHeadroom(stops) : null;
+
+  /// Meters the raw frame centre and sets white balance so it renders
+  /// neutral. Returns the equivalent (kelvin, tint), or null if the centre is
+  /// too dark or no frame has arrived yet.
+  (double, double)? lockWhiteBalance() {
+    if (!_loaded) return null;
+    final k = calloc<Double>();
+    final t = calloc<Double>();
+    try {
+      return _lockWb(k, t) == 0 ? (k.value, t.value) : null;
+    } finally {
+      calloc.free(k);
+      calloc.free(t);
+    }
+  }
+
+  (int, int) outputSize() {
+    if (!_loaded) return (1920, 1080);
+    final w = calloc<Int32>();
+    final h = calloc<Int32>();
+    try {
+      _outputSize(w, h);
+      return (w.value, h.value);
+    } finally {
+      calloc.free(w);
+      calloc.free(h);
+    }
+  }
+
+  EngineStatus? status() {
+    if (!_loaded) return null;
+    final json = _readJson(_status);
+    return json == null ? null : EngineStatus.fromJson(jsonDecode(json) as Map<String, dynamic>);
+  }
+
+  /// Creates the output file in Movies/Vesper Cine and starts recording.
+  /// codec: 0 = HEVC Main10, 1 = AV1 Main10 (falls back to HEVC if absent).
+  Future<RecordingFile?> startRecording({int codec = 0, bool audio = true}) async {
+    if (!_loaded) return null;
+    final m = await _channel.invokeMapMethod<String, dynamic>('createRecordingFile');
+    if (m == null) return null;
+    final file = RecordingFile(m['fd'] as int, m['uri'] as String, m['name'] as String);
+    if (_startRecording(file.fd, codec, audio ? 1 : 0) != 0) {
+      await finalizeRecording(file, keep: false);
+      return null;
+    }
+    return file;
+  }
+
+  void stopRecording() => _loaded ? _stopRecording() : null;
+
+  Future<void> finalizeRecording(RecordingFile file, {bool keep = true}) =>
+      _channel.invokeMethod('finalizeRecordingFile', {'uri': file.uri, 'keep': keep});
+
+  Future<int?> createViewfinderTexture(int width, int height) async {
+    if (!Platform.isAndroid) return null;
+    try {
+      return await _channel.invokeMethod<int>('createTexture', {'width': width, 'height': height});
+    } on PlatformException {
+      return null;
+    }
+  }
+
+  Future<void> resizeViewfinderTexture(int width, int height) async {
+    if (!Platform.isAndroid) return;
+    await _channel.invokeMethod('resizeTexture', {'width': width, 'height': height});
+  }
+
+  Future<void> destroyViewfinderTexture() async {
+    if (!Platform.isAndroid) return;
+    await _channel.invokeMethod('destroyTexture');
+  }
+
+  void close() => _loaded ? _close() : null;
+}

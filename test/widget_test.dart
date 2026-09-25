@@ -1,9 +1,9 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:r_camera/main.dart';
+import 'package:vesper_cine/main.dart';
 
 void main() {
-  testWidgets('R-Camera app smoke test', (WidgetTester tester) async {
-    await tester.pumpWidget(const RawEdgeApp());
-    expect(find.text('R-LOG'), findsOneWidget);
+  testWidgets('Vesper Cine boots to the camera HUD', (WidgetTester tester) async {
+    await tester.pumpWidget(const VesperCineApp());
+    expect(find.text('APPLE LOG · 2020'), findsOneWidget);
   });
 }

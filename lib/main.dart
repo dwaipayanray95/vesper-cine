@@ -3,11 +3,11 @@ import 'ui/camera_screen.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(const RawEdgeApp());
+  runApp(const VesperCineApp());
 }
 
-class RawEdgeApp extends StatelessWidget {
-  const RawEdgeApp({super.key});
+class VesperCineApp extends StatelessWidget {
+  const VesperCineApp({super.key});
 
   @override
   Widget build(BuildContext context) {

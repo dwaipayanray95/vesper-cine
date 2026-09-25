@@ -1,0 +1,107 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Pass 1: packed RAW10 -> quad image.
+//
+// Each 2x2 Bayer quad becomes one RGB texel (R, mean(Gr, Gb), B): no
+// demosaic interpolation, no zipper/maze artefacts, and averaging the two
+// greens removes Gr/Gb split. The quad image is ~2040x1536 for the Pixel's
+// binned 4080x3072 readout — more than enough for 1080p, and the render pass
+// resamples it with per-channel sub-pixel offsets so R and B stay registered.
+//
+// Also applied here, at sensor sites and before anything is mixed:
+//   black level (signed — negative noise is kept so shadows don't lift),
+//   lens shading gain map (vignetting + colour shading),
+//   white balance, and highlight clipping to the lowest channel's saturation.
+layout(local_size_x = 16, local_size_y = 8) in;
+
+#include "frame_params.glsl"
+
+layout(std430, set = 0, binding = 1) readonly buffer RawBuffer { uint words[]; } raw;
+layout(std430, set = 0, binding = 2) readonly buffer Shading { float gains[]; } shading; // [row][col][R, Geven, Godd, B]
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D quadImage;
+
+uint rawByte(uint offset) {
+    return (raw.words[offset >> 2] >> ((offset & 3u) * 8u)) & 0xFFu;
+}
+
+// 0=R 1=Gr 2=Gb 3=B for raw pixel parity (px, py).
+int cfaSite(int px, int py) {
+    int bit = (py << 1) | px;
+    int p = P.rawInfo.w;
+    if (p == 0) return bit;             // RGGB
+    if (p == 1) return bit ^ 1;         // GRBG
+    if (p == 2) return bit ^ 2;         // GBRG
+    return 3 - bit;                     // BGGR
+}
+
+vec4 shadingAt(vec2 rawPos) {
+    int cols = P.quadInfo.z, rows = P.quadInfo.w;
+    if (cols < 2 || rows < 2) return vec4(1.0);
+    vec2 g = clamp(rawPos / vec2(P.rawInfo.xy) * vec2(cols - 1, rows - 1), vec2(0.0), vec2(cols - 1, rows - 1));
+    ivec2 i0 = min(ivec2(g), ivec2(cols - 2, rows - 2));
+    vec2 f = g - vec2(i0);
+    vec4 s[4];
+    for (int k = 0; k < 4; ++k) {
+        int idx = ((i0.y + (k >> 1)) * cols + (i0.x + (k & 1))) * 4;
+        s[k] = vec4(shading.gains[idx], shading.gains[idx + 1], shading.gains[idx + 2], shading.gains[idx + 3]);
+    }
+    return mix(mix(s[0], s[1], f.x), mix(s[2], s[3], f.x), f.y);
+}
+
+void main() {
+    int group = int(gl_GlobalInvocationID.x);   // one RAW10 5-byte group = 4 px = 2 quads
+    int qy = int(gl_GlobalInvocationID.y);
+    if (group * 4 >= P.rawInfo.x || qy >= P.quadInfo.y) return;
+
+    float white = P.wbGains.w;
+    float dn[2][4];
+    bool sat[2][4];
+    for (int row = 0; row < 2; ++row) {
+        uint base = uint((qy * 2 + row) * P.rawInfo.z + group * 5);
+        uint lsb = rawByte(base + 4u);
+        for (int i = 0; i < 4; ++i) {
+            float v = float((rawByte(base + uint(i)) << 2) | ((lsb >> (2 * i)) & 3u));
+            dn[row][i] = v;
+            sat[row][i] = v >= white - 1.0;
+        }
+    }
+
+    for (int q = 0; q < 2; ++q) {
+        int qx = group * 2 + q;
+        if (qx >= P.quadInfo.x) break;
+        vec4 sh = shadingAt(vec2(qx * 2 + 1, qy * 2 + 1));
+
+        vec3 sum = vec3(0.0);
+        float greenShadeMin = 1e9;
+        bool clipped = false;
+        for (int k = 0; k < 4; ++k) {
+            int px = k & 1, py = k >> 1;
+            int site = cfaSite(px, py);
+            float bl = P.blackLevel[site];
+            float v = (dn[py][q * 2 + px] - bl) / (white - bl);
+            clipped = clipped || sat[py][q * 2 + px];
+            if (site == 0) {
+                sum.r = v * sh.x;
+            } else if (site == 3) {
+                sum.b = v * sh.w;
+            } else {
+                // Shading map greens are indexed by row parity, not by Gr/Gb.
+                float g = ((qy * 2 + py) & 1) == 0 ? sh.y : sh.z;
+                sum.g += 0.5 * v * g;
+                greenShadeMin = min(greenShadeMin, g);
+            }
+        }
+        vec3 rgb = sum * P.wbGains.rgb;
+
+        // Every channel saturates at its own (shading * WB) gain. Clip all of
+        // them to the lowest so blown highlights go neutral instead of magenta,
+        // then fade chroma over the last ~0.3 stop so the transition is smooth.
+        float clipLevel = min(min(sh.x * P.wbGains.r, sh.w * P.wbGains.b), greenShadeMin * P.wbGains.g);
+        if (clipped) rgb = min(rgb, vec3(clipLevel));
+        float m = max(rgb.r, max(rgb.g, rgb.b)) / clipLevel;
+        float t = smoothstep(0.8, 1.0, m);
+        rgb = mix(rgb, vec3(dot(rgb, vec3(0.25, 0.5, 0.25))), t);
+
+        imageStore(quadImage, ivec2(qx, qy), vec4(rgb, clipped ? 1.0 : 0.0));
+    }
+}

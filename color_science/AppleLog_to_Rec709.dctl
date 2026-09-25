@@ -1,0 +1,27 @@
+// Vesper Cine: Apple Log (Rec.2020) -> Rec.709 Gamma 2.4 display transform.
+// Identical maths to the phone viewfinder (render.comp displayRec709) and
+// AppleLog_to_Rec709_Gamma24.cube. Use on a node after "Input: Apple Log".
+
+__DEVICE__ float appleLogDecode(float y) {
+    const float R0 = -0.05641088f, C = 47.28711236f;
+    const float BETA = 0.00964052f, GAMMA = 0.08550479f, DELTA = 0.69336945f;
+    const float YT = 0.2085553f;
+    if (y >= YT) return _exp2f((y - DELTA) / GAMMA) - BETA;
+    if (y > 0.0f) return R0 + _sqrtf(y / C);
+    return R0;
+}
+
+__DEVICE__ float tonemap(float x) {
+    x = _fmaxf(x, 0.0f) * 0.8f;
+    return _saturatef((x * (2.51f * x + 0.03f)) / (x * (2.43f * x + 0.59f) + 0.14f));
+}
+
+__DEVICE__ float3 transform(int p_Width, int p_Height, int p_X, int p_Y, float p_R, float p_G, float p_B) {
+    float r = appleLogDecode(p_R), g = appleLogDecode(p_G), b = appleLogDecode(p_B);
+    float r709 =  1.6605f * r - 0.5876f * g - 0.0728f * b;
+    float g709 = -0.1246f * r + 1.1329f * g - 0.0083f * b;
+    float b709 = -0.0182f * r - 0.1006f * g + 1.1187f * b;
+    return make_float3(_powf(tonemap(r709), 1.0f / 2.4f),
+                       _powf(tonemap(g709), 1.0f / 2.4f),
+                       _powf(tonemap(b709), 1.0f / 2.4f));
+}

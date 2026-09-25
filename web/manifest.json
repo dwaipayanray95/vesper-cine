@@ -1,6 +1,6 @@
 {
-    "name": "r_camera",
-    "short_name": "r_camera",
+    "name": "vesper_cine",
+    "short_name": "vesper_cine",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",

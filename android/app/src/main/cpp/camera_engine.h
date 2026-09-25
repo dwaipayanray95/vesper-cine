@@ -1,160 +1,167 @@
 #pragma once
 
+#include "color_science.h"
+
 #include <camera/NdkCameraManager.h>
 #include <camera/NdkCameraDevice.h>
 #include <camera/NdkCameraCaptureSession.h>
 #include <camera/NdkCameraMetadata.h>
 #include <media/NdkImageReader.h>
 #include <media/NdkImage.h>
-#include <android/native_window.h>
 #include <android/hardware_buffer.h>
+#include <android/native_window.h>
 #include <android/log.h>
 
-#include <string>
-#include <vector>
-#include <memory>
+#include <atomic>
+#include <condition_variable>
+#include <cstdint>
 #include <functional>
 #include <mutex>
-#include <atomic>
-#include <chrono>
+#include <string>
+#include <thread>
+#include <vector>
 
-#define TAG "RCamera_Engine"
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
-#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, TAG, __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
+#define CAM_TAG "Vesper_Camera"
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, CAM_TAG, __VA_ARGS__)
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, CAM_TAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, CAM_TAG, __VA_ARGS__)
 
-namespace rcamera {
+namespace vesper {
 
-struct SensorCalibrationMetadata {
-    int32_t whiteLevel = 1023;
-    float blackLevel[4] = { 64.0f, 64.0f, 64.0f, 64.0f }; // R, Gr, Gb, B
-    float colorTransform1[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
-    float calibrationTransform1[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
-    float forwardMatrix1[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
-    // Second DNG calibration illuminant/matrix set. Most sensors are factory
-    // calibrated at TWO reference illuminants (typically Standard Light A /
-    // ~2856K tungsten, and D65 / ~6504K daylight) precisely because a single
-    // matrix doesn't hold up across very different light spectra — under
-    // in-between or narrow-spectrum lighting (LED, fluorescent) a single
-    // fixed ForwardMatrix1 measurably mis-renders color (a green/yellow
-    // cast is a classic symptom, since many LED/fluorescent sources have a
-    // sharp green emission spike a single daylight- or tungsten-tuned
-    // matrix doesn't account for). Real raw pipelines (DNG SDK, libraw,
-    // AOSP camera post-processing) interpolate between both matrices by the
-    // scene's estimated color temperature; see native_bridge.cpp's
-    // interpolateForwardMatrix().
-    float colorTransform2[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
-    float calibrationTransform2[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
-    float forwardMatrix2[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
-    bool haveForwardMatrix2 = false;
-    // ACAMERA_SENSOR_REFERENCE_ILLUMINANT{1,2}: TIFF/EP LightSource enum
-    // (17=StandardLightA/tungsten~2856K, 21=D65~6504K, etc — see
-    // referenceIlluminantToKelvin() in native_bridge.cpp for the full map).
-    int32_t referenceIlluminant1 = 17; // default: Standard Light A
-    int32_t referenceIlluminant2 = 21; // default: D65
-    int32_t activeArrayWidth = 4080;
-    int32_t activeArrayHeight = 3072;
-    int32_t cfaPattern = 0; // 0=RGGB, 1=GRBG, 2=GBRG, 3=BGGR
-    int32_t sensorOrientation = 90; // ACAMERA_SENSOR_ORIENTATION, degrees clockwise
+// Logical CFA channel (0=R, 1=Gr, 2=Gb, 3=B) at raw parity (px, py) for
+// ACAMERA_SENSOR_INFO_COLOR_FILTER_ARRANGEMENT 0=RGGB 1=GRBG 2=GBRG 3=BGGR.
+// Mirrors cfaSite() in shaders/unpack.comp.
+inline int cfaSite(int32_t cfa, int px, int py) {
+    int bit = ((py & 1) << 1) | (px & 1);
+    switch (cfa) {
+        case 0: return bit;
+        case 1: return bit ^ 1;
+        case 2: return bit ^ 2;
+        default: return 3 - bit;
+    }
+}
+
+struct RawMode {
+    int32_t width = 0, height = 0;
+    int64_t minFrameDurationNs = 0;
+    double maxFps() const { return minFrameDurationNs > 0 ? 1e9 / static_cast<double>(minFrameDurationNs) : 30.0; }
 };
+
+// Static per-camera facts (CameraCharacteristics).
+struct SensorInfo {
+    DngCalibration calibration;
+    int32_t whiteLevel = 1023;
+    float blackLevel[4] = {64, 64, 64, 64}; // logical R, Gr, Gb, B
+    int32_t cfa = 0;
+    int32_t orientation = 90;
+    int32_t activeWidth = 0, activeHeight = 0;
+    int32_t shadingCols = 0, shadingRows = 0;
+    bool lensShadingApplied = false;   // raw already shading-corrected by the HAL
+    bool timestampRealtime = false;    // SENSOR_INFO_TIMESTAMP_SOURCE == REALTIME (CLOCK_BOOTTIME)
+    int64_t minExposureNs = 1000, maxExposureNs = 1'000'000'000;
+    int32_t minIso = 50, maxIso = 3200;
+    float minFocusDiopters = 0.0f;     // 0 = fixed focus
+    std::vector<RawMode> rawModes;     // RAW10 output sizes, largest first
+};
+
+// Per-frame facts (CaptureResult), matched to the image by sensor timestamp.
+struct CaptureMetadata {
+    int64_t timestampNs = 0;
+    float blackLevel[4] = {64, 64, 64, 64}; // logical R, Gr, Gb, B
+    float whiteLevel = 1023.0f;
+    std::vector<float> shadingMap;          // rows x cols x [R, Geven, Godd, B]
+    int32_t shadingCols = 0, shadingRows = 0;
+    Vec3 neutral{0, 0, 0};                  // SENSOR_NEUTRAL_COLOR_POINT (0 if absent)
+    int64_t exposureNs = 0;
+    int32_t iso = 0;
+};
+
+struct RawFrame {
+    const uint8_t* data = nullptr;
+    size_t size = 0;
+    int32_t rowStride = 0;
+    int32_t width = 0, height = 0;
+    int64_t timestampNs = 0;
+    const CaptureMetadata* meta = nullptr; // never null during the callback
+};
+
+using FrameCallback = std::function<void(const RawFrame&)>;
 
 struct CameraDeviceInfo {
-    std::string cameraId;
+    std::string id;
+    int32_t facing = 0;
     int32_t hardwareLevel = 0;
     bool supportsRaw10 = false;
-    int32_t rawWidth = 0;
-    int32_t rawHeight = 0;
+    RawMode largestRaw;
 };
-
-// Delivers the RAW10 plane's raw bytes directly (CPU-mapped via AImage_getPlaneData),
-// valid only for the duration of the call. This device's GPU driver cannot import a
-// RAW10 AHardwareBuffer as a sampled Vulkan image (see VulkanComputeEngine), so the
-// pipeline reads the packed bytes on the CPU and uploads them as a storage buffer.
-using FrameCallback = std::function<void(const uint8_t* data, size_t dataLength, int32_t rowStrideBytes, int64_t timestampNs)>;
-
-// Delivers the real per-frame black level [R, Gr, Gb, B] read from each
-// capture's own CaptureResult. ACAMERA_SENSOR_DYNAMIC_BLACK_LEVEL is only
-// ever valid there (never on static CameraCharacteristics, which is what
-// querySensorCalibration() has to fall back to at camera-open time), so this
-// is the only way to get a real, non-default value on hardware that doesn't
-// populate ACAMERA_SENSOR_BLACK_LEVEL_PATTERN either.
-using BlackLevelCallback = std::function<void(const float blackLevel[4])>;
 
 class CameraEngine {
 public:
-    CameraEngine();
+    CameraEngine() = default;
     ~CameraEngine();
 
     bool initialize();
     std::vector<CameraDeviceInfo> enumerateCameras();
-    bool openCamera(const std::string& cameraId);
+    bool openCamera(const std::string& id);
     void closeCamera();
+    const SensorInfo& sensorInfo() const { return info_; }
 
-    bool startCaptureSession(int32_t width, int32_t height, FrameCallback callback);
-    void stopCaptureSession();
+    // `callback` runs on the image reader's thread, one frame at a time.
+    bool startCapture(int32_t width, int32_t height, FrameCallback callback);
+    void stopCapture();
+    bool isStreaming() const { return streaming_.load(); }
 
-    // Set once; invoked from the capture-result callback thread whenever a
-    // frame's real ACAMERA_SENSOR_DYNAMIC_BLACK_LEVEL is available.
-    void setBlackLevelCallback(BlackLevelCallback callback) { blackLevelCallback_ = std::move(callback); }
-
-    // Manual controls (Bypassing ISP auto-algorithms)
-    void setExposure(int64_t exposureTimeNs, int32_t iso);
-    void setShutterAngle(float shutterAngleDeg, float fps, int32_t iso);
-    void setWhitebalanceGains(float rGain, float gGain, float bGain);
-    void setOpticalStabilization(bool enableOis);
+    // Manual sensor controls. Exposure is clamped to the frame duration.
+    void setFrameRate(double fps);
+    void setExposure(int64_t exposureNs, int32_t iso);
+    void setOpticalStabilization(bool enable);
     void setFocusDistance(float diopters);
+    double frameRate() const { return fps_; }
 
-    const SensorCalibrationMetadata& getCalibrationMetadata() const { return calibrationMetadata_; }
-    bool isStreaming() const { return isStreaming_.load(); }
-
-    // Internal NDK callbacks
-    void onDeviceDisconnected(ACameraDevice* device);
-    void onDeviceError(ACameraDevice* device, int error);
-    void onSessionActive(ACameraCaptureSession* session);
-    void onSessionClosed(ACameraCaptureSession* session);
-    void onSessionReady(ACameraCaptureSession* session);
+    // NDK callback trampolines
+    void onDeviceError(int error);
     void onImageAvailable(AImageReader* reader);
-    void onCaptureCompleted(ACameraCaptureSession* session, ACaptureRequest* request, const ACameraMetadata* result);
+    void onCaptureCompleted(const ACameraMetadata* result);
 
 private:
-    void querySensorCalibration(ACameraMetadata* metadata);
-    bool configureCaptureRequest();
-    void attemptDeviceErrorRecovery();
-    // Resubmits captureRequest_ as the repeating request, always with the
-    // capture-result callback attached (needed for real per-frame black
-    // level — see BlackLevelCallback) since setRepeatingRequest's callback
-    // applies only to that one call, not persistently to the session.
-    camera_status_t submitRepeatingRequest();
+    void querySensorInfo(const ACameraMetadata* chars);
+    bool buildRequestLocked();
+    void submitLocked();
+    void stopCaptureLocked();
+    void scheduleRecovery();
 
-    ACameraManager* cameraManager_ = nullptr;
-    ACameraDevice* cameraDevice_ = nullptr;
-    ACameraCaptureSession* captureSession_ = nullptr;
-    ACaptureSessionOutputContainer* outputContainer_ = nullptr;
-    ACaptureSessionOutput* sessionOutput_ = nullptr;
-    ACaptureRequest* captureRequest_ = nullptr;
-    ANativeWindow* imageReaderWindow_ = nullptr;
-    AImageReader* imageReader_ = nullptr;
+    ACameraManager* manager_ = nullptr;
+    ACameraDevice* device_ = nullptr;
+    ACameraCaptureSession* session_ = nullptr;
+    ACaptureSessionOutputContainer* outputs_ = nullptr;
+    ACaptureSessionOutput* output_ = nullptr;
+    ACameraOutputTarget* target_ = nullptr;
+    ACaptureRequest* request_ = nullptr;
+    AImageReader* reader_ = nullptr;
+    ANativeWindow* readerWindow_ = nullptr; // owned by reader_
 
-    std::string activeCameraId_;
-    SensorCalibrationMetadata calibrationMetadata_;
-    FrameCallback frameCallback_;
-    BlackLevelCallback blackLevelCallback_;
-    int32_t lastStreamWidth_ = 0;
-    int32_t lastStreamHeight_ = 0;
-    int64_t lastRecoveryAttemptMs_ = 0;
+    std::string cameraId_;
+    SensorInfo info_;
+    int32_t streamW_ = 0, streamH_ = 0;
+    FrameCallback callback_;
 
-    std::mutex engineMutex_;
-    std::atomic<bool> isStreaming_{false};
-    std::atomic<bool> isInitialized_{false};
+    std::mutex mutex_;       // device/session/request state
+    std::mutex frameMutex_;  // held for the duration of each frame callback
+    std::atomic<bool> streaming_{false};
 
-    // Manual controls state
-    int64_t currentExposureNs_ = 1000000000LL / 48LL; // 1/48s default
-    int32_t currentIso_ = 100;
-    float currentRGain_ = 1.8f;
-    float currentGGain_ = 1.0f;
-    float currentBGain_ = 1.9f;
-    bool oisEnabled_ = true;
-    float focusDistance_ = 0.0f; // infinity/hyperfocal
+    std::mutex metaMutex_;
+    std::vector<CaptureMetadata> metaRing_ = std::vector<CaptureMetadata>(8);
+    size_t metaNext_ = 0;
+    CaptureMetadata frameMeta_; // scratch, reader thread only
+
+    double fps_ = 24.0;
+    int64_t exposureNs_ = 1'000'000'000LL / 48;
+    int32_t iso_ = 100;
+    bool ois_ = true;
+    float focusDiopters_ = 0.0f;
+
+    std::thread recoveryThread_;
+    std::atomic<int64_t> lastRecoveryMs_{0};
 };
 
-} // namespace rcamera
+} // namespace vesper

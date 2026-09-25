@@ -1,0 +1,141 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Pass 2: quad image -> upright, cropped, resampled output.
+//
+// One invocation renders a 2x2 block of output pixels so it can also emit the
+// block's 4:2:0 chroma sample for the encoder (P010, BT.2020 limited range).
+//   camera RGB -> scene-linear Rec.2020 (DNG forward matrix, Bradford D50->D65)
+//              -> Apple Log  (recording master)
+//              -> Rec.709 display transform + monitoring overlays (viewfinder)
+layout(local_size_x = 8, local_size_y = 8) in;
+
+#include "frame_params.glsl"
+
+layout(set = 0, binding = 1) uniform sampler2D quadTex;
+layout(set = 0, binding = 2, rgba8) uniform writeonly image2D viewfinder;
+layout(std430, set = 0, binding = 3) writeonly buffer P010 { uint words[]; } p010;
+
+// Apple Log (Apple Log Profile White Paper, 2023). C1-continuous at Rt.
+float appleLog(float x) {
+    const float R0 = -0.05641088, Rt = 0.01, c = 47.28711236;
+    const float beta = 0.00964052, gamma = 0.08550479, delta = 0.69336945;
+    if (x >= Rt) return gamma * log2(x + beta) + delta;
+    if (x >= R0) return c * (x - R0) * (x - R0);
+    return 0.0;
+}
+
+vec3 toRec2020(vec3 cam) {
+    return vec3(dot(P.camToRec2020[0].xyz, cam), dot(P.camToRec2020[1].xyz, cam), dot(P.camToRec2020[2].xyz, cam));
+}
+
+// Monitoring display transform: Rec.2020 scene-linear -> Rec.709 gamut ->
+// filmic tone curve (Narkowicz ACES fit, grey lands at ~0.49 sRGB) -> sRGB.
+// color_science/generate_applelog_lut.py builds the matching .cube.
+vec3 displayRec709(vec3 lin2020) {
+    const mat3 rec2020To709 = mat3(1.6605, -0.1246, -0.0182,
+                                   -0.5876, 1.1329, -0.1006,
+                                   -0.0728, -0.0083, 1.1187);
+    vec3 x = max(rec2020To709 * lin2020, vec3(0.0)) * 0.8;
+    vec3 t = clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
+    return mix(t * 12.92, 1.055 * pow(t, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, t));
+}
+
+vec3 falseColor(float stops, bool clipped, vec3 display) {
+    float headroom = P.exposure.w;
+    if (clipped || stops >= headroom - 0.1) return vec3(1.0, 0.0, 0.0);   // clipped
+    if (stops >= headroom - 0.6) return vec3(1.0, 0.9, 0.0);              // last half stop before clip
+    if (stops >= 0.75 && stops <= 1.25) return vec3(1.0, 0.45, 0.7);      // skin (+1 stop)
+    if (abs(stops) <= 0.2) return vec3(0.2, 0.85, 0.2);                   // 18% grey
+    if (stops <= -4.5) return vec3(0.45, 0.0, 0.6);                       // near noise floor
+    if (stops <= -3.5) return vec3(0.1, 0.3, 1.0);                        // deep shadow
+    return vec3(dot(display, vec3(0.2126, 0.7152, 0.0722)));
+}
+
+// Output pixel -> continuous raw-sensor coordinate (pixel centres at +0.5).
+vec2 rawPosFor(ivec2 o) {
+    ivec2 od = P.outInfo.xy;
+    int rot = P.outInfo.z;
+    vec2 u, ud;
+    vec2 c = vec2(o) + 0.5;
+    if (rot == 90)       { ud = vec2(od.y, od.x); u = vec2(c.y, float(od.x) - c.x); }
+    else if (rot == 180) { ud = vec2(od);         u = vec2(float(od.x) - c.x, float(od.y) - c.y); }
+    else if (rot == 270) { ud = vec2(od.y, od.x); u = vec2(float(od.y) - c.y, c.x); }
+    else                 { ud = vec2(od);         u = c; }
+    return P.cropRect.xy + u * P.cropRect.zw / ud;
+}
+
+// Quad texel q holds a channel sampled at raw position 2q + offset.
+vec2 quadUv(vec2 rawPos, vec2 offset) {
+    return ((rawPos - offset) * 0.5 + 0.5) / vec2(P.quadInfo.xy);
+}
+
+vec4 sampleCamera(vec2 rawPos) {
+    vec4 g = texture(quadTex, quadUv(rawPos, vec2(1.0)));
+    float r = texture(quadTex, quadUv(rawPos, P.cfaOffsets.xy)).r;
+    float b = texture(quadTex, quadUv(rawPos, P.cfaOffsets.zw)).b;
+    return vec4(r, g.g, b, g.a);
+}
+
+uint pack16(float lo, float hi) {
+    return (uint(lo) << 6) | (uint(hi) << 22);
+}
+
+void main() {
+    ivec2 block = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 od = P.outInfo.xy;
+    if (block.x * 2 >= od.x || block.y * 2 >= od.y) return;
+
+    vec2 cbcr = vec2(0.0);
+    float yCode[4];
+    for (int k = 0; k < 4; ++k) {
+        ivec2 o = block * 2 + ivec2(k & 1, k >> 1);
+        vec2 rawPos = rawPosFor(o);
+        vec4 cam = sampleCamera(rawPos);
+        vec3 lin = toRec2020(cam.rgb);
+        vec3 logv = vec3(appleLog(lin.r), appleLog(lin.g), appleLog(lin.b));
+
+        // BT.2020 non-constant-luminance Y'CbCr, 10-bit limited range.
+        float y = dot(logv, vec3(0.2627, 0.6780, 0.0593));
+        yCode[k] = clamp(round(64.0 + 876.0 * y), 4.0, 1019.0);
+        cbcr += vec2((logv.b - y) / 1.8814, (logv.r - y) / 1.4746);
+
+        if (P.flags.z == 0) continue;
+        bool clipped = cam.a > 0.5;
+        vec3 display = displayRec709(lin);
+        vec3 vf;
+        int mode = P.outInfo.w;
+        if (mode == 0) {
+            vf = clamp(logv, 0.0, 1.0);
+        } else if (mode == 2) {
+            float lum = dot(lin, vec3(0.2627, 0.6780, 0.0593));
+            vf = falseColor(log2(max(lum, 1e-6) / 0.18), clipped, display);
+        } else if (mode == 3) {
+            // Peaking: log-domain green gradient over one output pixel.
+            vec2 step = P.cropRect.zw / vec2(P.outInfo.xy);
+            float c0 = appleLog(P.exposure.x * texture(quadTex, quadUv(rawPos, vec2(1.0))).g);
+            float gx = appleLog(P.exposure.x * texture(quadTex, quadUv(rawPos + vec2(step.x, 0.0), vec2(1.0))).g) - c0;
+            float gy = appleLog(P.exposure.x * texture(quadTex, quadUv(rawPos + vec2(0.0, step.y), vec2(1.0))).g) - c0;
+            vf = abs(gx) + abs(gy) > P.exposure.z ? vec3(0.1, 1.0, 0.3) : display;
+        } else if (mode == 4) {
+            bool hot = clipped || max(lin.r, max(lin.g, lin.b)) >= P.exposure.y * P.exposure.x;
+            bool stripe = ((o.x + o.y) / 6) % 2 == 0;
+            vf = hot ? (stripe ? vec3(0.08) : vec3(1.0)) : display;
+        } else {
+            vf = display;
+        }
+        imageStore(viewfinder, o, vec4(P.flags.y != 0 ? vf.bgr : vf, 1.0));
+    }
+
+    if (P.flags.x == 0) return;
+    // P010: Y plane (16-bit LE, 10 significant bits in the top) then interleaved CbCr.
+    int w = od.x;
+    uint row0 = uint((block.y * 2) * w + block.x * 2) >> 1;
+    uint row1 = uint((block.y * 2 + 1) * w + block.x * 2) >> 1;
+    p010.words[row0] = pack16(yCode[0], yCode[1]);
+    p010.words[row1] = pack16(yCode[2], yCode[3]);
+    cbcr *= 0.25;
+    float cb = clamp(round(512.0 + 896.0 * cbcr.x), 4.0, 1019.0);
+    float cr = clamp(round(512.0 + 896.0 * cbcr.y), 4.0, 1019.0);
+    uint uvBase = uint(w * od.y) >> 1;
+    p010.words[uvBase + uint(block.y * (w >> 1) + block.x)] = pack16(cb, cr);
+}

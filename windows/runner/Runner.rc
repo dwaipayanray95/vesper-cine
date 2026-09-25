@@ -89,13 +89,13 @@ BEGIN
     BEGIN
         BLOCK "040904e4"
         BEGIN
-            VALUE "CompanyName", "com.rawedge" "\0"
-            VALUE "FileDescription", "r_camera" "\0"
+            VALUE "CompanyName", "com.vesper" "\0"
+            VALUE "FileDescription", "vesper_cine" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
-            VALUE "InternalName", "r_camera" "\0"
-            VALUE "LegalCopyright", "Copyright (C) 2026 com.rawedge. All rights reserved." "\0"
-            VALUE "OriginalFilename", "r_camera.exe" "\0"
-            VALUE "ProductName", "r_camera" "\0"
+            VALUE "InternalName", "vesper_cine" "\0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 com.vesper. All rights reserved." "\0"
+            VALUE "OriginalFilename", "vesper_cine.exe" "\0"
+            VALUE "ProductName", "vesper_cine" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END

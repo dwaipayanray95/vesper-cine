@@ -5,7 +5,7 @@ plugins {
 }
 
 android {
-    namespace = "com.rawedge.r_camera"
+    namespace = "com.vesper.cine"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
@@ -15,7 +15,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.rawedge.r_camera"
+        applicationId = "com.vesper.cine"
         minSdk = 30
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
