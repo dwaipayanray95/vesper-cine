@@ -38,10 +38,11 @@ bool VulkanComputeEngine::initialize(ANativeWindow* codecWindow, ANativeWindow* 
     }
 
     if (viewfinderWindow) {
-        // Route through the normal setter so acquire + buffer geometry logic
-        // only lives in one place.
-        viewfinderWindow_ = nullptr; // setViewfinderWindow() diffs against the current value
-        setViewfinderWindow(viewfinderWindow);
+        // Inline what setViewfinderWindow() does rather than calling it: vkMutex_
+        // is already held here (non-recursive), so calling that setter would deadlock.
+        viewfinderWindow_ = viewfinderWindow;
+        ANativeWindow_acquire(viewfinderWindow_);
+        ANativeWindow_setBuffersGeometry(viewfinderWindow_, outputWidth_, outputHeight_, WINDOW_FORMAT_RGBA_8888);
     }
 
     VK_LOGI("Vulkan compute engine initialized (%dx%d); compute pipeline finishes building on first frame", outputWidth_, outputHeight_);
@@ -291,7 +292,10 @@ bool VulkanComputeEngine::createOutputImages() {
     cbAlloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     cbAlloc.commandBufferCount = 1;
     VkCommandBuffer cb = VK_NULL_HANDLE;
-    vkAllocateCommandBuffers(device_, &cbAlloc, &cb);
+    if (vkAllocateCommandBuffers(device_, &cbAlloc, &cb) != VK_SUCCESS) {
+        VK_LOGE("vkAllocateCommandBuffers (output image transition) failed");
+        return false;
+    }
 
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
