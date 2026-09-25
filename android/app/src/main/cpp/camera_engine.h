@@ -51,6 +51,14 @@ struct CameraDeviceInfo {
 // pipeline reads the packed bytes on the CPU and uploads them as a storage buffer.
 using FrameCallback = std::function<void(const uint8_t* data, size_t dataLength, int32_t rowStrideBytes, int64_t timestampNs)>;
 
+// Delivers the real per-frame black level [R, Gr, Gb, B] read from each
+// capture's own CaptureResult. ACAMERA_SENSOR_DYNAMIC_BLACK_LEVEL is only
+// ever valid there (never on static CameraCharacteristics, which is what
+// querySensorCalibration() has to fall back to at camera-open time), so this
+// is the only way to get a real, non-default value on hardware that doesn't
+// populate ACAMERA_SENSOR_BLACK_LEVEL_PATTERN either.
+using BlackLevelCallback = std::function<void(const float blackLevel[4])>;
+
 class CameraEngine {
 public:
     CameraEngine();
@@ -63,6 +71,10 @@ public:
 
     bool startCaptureSession(int32_t width, int32_t height, FrameCallback callback);
     void stopCaptureSession();
+
+    // Set once; invoked from the capture-result callback thread whenever a
+    // frame's real ACAMERA_SENSOR_DYNAMIC_BLACK_LEVEL is available.
+    void setBlackLevelCallback(BlackLevelCallback callback) { blackLevelCallback_ = std::move(callback); }
 
     // Manual controls (Bypassing ISP auto-algorithms)
     void setExposure(int64_t exposureTimeNs, int32_t iso);
@@ -81,11 +93,17 @@ public:
     void onSessionClosed(ACameraCaptureSession* session);
     void onSessionReady(ACameraCaptureSession* session);
     void onImageAvailable(AImageReader* reader);
+    void onCaptureCompleted(ACameraCaptureSession* session, ACaptureRequest* request, const ACameraMetadata* result);
 
 private:
     void querySensorCalibration(ACameraMetadata* metadata);
     bool configureCaptureRequest();
     void attemptDeviceErrorRecovery();
+    // Resubmits captureRequest_ as the repeating request, always with the
+    // capture-result callback attached (needed for real per-frame black
+    // level — see BlackLevelCallback) since setRepeatingRequest's callback
+    // applies only to that one call, not persistently to the session.
+    camera_status_t submitRepeatingRequest();
 
     ACameraManager* cameraManager_ = nullptr;
     ACameraDevice* cameraDevice_ = nullptr;
@@ -99,6 +117,7 @@ private:
     std::string activeCameraId_;
     SensorCalibrationMetadata calibrationMetadata_;
     FrameCallback frameCallback_;
+    BlackLevelCallback blackLevelCallback_;
     int32_t lastStreamWidth_ = 0;
     int32_t lastStreamHeight_ = 0;
     int64_t lastRecoveryAttemptMs_ = 0;

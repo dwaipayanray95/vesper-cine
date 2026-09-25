@@ -51,6 +51,12 @@ static void sOnImageAvailable(void* context, AImageReader* reader) {
     engine->onImageAvailable(reader);
 }
 
+static void sOnCaptureCompleted(void* context, ACameraCaptureSession* session,
+                                 ACaptureRequest* request, const ACameraMetadata* result) {
+    auto* engine = static_cast<CameraEngine*>(context);
+    engine->onCaptureCompleted(session, request, result);
+}
+
 CameraEngine::CameraEngine() = default;
 
 CameraEngine::~CameraEngine() {
@@ -373,13 +379,7 @@ bool CameraEngine::startCaptureSession(int32_t width, int32_t height, FrameCallb
         return false;
     }
 
-    cStatus = ACameraCaptureSession_setRepeatingRequest(
-        captureSession_,
-        nullptr, // No capture result callback needed for maximum throughput
-        1,
-        &captureRequest_,
-        nullptr
-    );
+    cStatus = submitRepeatingRequest();
 
     if (cStatus != ACAMERA_OK) {
         LOGE("Failed to set repeating capture request: %d", cStatus);
@@ -389,6 +389,14 @@ bool CameraEngine::startCaptureSession(int32_t width, int32_t height, FrameCallb
     isStreaming_ = true;
     LOGI("RAW10 capture session successfully started at %dx%d", width, height);
     return true;
+}
+
+camera_status_t CameraEngine::submitRepeatingRequest() {
+    ACameraCaptureSession_captureCallbacks captureCallbacks {
+        .context = this,
+        .onCaptureCompleted = sOnCaptureCompleted
+    };
+    return ACameraCaptureSession_setRepeatingRequest(captureSession_, &captureCallbacks, 1, &captureRequest_, nullptr);
 }
 
 bool CameraEngine::configureCaptureRequest() {
@@ -507,7 +515,7 @@ void CameraEngine::setExposure(int64_t exposureTimeNs, int32_t iso) {
     if (captureSession_ && captureRequest_) {
         ACaptureRequest_setEntry_i64(captureRequest_, ACAMERA_SENSOR_EXPOSURE_TIME, 1, &currentExposureNs_);
         ACaptureRequest_setEntry_i32(captureRequest_, ACAMERA_SENSOR_SENSITIVITY, 1, &currentIso_);
-        ACameraCaptureSession_setRepeatingRequest(captureSession_, nullptr, 1, &captureRequest_, nullptr);
+        submitRepeatingRequest();
     }
 }
 
@@ -527,7 +535,7 @@ void CameraEngine::setWhitebalanceGains(float rGain, float gGain, float bGain) {
     if (captureSession_ && captureRequest_) {
         float gains[4] = { currentRGain_, currentGGain_, currentGGain_, currentBGain_ };
         ACaptureRequest_setEntry_float(captureRequest_, ACAMERA_COLOR_CORRECTION_GAINS, 4, gains);
-        ACameraCaptureSession_setRepeatingRequest(captureSession_, nullptr, 1, &captureRequest_, nullptr);
+        submitRepeatingRequest();
     }
 }
 
@@ -537,7 +545,7 @@ void CameraEngine::setOpticalStabilization(bool enableOis) {
         uint8_t oisMode = oisEnabled_ ? ACAMERA_LENS_OPTICAL_STABILIZATION_MODE_ON
                                       : ACAMERA_LENS_OPTICAL_STABILIZATION_MODE_OFF;
         ACaptureRequest_setEntry_u8(captureRequest_, ACAMERA_LENS_OPTICAL_STABILIZATION_MODE, 1, &oisMode);
-        ACameraCaptureSession_setRepeatingRequest(captureSession_, nullptr, 1, &captureRequest_, nullptr);
+        submitRepeatingRequest();
     }
 }
 
@@ -545,7 +553,7 @@ void CameraEngine::setFocusDistance(float diopters) {
     focusDistance_ = diopters;
     if (captureSession_ && captureRequest_) {
         ACaptureRequest_setEntry_float(captureRequest_, ACAMERA_LENS_FOCUS_DISTANCE, 1, &focusDistance_);
-        ACameraCaptureSession_setRepeatingRequest(captureSession_, nullptr, 1, &captureRequest_, nullptr);
+        submitRepeatingRequest();
     }
 }
 
@@ -613,6 +621,24 @@ void CameraEngine::onSessionClosed(ACameraCaptureSession* session) {
 
 void CameraEngine::onSessionReady(ACameraCaptureSession* session) {
     LOGI("Capture session ready");
+}
+
+void CameraEngine::onCaptureCompleted(ACameraCaptureSession* session, ACaptureRequest* request,
+                                       const ACameraMetadata* result) {
+    if (!blackLevelCallback_) return;
+
+    ACameraMetadata_const_entry entry;
+    if (ACameraMetadata_getConstEntry(result, ACAMERA_SENSOR_DYNAMIC_BLACK_LEVEL, &entry) == ACAMERA_OK &&
+        entry.count >= 4) {
+        float blackLevel[4] = { entry.data.f[0], entry.data.f[1], entry.data.f[2], entry.data.f[3] };
+        blackLevelCallback_(blackLevel);
+
+        static int logCount = 0;
+        if (++logCount % 90 == 1) {
+            LOGI("Live DynamicBlackLevel [R=%.2f Gr=%.2f Gb=%.2f B=%.2f]",
+                 blackLevel[0], blackLevel[1], blackLevel[2], blackLevel[3]);
+        }
+    }
 }
 
 void CameraEngine::onImageAvailable(AImageReader* reader) {

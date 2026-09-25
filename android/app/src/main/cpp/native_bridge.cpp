@@ -200,6 +200,21 @@ EXPORT int32_t rcamera_start_stream(int32_t width, int32_t height) {
     gUniforms.rawWidth = width;
     gUniforms.rawHeight = height;
 
+    // Real per-frame black level, replacing the flat [64,64,64,64] struct
+    // default — see BlackLevelCallback's doc comment for why the static
+    // calibration tags don't work on this hardware. Runs on the capture
+    // session's own callback thread, writing 4 independent floats gUniforms
+    // is also read from on the image-reader thread without a lock; a torn
+    // read of one stale/fresh value for a single frame is a self-correcting,
+    // visually inconsequential race, consistent with how gUniforms is
+    // already shared elsewhere in this file.
+    gCameraEngine->setBlackLevelCallback([](const float blackLevel[4]) {
+        gUniforms.blackLevel[0] = blackLevel[0];
+        gUniforms.blackLevel[1] = blackLevel[1];
+        gUniforms.blackLevel[2] = blackLevel[2];
+        gUniforms.blackLevel[3] = blackLevel[3];
+    });
+
     bool ok = gCameraEngine->startCaptureSession(width, height,
         [](const uint8_t* data, size_t dataLength, int32_t rowStrideBytes, int64_t timestampNs) {
             if (gVulkanCompute) {
