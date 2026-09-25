@@ -49,6 +49,39 @@ static void kelvinTintToRgbGains(int kelvin, int tint, float& rGain, float& gGai
     bGain = (g > 0.0f) ? (g / b) : 1.0f;
 }
 
+// The sensor's own calibrated "camera neutral" gains — what raw R/G/B ratios
+// THIS specific device's sensor reports for a neutral gray scene under its
+// calibration reference illuminant — computed once from real calibration
+// data when the camera opens (see rcamera_open_camera). Used to anchor the
+// Kelvin/tint dial to reality instead of the display-color approximation
+// kelvinTintToRgbGains() (above) was never designed to substitute for.
+static float gCalibratedRGain = 1.0f;
+static float gCalibratedGGain = 1.0f;
+static float gCalibratedBGain = 1.0f;
+
+// ACAMERA_SENSOR_COLOR_TRANSFORM1 maps CIE XYZ -> camera-native RGB under the
+// sensor's reference illuminant. Per the DNG spec, this is exactly the
+// documented way to compute "camera neutral" (the raw RGB a neutral gray
+// scene produces under that illuminant) when no direct AWB/AsShotNeutral
+// estimate is available: cameraNeutral = ColorTransform1 * XYZ_white.
+static void computeCalibratedNeutralGains(const float colorTransform1[9], float& rGain, float& gGain, float& bGain) {
+    // CIE D50 white point — matches the target of ACAMERA_SENSOR_FORWARD_MATRIX1.
+    const float xw = 0.9642f, yw = 1.0000f, zw = 0.8249f;
+    float r = colorTransform1[0] * xw + colorTransform1[1] * yw + colorTransform1[2] * zw;
+    float g = colorTransform1[3] * xw + colorTransform1[4] * yw + colorTransform1[5] * zw;
+    float b = colorTransform1[6] * xw + colorTransform1[7] * yw + colorTransform1[8] * zw;
+
+    if (r > 1e-6f && g > 1e-6f && b > 1e-6f) {
+        rGain = g / r;
+        gGain = 1.0f;
+        bGain = g / b;
+    } else {
+        rGain = 1.0f;
+        gGain = 1.0f;
+        bGain = 1.0f;
+    }
+}
+
 extern "C" {
 
 #define EXPORT __attribute__((visibility("default")))
@@ -131,6 +164,9 @@ EXPORT int32_t rcamera_open_camera(const char* cameraId) {
         // for AWB estimation, not rendering; applying it forward instead of
         // ForwardMatrix1 produced a strong wrong color cast.
         PackMat3ForPushConstant(meta.forwardMatrix1, gUniforms.sensorToXyzMatrix);
+        computeCalibratedNeutralGains(meta.colorTransform1, gCalibratedRGain, gCalibratedGGain, gCalibratedBGain);
+        LOGI("Calibrated neutral WB gains from ColorTransform1: R=%.3f G=%.3f B=%.3f",
+             gCalibratedRGain, gCalibratedGGain, gCalibratedBGain);
         gUniforms.cfaPattern = meta.cfaPattern;
         gUniforms.rawWidth = meta.activeArrayWidth;
         gUniforms.rawHeight = meta.activeArrayHeight;
@@ -195,9 +231,25 @@ EXPORT void rcamera_set_white_balance_gains(float rGain, float gGain, float bGai
 }
 
 EXPORT void rcamera_set_kelvin_tint(int32_t kelvin, int32_t tint) {
-    float r = 1.0f, g = 1.0f, b = 1.0f;
-    kelvinTintToRgbGains(kelvin, tint, r, g, b);
-    rcamera_set_white_balance_gains(r, g, b);
+    // kelvinTintToRgbGains() approximates a blackbody radiator's DISPLAY color
+    // (Tanner Helland algorithm) — it has no relationship to this sensor's
+    // actual raw-domain R/G/B response and, used directly as gains, pushes
+    // color the wrong way (e.g. it suppresses red at daylight temperatures,
+    // when real sensors need red boosted well above green). Used only as a
+    // *relative* shift here: the dial moves gains away from the sensor's own
+    // calibrated neutral (computeCalibratedNeutralGains, real per-device DNG
+    // calibration data) by the same ratio the approximation would move them
+    // away from its 5600K/tint-0 reference point, so the default dial
+    // position reflects real calibration and only user adjustment relies on
+    // the approximation.
+    float rAtKelvin = 1.0f, gAtKelvin = 1.0f, bAtKelvin = 1.0f;
+    kelvinTintToRgbGains(kelvin, tint, rAtKelvin, gAtKelvin, bAtKelvin);
+    float rAtRef = 1.0f, gAtRef = 1.0f, bAtRef = 1.0f;
+    kelvinTintToRgbGains(5600, 0, rAtRef, gAtRef, bAtRef);
+
+    float r = gCalibratedRGain * (rAtKelvin / rAtRef);
+    float b = gCalibratedBGain * (bAtKelvin / bAtRef);
+    rcamera_set_white_balance_gains(r, gCalibratedGGain, b);
 }
 
 EXPORT void rcamera_set_ois(int32_t enable) {
