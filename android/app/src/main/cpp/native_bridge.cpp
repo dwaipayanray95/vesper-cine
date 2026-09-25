@@ -14,25 +14,86 @@ static std::unique_ptr<CameraEngine> gCameraEngine;
 static std::unique_ptr<VulkanComputeEngine> gVulkanCompute;
 static ComputeUniformData gUniforms;
 
-// Inverse of the shader's linearToRLog() (mhc_rlog.comp) — must be kept
-// byte-for-byte in sync with those constants. Needed because the viewfinder
-// buffer we sample for tap-to-white-balance is log-encoded (it's literally
-// what's on screen), but white balance gains are applied in the LINEAR
-// domain, upstream of the log curve. Computing a correction ratio directly
-// on log-space samples and feeding it into a linear multiplier is wrong —
-// the log curve's flat black-floor offset makes near-black log samples look
-// like a huge color imbalance that isn't really there, so the "correction"
-// mostly just amplifies sensor read noise. Delogging first fixes that.
-static float rLogToLinear(float logVal) {
-    const float a = 0.225f;
-    const float b = 5.5555f;
-    const float c = 0.385f;
-    const float d = 0.100f;
-    const float logAtCutoff = c * 0.01f + d; // logVal at the curve's x=0.01 breakpoint
-    if (logVal < logAtCutoff) {
-        return std::max(0.0f, (logVal - d) / c);
+// Most recent raw-sensor-domain center-patch average, refreshed every frame
+// by sampleRawCenterPatch() below. Read by rcamera_lock_white_balance_from_center().
+// Benign torn reads across the 3 floats/bool are the same tolerated race as
+// gUniforms elsewhere in this file (self-correcting, at most one stale frame).
+static float gRawCenterR = 0.0f, gRawCenterG = 0.0f, gRawCenterB = 0.0f;
+static bool gHasRawCenterSample = false;
+
+// Mirrors CfaSiteAt() in camera_engine.cpp / cfaSiteAt() in mhc_rlog.comp:
+// resolves which logical CFA channel (0=R, 1=Gr, 2=Gb, 3=B) physically sits
+// at raw pixel phase (x&1, y&1), given the sensor's actual CFA arrangement.
+static inline int cfaSiteAt(int32_t cfaPattern, int x, int y) {
+    int bit = ((y & 1) << 1) | (x & 1);
+    switch (cfaPattern) {
+        case 0: { static const int m[4] = {0, 1, 2, 3}; return m[bit]; } // RGGB
+        case 1: { static const int m[4] = {1, 0, 3, 2}; return m[bit]; } // GRBG
+        case 2: { static const int m[4] = {2, 3, 0, 1}; return m[bit]; } // GBRG
+        default:{ static const int m[4] = {3, 2, 1, 0}; return m[bit]; } // BGGR
     }
-    return (std::exp((logVal - c) / a) - 1.0f) / b;
+}
+
+// Reads and linearizes one RAW10 pixel straight off the packed sensor
+// bytes — mirrors fetchBayer() in mhc_rlog.comp exactly (same MIPI RAW10
+// unpack, same black-level subtraction), so this is the identical value the
+// GPU demosaic sees, before any WB gain, color matrix, or tone curve.
+static inline float fetchRawPixel(const uint8_t* data, size_t dataLength, int32_t rowStrideBytes,
+                                   int32_t x, int32_t y, const float blackLevel[4], float whiteLevel,
+                                   int32_t cfaPattern) {
+    int32_t groupIndex = x >> 2;
+    int32_t pixelInGroup = x & 3;
+    size_t groupByteOffset = static_cast<size_t>(y) * static_cast<size_t>(rowStrideBytes) +
+                              static_cast<size_t>(groupIndex) * 5;
+    if (groupByteOffset + 4 >= dataLength) return 0.0f;
+    uint32_t msb = data[groupByteOffset + pixelInGroup];
+    uint32_t lsbByte = data[groupByteOffset + 4];
+    uint32_t lsb = (lsbByte >> (pixelInGroup * 2)) & 0x3u;
+    float raw = static_cast<float>((msb << 2) | lsb);
+    float bl = blackLevel[cfaSiteAt(cfaPattern, x, y)];
+    return std::max(0.0f, (raw - bl) / (whiteLevel - bl));
+}
+
+// Averages a small window of RAW10 sensor data around the center of the
+// active array, per logical CFA channel (Gr+Gb pooled as one green count).
+// This is deliberately the same thing a real camera's 3A AWB stats block
+// reads: raw Bayer data, before demosaic, before any color matrix, before
+// any tone curve. A gray-world ratio computed here is a plain diagonal
+// gain that can be fed straight into wbGains (applied pre-matrix in the
+// shader) with no inversion math needed — unlike sampling anywhere
+// downstream of the color matrix, where cross-channel mixing means a
+// post-matrix ratio doesn't invert cleanly through a simple per-channel
+// scale. Runs on the frame-callback thread; cost is a fixed ~128x128-pixel
+// scan, negligible next to the GPU debayer of the full frame.
+static void sampleRawCenterPatch(const uint8_t* data, size_t dataLength, int32_t rowStrideBytes,
+                                  int32_t rawWidth, int32_t rawHeight, const float blackLevel[4],
+                                  float whiteLevel, int32_t cfaPattern) {
+    if (rawWidth <= 0 || rawHeight <= 0 || rowStrideBytes <= 0) return;
+    constexpr int32_t kHalfPatch = 64; // ~128x128 raw px around center
+    int32_t cx = (rawWidth / 2) & ~1;
+    int32_t cy = (rawHeight / 2) & ~1;
+    int32_t x0 = std::max(0, cx - kHalfPatch);
+    int32_t x1 = std::min(rawWidth, cx + kHalfPatch);
+    int32_t y0 = std::max(0, cy - kHalfPatch);
+    int32_t y1 = std::min(rawHeight, cy + kHalfPatch);
+
+    double sumR = 0.0, sumG = 0.0, sumB = 0.0;
+    int64_t countR = 0, countG = 0, countB = 0;
+    for (int32_t y = y0; y < y1; ++y) {
+        for (int32_t x = x0; x < x1; ++x) {
+            float v = fetchRawPixel(data, dataLength, rowStrideBytes, x, y, blackLevel, whiteLevel, cfaPattern);
+            int site = cfaSiteAt(cfaPattern, x, y);
+            if (site == 0) { sumR += v; ++countR; }
+            else if (site == 3) { sumB += v; ++countB; }
+            else { sumG += v; ++countG; }
+        }
+    }
+    if (countR == 0 || countG == 0 || countB == 0) return;
+
+    gRawCenterR = static_cast<float>(sumR / static_cast<double>(countR));
+    gRawCenterG = static_cast<float>(sumG / static_cast<double>(countG));
+    gRawCenterB = static_cast<float>(sumB / static_cast<double>(countB));
+    gHasRawCenterSample = true;
 }
 
 // Converts Kelvin (2000K - 10000K) and Tint (-50 to +50) to RGB gains
@@ -252,6 +313,8 @@ EXPORT int32_t rcamera_start_stream(int32_t width, int32_t height) {
         [](const uint8_t* data, size_t dataLength, int32_t rowStrideBytes, int64_t timestampNs) {
             if (gVulkanCompute) {
                 gUniforms.rawRowStrideBytes = rowStrideBytes;
+                sampleRawCenterPatch(data, dataLength, rowStrideBytes, gUniforms.rawWidth, gUniforms.rawHeight,
+                                     gUniforms.blackLevel, gUniforms.whiteLevel, gUniforms.cfaPattern);
                 gVulkanCompute->processRawFrame(data, dataLength, gUniforms);
             }
         });
@@ -308,60 +371,52 @@ EXPORT void rcamera_set_kelvin_tint(int32_t kelvin, int32_t tint) {
     rcamera_set_white_balance_gains(r, gCalibratedGGain, b);
 }
 
-// Samples the current viewfinder's center patch and adjusts the white
-// balance gains so that patch renders neutral — i.e. "point the camera at
-// something you know is gray/white and press this." Multiplicative on top
-// of whatever gains are currently active (calibrated base * Kelvin/tint
-// dial), so it corrects for the *actual* scene lighting rather than
-// requiring the Kelvin dial to guess it. Returns 0 on success, -1 if no
-// frame has been presented yet to sample from.
+// Sets the white balance gains from the most recent raw-sensor-domain
+// center-patch average (see sampleRawCenterPatch, refreshed every frame) —
+// i.e. "point the camera at something you know is gray/white and press
+// this." The raw patch is sampled before any WB gain, color matrix, or tone
+// curve, so the gray-world ratio computed here (gray/R, 1, gray/B) is
+// already the correct absolute per-channel gain to feed the shader's
+// pre-matrix multiply — it replaces the current wbGains outright rather
+// than compounding onto them.
+//
+// An earlier version of this sampled the on-screen viewfinder buffer
+// instead (post color-matrix, post R-Log curve) and tried to back out a
+// correction from it. That doesn't work: the color matrix mixes channels
+// (its off-diagonal terms are non-trivial), so a ratio measured after it
+// doesn't invert cleanly through a simple per-channel scale applied before
+// it — in practice this produced wildly different, overcorrected gains
+// between calibrations and visibly amplified noise. Real camera AWB always
+// meters off raw sensor data for exactly this reason.
+//
+// Returns 0 on success, -1 if no frame has been sampled yet or the patch
+// is too dark/noisy to trust.
 EXPORT int32_t rcamera_lock_white_balance_from_center() {
-    if (!gVulkanCompute) return -1;
-
-    float r = 0.0f, g = 0.0f, b = 0.0f;
-    if (!gVulkanCompute->sampleViewfinderCenterPatch(r, g, b)) {
-        return -1;
-    }
-    if (r < 0.02f || g < 0.02f || b < 0.02f) {
-        LOGW("rcamera_lock_white_balance_from_center: sampled patch too dark to use (R=%.3f G=%.3f B=%.3f)", r, g, b);
+    if (!gHasRawCenterSample) {
+        LOGW("rcamera_lock_white_balance_from_center: no raw frame sampled yet");
         return -1;
     }
 
-    // The sampled RGB is read off the on-screen viewfinder buffer, which is
-    // R-Log encoded (see mhc_rlog.comp). White balance gains are multiplied
-    // in the LINEAR domain, upstream of that curve, so the correction ratio
-    // has to be computed in linear space too — otherwise the log curve's
-    // black-floor offset makes ordinary shadow noise look like a massive
-    // color cast. Delog each channel first.
-    float linR = rLogToLinear(r);
-    float linG = rLogToLinear(g);
-    float linB = rLogToLinear(b);
-    if (linR < 0.01f || linG < 0.01f || linB < 0.01f) {
-        LOGW("rcamera_lock_white_balance_from_center: linearized patch too dark/noisy to use (linR=%.4f linG=%.4f linB=%.4f)", linR, linG, linB);
+    float r = gRawCenterR, g = gRawCenterG, b = gRawCenterB;
+    if (r < 0.01f || g < 0.01f || b < 0.01f) {
+        LOGW("rcamera_lock_white_balance_from_center: sampled patch too dark/noisy to use (R=%.4f G=%.4f B=%.4f)", r, g, b);
         return -1;
     }
 
-    float gray = (linR + linG + linB) / 3.0f;
-    float newR = gUniforms.wbGains[0] * (gray / linR);
-    float newG = gUniforms.wbGains[1] * (gray / linG);
-    float newB = gUniforms.wbGains[2] * (gray / linB);
-    // Keep the convention (used everywhere else) that green stays the
-    // unity-gain reference channel.
-    if (newG > 1e-6f) {
-        newR /= newG;
-        newB /= newG;
-        newG = 1.0f;
-    }
-    // Clamp to a physically sane range. A single 48x48 patch is still small
-    // enough that read noise or a slightly non-neutral surface can produce
-    // an outlier ratio; real AWB implementations cap gain swings for the
-    // same reason. +/-4 stops of correction is generous for any real light
-    // source and keeps a bad sample from tanking the image.
+    float gray = (r + g + b) / 3.0f;
+    float newR = gray / r;
+    float newG = 1.0f;
+    float newB = gray / b;
+    // Clamp to a physically sane range. A single center patch can still be
+    // thrown off by read noise or a slightly non-neutral surface; real AWB
+    // implementations cap gain swings for the same reason. +/-4 stops is
+    // generous for any real light source and keeps a bad sample from
+    // tanking the image.
     newR = std::clamp(newR, 0.25f, 4.0f);
     newB = std::clamp(newB, 0.25f, 4.0f);
 
-    LOGI("White balance locked from center patch: sampled(log) R=%.3f G=%.3f B=%.3f -> linear R=%.3f G=%.3f B=%.3f -> gains R=%.3f G=%.3f B=%.3f",
-         r, g, b, linR, linG, linB, newR, newG, newB);
+    LOGI("White balance locked from raw center patch: sampled(raw linear) R=%.4f G=%.4f B=%.4f -> gains R=%.3f G=%.3f B=%.3f",
+         r, g, b, newR, newG, newB);
     rcamera_set_white_balance_gains(newR, newG, newB);
     return 0;
 }
