@@ -608,6 +608,41 @@ bool VulkanComputeEngine::presentViewfinder() {
     return true;
 }
 
+bool VulkanComputeEngine::sampleViewfinderCenterPatch(float& outR, float& outG, float& outB) {
+    std::lock_guard<std::mutex> lock(vkMutex_);
+    if (!viewfinderStagingMapped_ || outputWidth_ <= 0 || outputHeight_ <= 0) return false;
+
+    const uint8_t* buf = static_cast<const uint8_t*>(viewfinderStagingMapped_);
+    size_t stride = static_cast<size_t>(outputWidth_) * 4;
+
+    constexpr int32_t kHalfPatch = 24; // ~48x48px patch around center
+    int32_t cx = outputWidth_ / 2;
+    int32_t cy = outputHeight_ / 2;
+    int32_t x0 = std::max(0, cx - kHalfPatch);
+    int32_t x1 = std::min(outputWidth_, cx + kHalfPatch);
+    int32_t y0 = std::max(0, cy - kHalfPatch);
+    int32_t y1 = std::min(outputHeight_, cy + kHalfPatch);
+
+    uint64_t sumR = 0, sumG = 0, sumB = 0;
+    int64_t count = 0;
+    for (int32_t y = y0; y < y1; ++y) {
+        const uint8_t* row = buf + static_cast<size_t>(y) * stride;
+        for (int32_t x = x0; x < x1; ++x) {
+            const uint8_t* px = row + static_cast<size_t>(x) * 4;
+            sumR += px[0];
+            sumG += px[1];
+            sumB += px[2];
+            ++count;
+        }
+    }
+    if (count == 0) return false;
+
+    outR = static_cast<float>(sumR) / static_cast<float>(count) / 255.0f;
+    outG = static_cast<float>(sumG) / static_cast<float>(count) / 255.0f;
+    outB = static_cast<float>(sumB) / static_cast<float>(count) / 255.0f;
+    return true;
+}
+
 bool VulkanComputeEngine::processRawFrame(const uint8_t* data, size_t dataLength, const ComputeUniformData& uniforms) {
     if (!data || dataLength == 0) return false;
     if (!isInitialized_) return false;

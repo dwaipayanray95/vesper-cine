@@ -154,15 +154,17 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   }
 
   void _tapToLockNeutralGray() {
-    setState(() {
-      _kelvin = 5600;
-      _tint = 0;
-      _camera.setKelvinTint(kelvin: _kelvin, tint: _tint);
-    });
+    // Measures the actual center of the current frame and adjusts white
+    // balance so it renders neutral — point the camera at something known to
+    // be gray/white first. Replaces resetting to a fixed 5600K/0 (which
+    // ignored the scene's real lighting entirely).
+    final ok = _camera.lockWhiteBalanceFromCenter();
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text("Neutral Gray Locked (5600K / Tint 0)"),
-        duration: Duration(seconds: 1),
+      SnackBar(
+        content: Text(ok
+            ? "White Balance Locked From Center"
+            : "Couldn't lock WB — point at something bright enough and try again"),
+        duration: const Duration(seconds: 1),
       ),
     );
   }

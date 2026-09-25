@@ -286,6 +286,43 @@ EXPORT void rcamera_set_kelvin_tint(int32_t kelvin, int32_t tint) {
     rcamera_set_white_balance_gains(r, gCalibratedGGain, b);
 }
 
+// Samples the current viewfinder's center patch and adjusts the white
+// balance gains so that patch renders neutral — i.e. "point the camera at
+// something you know is gray/white and press this." Multiplicative on top
+// of whatever gains are currently active (calibrated base * Kelvin/tint
+// dial), so it corrects for the *actual* scene lighting rather than
+// requiring the Kelvin dial to guess it. Returns 0 on success, -1 if no
+// frame has been presented yet to sample from.
+EXPORT int32_t rcamera_lock_white_balance_from_center() {
+    if (!gVulkanCompute) return -1;
+
+    float r = 0.0f, g = 0.0f, b = 0.0f;
+    if (!gVulkanCompute->sampleViewfinderCenterPatch(r, g, b)) {
+        return -1;
+    }
+    if (r < 0.02f || g < 0.02f || b < 0.02f) {
+        LOGW("rcamera_lock_white_balance_from_center: sampled patch too dark to use (R=%.3f G=%.3f B=%.3f)", r, g, b);
+        return -1;
+    }
+
+    float gray = (r + g + b) / 3.0f;
+    float newR = gUniforms.wbGains[0] * (gray / r);
+    float newG = gUniforms.wbGains[1] * (gray / g);
+    float newB = gUniforms.wbGains[2] * (gray / b);
+    // Keep the convention (used everywhere else) that green stays the
+    // unity-gain reference channel.
+    if (newG > 1e-6f) {
+        newR /= newG;
+        newB /= newG;
+        newG = 1.0f;
+    }
+
+    LOGI("White balance locked from center patch: sampled R=%.3f G=%.3f B=%.3f -> gains R=%.3f G=%.3f B=%.3f",
+         r, g, b, newR, newG, newB);
+    rcamera_set_white_balance_gains(newR, newG, newB);
+    return 0;
+}
+
 EXPORT void rcamera_set_ois(int32_t enable) {
     if (gCameraEngine) {
         gCameraEngine->setOpticalStabilization(enable != 0);

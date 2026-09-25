@@ -35,6 +35,9 @@ typedef DartRCameraSetKelvinTint = void Function(int kelvin, int tint);
 typedef NativeRCameraSetOis = Void Function(Int32 enable);
 typedef DartRCameraSetOis = void Function(int enable);
 
+typedef NativeRCameraLockWbFromCenter = Int32 Function();
+typedef DartRCameraLockWbFromCenter = int Function();
+
 typedef NativeRCameraSetCropMode = Void Function(Int32 cropMode);
 typedef DartRCameraSetCropMode = void Function(int cropMode);
 
@@ -90,6 +93,7 @@ class RCameraNative {
   late final DartRCameraSetShutterAngle _setShutterAngle;
   late final DartRCameraSetWhiteBalanceGains _setWhiteBalanceGains;
   late final DartRCameraSetKelvinTint _setKelvinTint;
+  late final DartRCameraLockWbFromCenter _lockWbFromCenter;
   late final DartRCameraSetOis _setOis;
   late final DartRCameraSetCropMode _setCropMode;
   late final DartRCameraSetMonitoringMode _setMonitoringMode;
@@ -121,6 +125,7 @@ class RCameraNative {
       _setShutterAngle = _dylib!.lookupFunction<NativeRCameraSetShutterAngle, DartRCameraSetShutterAngle>('rcamera_set_shutter_angle');
       _setWhiteBalanceGains = _dylib!.lookupFunction<NativeRCameraSetWhiteBalanceGains, DartRCameraSetWhiteBalanceGains>('rcamera_set_white_balance_gains');
       _setKelvinTint = _dylib!.lookupFunction<NativeRCameraSetKelvinTint, DartRCameraSetKelvinTint>('rcamera_set_kelvin_tint');
+      _lockWbFromCenter = _dylib!.lookupFunction<NativeRCameraLockWbFromCenter, DartRCameraLockWbFromCenter>('rcamera_lock_white_balance_from_center');
       _setOis = _dylib!.lookupFunction<NativeRCameraSetOis, DartRCameraSetOis>('rcamera_set_ois');
       _setCropMode = _dylib!.lookupFunction<NativeRCameraSetCropMode, DartRCameraSetCropMode>('rcamera_set_crop_mode');
       _setMonitoringMode = _dylib!.lookupFunction<NativeRCameraSetMonitoringMode, DartRCameraSetMonitoringMode>('rcamera_set_monitoring_mode');
@@ -194,6 +199,15 @@ class RCameraNative {
   void setKelvinTint({required int kelvin, required int tint}) {
     if (!_isLoaded) return;
     _setKelvinTint(kelvin, tint);
+  }
+
+  /// Samples the current viewfinder's center patch and adjusts white balance
+  /// so it renders neutral. Returns true on success (a frame was available
+  /// and bright enough to sample); false if there's nothing usable to lock
+  /// onto yet (e.g. still initializing, or pointed at near-black).
+  bool lockWhiteBalanceFromCenter() {
+    if (!_isLoaded) return false;
+    return _lockWbFromCenter() == 0;
   }
 
   void setOis(bool enable) {
