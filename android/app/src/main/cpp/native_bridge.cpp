@@ -6,12 +6,34 @@
 #include <string>
 #include <sstream>
 #include <cmath>
+#include <algorithm>
 
 using namespace rcamera;
 
 static std::unique_ptr<CameraEngine> gCameraEngine;
 static std::unique_ptr<VulkanComputeEngine> gVulkanCompute;
 static ComputeUniformData gUniforms;
+
+// Inverse of the shader's linearToRLog() (mhc_rlog.comp) — must be kept
+// byte-for-byte in sync with those constants. Needed because the viewfinder
+// buffer we sample for tap-to-white-balance is log-encoded (it's literally
+// what's on screen), but white balance gains are applied in the LINEAR
+// domain, upstream of the log curve. Computing a correction ratio directly
+// on log-space samples and feeding it into a linear multiplier is wrong —
+// the log curve's flat black-floor offset makes near-black log samples look
+// like a huge color imbalance that isn't really there, so the "correction"
+// mostly just amplifies sensor read noise. Delogging first fixes that.
+static float rLogToLinear(float logVal) {
+    const float a = 0.225f;
+    const float b = 5.5555f;
+    const float c = 0.385f;
+    const float d = 0.100f;
+    const float logAtCutoff = c * 0.01f + d; // logVal at the curve's x=0.01 breakpoint
+    if (logVal < logAtCutoff) {
+        return std::max(0.0f, (logVal - d) / c);
+    }
+    return (std::exp((logVal - c) / a) - 1.0f) / b;
+}
 
 // Converts Kelvin (2000K - 10000K) and Tint (-50 to +50) to RGB gains
 static void kelvinTintToRgbGains(int kelvin, int tint, float& rGain, float& gGain, float& bGain) {
@@ -305,10 +327,24 @@ EXPORT int32_t rcamera_lock_white_balance_from_center() {
         return -1;
     }
 
-    float gray = (r + g + b) / 3.0f;
-    float newR = gUniforms.wbGains[0] * (gray / r);
-    float newG = gUniforms.wbGains[1] * (gray / g);
-    float newB = gUniforms.wbGains[2] * (gray / b);
+    // The sampled RGB is read off the on-screen viewfinder buffer, which is
+    // R-Log encoded (see mhc_rlog.comp). White balance gains are multiplied
+    // in the LINEAR domain, upstream of that curve, so the correction ratio
+    // has to be computed in linear space too — otherwise the log curve's
+    // black-floor offset makes ordinary shadow noise look like a massive
+    // color cast. Delog each channel first.
+    float linR = rLogToLinear(r);
+    float linG = rLogToLinear(g);
+    float linB = rLogToLinear(b);
+    if (linR < 0.01f || linG < 0.01f || linB < 0.01f) {
+        LOGW("rcamera_lock_white_balance_from_center: linearized patch too dark/noisy to use (linR=%.4f linG=%.4f linB=%.4f)", linR, linG, linB);
+        return -1;
+    }
+
+    float gray = (linR + linG + linB) / 3.0f;
+    float newR = gUniforms.wbGains[0] * (gray / linR);
+    float newG = gUniforms.wbGains[1] * (gray / linG);
+    float newB = gUniforms.wbGains[2] * (gray / linB);
     // Keep the convention (used everywhere else) that green stays the
     // unity-gain reference channel.
     if (newG > 1e-6f) {
@@ -316,9 +352,16 @@ EXPORT int32_t rcamera_lock_white_balance_from_center() {
         newB /= newG;
         newG = 1.0f;
     }
+    // Clamp to a physically sane range. A single 48x48 patch is still small
+    // enough that read noise or a slightly non-neutral surface can produce
+    // an outlier ratio; real AWB implementations cap gain swings for the
+    // same reason. +/-4 stops of correction is generous for any real light
+    // source and keeps a bad sample from tanking the image.
+    newR = std::clamp(newR, 0.25f, 4.0f);
+    newB = std::clamp(newB, 0.25f, 4.0f);
 
-    LOGI("White balance locked from center patch: sampled R=%.3f G=%.3f B=%.3f -> gains R=%.3f G=%.3f B=%.3f",
-         r, g, b, newR, newG, newB);
+    LOGI("White balance locked from center patch: sampled(log) R=%.3f G=%.3f B=%.3f -> linear R=%.3f G=%.3f B=%.3f -> gains R=%.3f G=%.3f B=%.3f",
+         r, g, b, linR, linG, linB, newR, newG, newB);
     rcamera_set_white_balance_gains(newR, newG, newB);
     return 0;
 }
