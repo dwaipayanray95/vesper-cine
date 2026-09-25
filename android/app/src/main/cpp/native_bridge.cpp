@@ -275,27 +275,25 @@ static void kelvinTintToRgbGains(int kelvin, int tint, float& rGain, float& gGai
     bGain = (g > 0.0f) ? (g / b) : 1.0f;
 }
 
-// The sensor's own calibrated "camera neutral" gains — what raw R/G/B ratios
-// THIS specific device's sensor reports for a neutral gray scene under its
-// calibration reference illuminant — computed once from real calibration
-// data when the camera opens (see rcamera_open_camera). Used to anchor the
-// Kelvin/tint dial to reality instead of the display-color approximation
-// kelvinTintToRgbGains() (above) was never designed to substitute for.
-static float gCalibratedRGain = 1.0f;
-static float gCalibratedGGain = 1.0f;
-static float gCalibratedBGain = 1.0f;
-
-// ACAMERA_SENSOR_COLOR_TRANSFORM1 maps CIE XYZ -> camera-native RGB under the
-// sensor's reference illuminant. Per the DNG spec, this is exactly the
+// ACAMERA_SENSOR_COLOR_TRANSFORM{1,2} map CIE XYZ -> camera-native RGB under
+// each reference illuminant. Per the DNG spec, this is exactly the
 // documented way to compute "camera neutral" (the raw RGB a neutral gray
 // scene produces under that illuminant) when no direct AWB/AsShotNeutral
-// estimate is available: cameraNeutral = ColorTransform1 * XYZ_white.
-static void computeCalibratedNeutralGains(const float colorTransform1[9], float& rGain, float& gGain, float& bGain) {
-    // CIE D50 white point — matches the target of ACAMERA_SENSOR_FORWARD_MATRIX1.
+// estimate is available: cameraNeutral = ColorTransform * XYZ_white.
+//
+// Takes an already CCT-interpolated ColorTransform (see
+// applyForwardMatrixForKelvin, which interpolates the matching ForwardMatrix
+// the same way) rather than always ColorTransform1 — using a fixed
+// single-illuminant baseline here while the render matrix itself is
+// interpolated by Kelvin would reintroduce the same single-illuminant
+// mismatch at any dial setting away from illuminant1, just in the WB-gain
+// baseline instead of the color matrix.
+static void computeCalibratedNeutralGains(const float colorTransform[9], float& rGain, float& gGain, float& bGain) {
+    // CIE D50 white point — matches the target of ACAMERA_SENSOR_FORWARD_MATRIX{1,2}.
     const float xw = 0.9642f, yw = 1.0000f, zw = 0.8249f;
-    float r = colorTransform1[0] * xw + colorTransform1[1] * yw + colorTransform1[2] * zw;
-    float g = colorTransform1[3] * xw + colorTransform1[4] * yw + colorTransform1[5] * zw;
-    float b = colorTransform1[6] * xw + colorTransform1[7] * yw + colorTransform1[8] * zw;
+    float r = colorTransform[0] * xw + colorTransform[1] * yw + colorTransform[2] * zw;
+    float g = colorTransform[3] * xw + colorTransform[4] * yw + colorTransform[5] * zw;
+    float b = colorTransform[6] * xw + colorTransform[7] * yw + colorTransform[8] * zw;
 
     if (r > 1e-6f && g > 1e-6f && b > 1e-6f) {
         rGain = g / r;
@@ -306,6 +304,25 @@ static void computeCalibratedNeutralGains(const float colorTransform1[9], float&
         gGain = 1.0f;
         bGain = 1.0f;
     }
+}
+
+// Interpolates ColorTransform1/2 for the given Kelvin the same way
+// applyForwardMatrixForKelvin interpolates ForwardMatrix1/2, then derives
+// the calibrated-neutral WB gain baseline from it. Falls back to
+// ColorTransform1 unchanged if only one illuminant's calibration is
+// available (mirrors applyForwardMatrixForKelvin's own fallback).
+static void computeCalibratedNeutralGainsForKelvin(float kelvin, float& rGain, float& gGain, float& bGain) {
+    if (!gHaveForwardMatrix2) {
+        computeCalibratedNeutralGains(gColorTransform1, rGain, gGain, bGain);
+        return;
+    }
+    float mired1 = 1.0e6f / gIlluminant1Kelvin;
+    float mired2 = 1.0e6f / gIlluminant2Kelvin;
+    float miredTarget = 1.0e6f / kelvin;
+    float g = std::clamp((miredTarget - mired1) / (mired2 - mired1), 0.0f, 1.0f);
+    float interpolated[9];
+    lerpMatrix9(gColorTransform1, gColorTransform2, g, interpolated);
+    computeCalibratedNeutralGains(interpolated, rGain, gGain, bGain);
 }
 
 extern "C" {
@@ -389,6 +406,12 @@ EXPORT int32_t rcamera_enumerate_cameras(char* outJson, int32_t maxLen) {
 
 EXPORT int32_t rcamera_open_camera(const char* cameraId) {
     if (!gCameraEngine) return -1;
+    // A stale sample from a previous camera/session has a different sensor's
+    // black level, CFA arrangement, and calibration matrices baked in — using
+    // it for a WB lock before this camera has produced its own first frame
+    // would silently apply nonsense gains instead of the "no sample yet"
+    // error rcamera_lock_white_balance_from_center() is meant to give.
+    gHasRawCenterSample = false;
     bool ok = gCameraEngine->openCamera(cameraId);
     if (ok) {
         const auto& meta = gCameraEngine->getCalibrationMetadata();
@@ -406,7 +429,13 @@ EXPORT int32_t rcamera_open_camera(const char* cameraId) {
         std::memcpy(gColorTransform2, meta.colorTransform2, sizeof(gColorTransform2));
         gIlluminant1Kelvin = referenceIlluminantToKelvin(meta.referenceIlluminant1);
         gIlluminant2Kelvin = referenceIlluminantToKelvin(meta.referenceIlluminant2);
-        gHaveForwardMatrix2 = meta.haveForwardMatrix2;
+        // Guard against both illuminant codes mapping to the same (or a near-
+        // identical) Kelvin value — the mired interpolation below divides by
+        // (mired2 - mired1), which would be a near-zero denominator and NaN
+        // the color matrix every frame. Treat that degenerate case the same
+        // as "no second matrix": fall back to ForwardMatrix1 unconditionally.
+        gHaveForwardMatrix2 = meta.haveForwardMatrix2 &&
+                              std::fabs(gIlluminant1Kelvin - gIlluminant2Kelvin) > 50.0f;
         if (gHaveForwardMatrix2) {
             // Start at the same 5600K reference the Kelvin dial defaults to.
             applyForwardMatrixForKelvin(5600.0f);
@@ -416,9 +445,11 @@ EXPORT int32_t rcamera_open_camera(const char* cameraId) {
             PackMat3ForPushConstant(meta.forwardMatrix1, gUniforms.sensorToXyzMatrix);
             LOGW("Only ForwardMatrix1 available on this device — color matrix is fixed regardless of scene lighting");
         }
-        computeCalibratedNeutralGains(meta.colorTransform1, gCalibratedRGain, gCalibratedGGain, gCalibratedBGain);
-        LOGI("Calibrated neutral WB gains from ColorTransform1: R=%.3f G=%.3f B=%.3f",
-             gCalibratedRGain, gCalibratedGGain, gCalibratedBGain);
+        {
+            float r0, g0, b0;
+            computeCalibratedNeutralGainsForKelvin(5600.0f, r0, g0, b0);
+            LOGI("Calibrated neutral WB gains at 5600K reference: R=%.3f G=%.3f B=%.3f", r0, g0, b0);
+        }
         gUniforms.cfaPattern = meta.cfaPattern;
         gUniforms.rawWidth = meta.activeArrayWidth;
         gUniforms.rawHeight = meta.activeArrayHeight;
@@ -508,25 +539,32 @@ EXPORT void rcamera_set_white_balance_gains(float rGain, float gGain, float bGai
 }
 
 EXPORT void rcamera_set_kelvin_tint(int32_t kelvin, int32_t tint) {
-    // kelvinTintToRgbGains() approximates a blackbody radiator's DISPLAY color
-    // (Tanner Helland algorithm) — it has no relationship to this sensor's
-    // actual raw-domain R/G/B response and, used directly as gains, pushes
-    // color the wrong way (e.g. it suppresses red at daylight temperatures,
-    // when real sensors need red boosted well above green). Used only as a
-    // *relative* shift here: the dial moves gains away from the sensor's own
-    // calibrated neutral (computeCalibratedNeutralGains, real per-device DNG
-    // calibration data) by the same ratio the approximation would move them
-    // away from its 5600K/tint-0 reference point, so the default dial
-    // position reflects real calibration and only user adjustment relies on
-    // the approximation.
-    float rAtKelvin = 1.0f, gAtKelvin = 1.0f, bAtKelvin = 1.0f;
-    kelvinTintToRgbGains(kelvin, tint, rAtKelvin, gAtKelvin, bAtKelvin);
-    float rAtRef = 1.0f, gAtRef = 1.0f, bAtRef = 1.0f;
-    kelvinTintToRgbGains(5600, 0, rAtRef, gAtRef, bAtRef);
+    // Gain baseline comes from computeCalibratedNeutralGainsForKelvin(), i.e.
+    // real per-device DNG calibration data (ColorTransform1/2) interpolated
+    // to the requested Kelvin — the same interpolation applyForwardMatrixForKelvin
+    // below uses for the render matrix, so gains and matrix always agree on
+    // which illuminant they're assuming. (An earlier version anchored gains
+    // to a single ColorTransform1-derived baseline and shifted it by a
+    // Kelvin-only display-color approximation; that meant the gain baseline
+    // and the CCT-interpolated matrix silently disagreed at any Kelvin away
+    // from illuminant1.)
+    float rGain, gGain, bGain;
+    computeCalibratedNeutralGainsForKelvin(static_cast<float>(kelvin), rGain, gGain, bGain);
 
-    float r = gCalibratedRGain * (rAtKelvin / rAtRef);
-    float b = gCalibratedBGain * (bAtKelvin / bAtRef);
-    rcamera_set_white_balance_gains(r, gCalibratedGGain, b);
+    // kelvinTintToRgbGains() approximates a blackbody radiator's DISPLAY color
+    // (Tanner Helland algorithm) — no relationship to this sensor's actual
+    // raw-domain response, so it's never used as an absolute gain. Used only
+    // to isolate the TINT (green/magenta) axis: comparing it against itself
+    // at the same Kelvin with tint=0 cancels out its absolute-value
+    // inaccuracy while keeping its relative tint behavior.
+    float rTint = 1.0f, gTint = 1.0f, bTint = 1.0f;
+    kelvinTintToRgbGains(kelvin, tint, rTint, gTint, bTint);
+    float rNoTint = 1.0f, gNoTint = 1.0f, bNoTint = 1.0f;
+    kelvinTintToRgbGains(kelvin, 0, rNoTint, gNoTint, bNoTint);
+    if (rNoTint > 1e-6f) rGain *= (rTint / rNoTint);
+    if (bNoTint > 1e-6f) bGain *= (bTint / bNoTint);
+
+    rcamera_set_white_balance_gains(rGain, gGain, bGain);
 
     // Also pick the color matrix appropriate for this Kelvin setting (see
     // applyForwardMatrixForKelvin's doc comment) — a fixed single-illuminant

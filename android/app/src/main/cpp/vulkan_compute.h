@@ -70,15 +70,6 @@ public:
 
     void setOutputDimensions(int32_t width, int32_t height);
 
-    // Averages a small patch around the center of the most recently presented
-    // viewfinder frame (RGBA8, post monitoring-mode LUT/curve). Used to
-    // implement "tap/press to set white balance from what the camera is
-    // pointed at" — an approximation (it samples post-R-Log-curve data rather
-    // than the linear pre-curve signal), but the standard one real camera
-    // apps' one-button custom-WB tools use in practice. Returns false if no
-    // frame has been presented yet.
-    bool sampleViewfinderCenterPatch(float& outR, float& outG, float& outB);
-
     // Called from the JNI bridge whenever Flutter's SurfaceProducer texture
     // is (re)created or torn down. Acquires/releases the window and
     // (re)configures its buffer geometry to match the compute output.
