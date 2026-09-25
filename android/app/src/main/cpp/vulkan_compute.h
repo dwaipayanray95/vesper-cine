@@ -38,6 +38,7 @@ struct ComputeUniformData {
     float whiteLevel;              // e.g. 1023.0                  — offset 160
     int32_t sensorOrientation;     // 0/90/180/270 clockwise       — offset 164
     int32_t rawRowStrideBytes;     // AImage_getPlaneRowStride()   — offset 168
+    int32_t cfaPattern;            // 0=RGGB,1=GRBG,2=GBRG,3=BGGR  — offset 172
 };
 
 // Packs a plain row-major 3x3 (9 floats, src9[row*3+col]) into the 12-float,

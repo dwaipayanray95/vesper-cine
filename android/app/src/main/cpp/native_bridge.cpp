@@ -125,6 +125,7 @@ EXPORT int32_t rcamera_open_camera(const char* cameraId) {
         gUniforms.whiteLevel = static_cast<float>(meta.whiteLevel);
         std::memcpy(gUniforms.blackLevel, meta.blackLevel, sizeof(meta.blackLevel));
         PackMat3ForPushConstant(meta.colorTransform1, gUniforms.sensorToXyzMatrix);
+        gUniforms.cfaPattern = meta.cfaPattern;
         gUniforms.rawWidth = meta.activeArrayWidth;
         gUniforms.rawHeight = meta.activeArrayHeight;
         gUniforms.outputWidth = 3840;

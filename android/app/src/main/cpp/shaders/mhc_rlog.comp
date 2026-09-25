@@ -30,7 +30,25 @@ layout(push_constant) uniform UniformData {
     float whiteLevel;          // e.g. 1023.0
     int sensorOrientation;     // 0/90/180/270: raw buffer -> upright display rotation (clockwise)
     int rawRowStrideBytes;     // AImage_getPlaneRowStride() for the RAW10 plane
+    int cfaPattern;            // ACAMERA_SENSOR_INFO_COLOR_FILTER_ARRANGEMENT: 0=RGGB,1=GRBG,2=GBRG,3=BGGR
 } ubo;
+
+// Which CFA channel physically occupies raw pixel (x,y): 0=R, 1=Gr (green on
+// a red row), 2=Gb (green on a blue row), 3=B. Must match ubo.cfaPattern —
+// hardcoding RGGB here regardless of the sensor's actual arrangement is what
+// caused the checkerboard color moire / desaturation bug this replaces.
+int cfaSiteAt(int x, int y) {
+    int bit = ((y & 1) << 1) | (x & 1); // raw quadrant: 0=(0,0) 1=(1,0) 2=(0,1) 3=(1,1)
+    if (ubo.cfaPattern == 0) {      // RGGB
+        if (bit == 0) return 0; if (bit == 1) return 1; if (bit == 2) return 2; return 3;
+    } else if (ubo.cfaPattern == 1) { // GRBG
+        if (bit == 0) return 1; if (bit == 1) return 0; if (bit == 2) return 3; return 2;
+    } else if (ubo.cfaPattern == 2) { // GBRG
+        if (bit == 0) return 2; if (bit == 1) return 3; if (bit == 2) return 0; return 1;
+    } else {                          // BGGR
+        if (bit == 0) return 3; if (bit == 1) return 2; if (bit == 2) return 1; return 0;
+    }
+}
 
 // R-Log OETF Transfer Function (Opto-Electronic Transfer Function)
 // Mathematical Log curve mapped to Pixel dynamic range:
@@ -105,9 +123,10 @@ float fetchBayer(int x, int y) {
     uint lsb = (lsbByte >> (pixelInGroup * 2)) & 0x3u;
     float raw = float((msb << 2) | lsb);
 
-    // Determine CFA pattern quadrant (0: R, 1: Gr, 2: Gb, 3: B)
-    int cfaIndex = ((y & 1) << 1) | (x & 1);
-    float bl = ubo.blackLevel[cfaIndex];
+    // ACAMERA_SENSOR_DYNAMIC_BLACK_LEVEL is always ordered [R, Gr, Gb, B]
+    // regardless of the sensor's physical CFA arrangement, so index by
+    // logical channel (cfaSiteAt), not raw quadrant bit position.
+    float bl = ubo.blackLevel[cfaSiteAt(x, y)];
     
     return max(0.0, (raw - bl) / (ubo.whiteLevel - bl));
 }
@@ -116,20 +135,15 @@ float fetchBayer(int x, int y) {
 vec3 demosaicMHC(int x, int y) {
     float p00 = fetchBayer(x, y);
 
-    int phaseX = x & 1;
-    int phaseY = y & 1;
+    // 0=R, 1=Gr (green on a red row), 2=Gb (green on a blue row), 3=B —
+    // resolved against the sensor's actual ubo.cfaPattern, not assumed RGGB.
+    int site = cfaSiteAt(x, y);
 
     float r = 0.0;
     float g = 0.0;
     float b = 0.0;
 
-    // RGGB Bayer phase cases:
-    // (phaseX=0, phaseY=0): Red
-    // (phaseX=1, phaseY=0): Green on Red row (Gr)
-    // (phaseX=0, phaseY=1): Green on Blue row (Gb)
-    // (phaseX=1, phaseY=1): Blue
-
-    if (phaseY == 0 && phaseX == 0) {
+    if (site == 0) {
         // Red pixel
         r = p00;
         // Green at Red (cross filter with 5x5 gradient correction)
@@ -139,7 +153,7 @@ vec3 demosaicMHC(int x, int y) {
         b = 0.25 * (fetchBayer(x-1, y-1) + fetchBayer(x+1, y-1) + fetchBayer(x-1, y+1) + fetchBayer(x+1, y+1))
           + 0.125 * (4.0 * p00 - fetchBayer(x, y-2) - fetchBayer(x, y+2) - fetchBayer(x-2, y) - fetchBayer(x+2, y));
     }
-    else if (phaseY == 1 && phaseX == 1) {
+    else if (site == 3) {
         // Blue pixel
         b = p00;
         // Green at Blue
@@ -149,7 +163,7 @@ vec3 demosaicMHC(int x, int y) {
         r = 0.25 * (fetchBayer(x-1, y-1) + fetchBayer(x+1, y-1) + fetchBayer(x-1, y+1) + fetchBayer(x+1, y+1))
           + 0.125 * (4.0 * p00 - fetchBayer(x, y-2) - fetchBayer(x, y+2) - fetchBayer(x-2, y) - fetchBayer(x+2, y));
     }
-    else if (phaseY == 0 && phaseX == 1) {
+    else if (site == 1) {
         // Green on Red row (Gr)
         g = p00;
         // Red has horizontal neighbors
@@ -160,7 +174,7 @@ vec3 demosaicMHC(int x, int y) {
           + 0.125 * (2.0 * p00 - fetchBayer(x, y-2) - fetchBayer(x, y+2) - fetchBayer(x-1, y) - fetchBayer(x+1, y));
     }
     else {
-        // Green on Blue row (Gb)
+        // site == 2: Green on Blue row (Gb)
         g = p00;
         // Red has vertical neighbors
         r = 0.5 * (fetchBayer(x, y-1) + fetchBayer(x, y+1))
