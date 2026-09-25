@@ -34,13 +34,19 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      # Installs the Android SDK cmdline-tools and accepts licenses. The
-      # exact NDK (flutter.ndkVersion) and CMake (3.22.1, pinned in
+      # ubuntu-latest runners already ship a working Android SDK
+      # (cmdline-tools + platform-tools) at $ANDROID_HOME — no separate
+      # setup action needed. (android-actions/setup-android@v3 was tried
+      # here first and fails outright: it runs `sdkmanager tools`, and
+      # Google removed that legacy standalone "tools" package from the SDK
+      # repository years ago, so the action exits 1 before anything else
+      # runs.) Just accept licenses against the preinstalled SDK; the exact
+      # NDK (flutter.ndkVersion) and CMake (3.22.1, pinned in
       # android/app/src/main/cpp/CMakeLists.txt) versions the native build
-      # needs are then auto-downloaded by the Android Gradle Plugin itself
-      # during the build — they don't need to be pre-installed here.
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      # needs are auto-downloaded by the Android Gradle Plugin itself
+      # during the build.
+      - name: Accept Android SDK licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
