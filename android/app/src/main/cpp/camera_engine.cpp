@@ -5,6 +5,21 @@
 
 namespace rcamera {
 
+namespace {
+// Mirrors cfaSiteAt() in shaders/mhc_rlog.comp: resolves which logical CFA
+// channel (0=R, 1=Gr, 2=Gb, 3=B) occupies a raw 2x2 quadrant position, given
+// the sensor's actual reported CFA arrangement (0=RGGB,1=GRBG,2=GBRG,3=BGGR).
+int CfaSiteAt(int32_t cfaPattern, int phaseX, int phaseY) {
+    int bit = (phaseY << 1) | phaseX;
+    switch (cfaPattern) {
+        case 0: { static const int m[4] = {0, 1, 2, 3}; return m[bit]; } // RGGB
+        case 1: { static const int m[4] = {1, 0, 3, 2}; return m[bit]; } // GRBG
+        case 2: { static const int m[4] = {2, 3, 0, 1}; return m[bit]; } // GBRG
+        default:{ static const int m[4] = {3, 2, 1, 0}; return m[bit]; } // BGGR
+    }
+}
+} // namespace
+
 // Static C-to-C++ callback shims
 static void sOnDeviceDisconnected(void* context, ACameraDevice* device) {
     auto* engine = static_cast<CameraEngine*>(context);
@@ -183,23 +198,35 @@ void CameraEngine::querySensorCalibration(ACameraMetadata* metadata) {
         calibrationMetadata_.whiteLevel = entry.data.i32[0];
     }
 
-    // Dynamic black level (4 floats)
-    if (ACameraMetadata_getConstEntry(metadata, ACAMERA_SENSOR_DYNAMIC_BLACK_LEVEL, &entry) == ACAMERA_OK && entry.count >= 4) {
-        calibrationMetadata_.blackLevel[0] = entry.data.f[0];
-        calibrationMetadata_.blackLevel[1] = entry.data.f[1];
-        calibrationMetadata_.blackLevel[2] = entry.data.f[2];
-        calibrationMetadata_.blackLevel[3] = entry.data.f[3];
-    }
-
     // Active array size
     if (ACameraMetadata_getConstEntry(metadata, ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE, &entry) == ACAMERA_OK && entry.count >= 4) {
         calibrationMetadata_.activeArrayWidth = entry.data.i32[2];
         calibrationMetadata_.activeArrayHeight = entry.data.i32[3];
     }
 
-    // Color filter arrangement (CFA)
+    // Color filter arrangement (CFA) — queried before black level below, since
+    // converting the black level pattern's physical ordering into the logical
+    // [R,Gr,Gb,B] order the shader expects requires knowing it.
     if (ACameraMetadata_getConstEntry(metadata, ACAMERA_SENSOR_INFO_COLOR_FILTER_ARRANGEMENT, &entry) == ACAMERA_OK) {
         calibrationMetadata_.cfaPattern = entry.data.u8[0];
+    }
+
+    // Black level. ACAMERA_SENSOR_DYNAMIC_BLACK_LEVEL (previously queried here) is a
+    // CaptureResult-only key — it is not a valid tag on static CameraCharacteristics,
+    // which is all `metadata` is at camera-open time, so that query always silently
+    // missed and blackLevel stayed at its hardcoded {64,64,64,64} struct default
+    // regardless of the real sensor. ACAMERA_SENSOR_BLACK_LEVEL_PATTERN is the static
+    // equivalent, but per the Camera2 docs it's an int32 array ordered by physical
+    // 2x2 position (top-left -> bottom-right), not the fixed logical [R,Gr,Gb,B]
+    // order dynamic black level uses — remap it through the CFA arrangement so
+    // blackLevel[] stays indexed the way fetchBayer()'s cfaSiteAt() expects.
+    if (ACameraMetadata_getConstEntry(metadata, ACAMERA_SENSOR_BLACK_LEVEL_PATTERN, &entry) == ACAMERA_OK && entry.count >= 4) {
+        for (int bit = 0; bit < 4; ++bit) {
+            int phaseX = bit & 1;
+            int phaseY = (bit >> 1) & 1;
+            int logicalSite = CfaSiteAt(calibrationMetadata_.cfaPattern, phaseX, phaseY);
+            calibrationMetadata_.blackLevel[logicalSite] = static_cast<float>(entry.data.i32[bit]);
+        }
     }
 
     // Physical sensor mounting angle relative to the device's natural (portrait) orientation.
