@@ -1,95 +1,213 @@
 # Project RawEdge (R-Camera)
 
-**Project RawEdge** is an open-source, cinema-grade camera application engineered for modern Google Pixel devices (Pixel 8 / 9 / 10 series). It completely bypasses Google's hardware Image Signal Processor (ISP) post-processing pipeline—eliminating aggressive chroma de-noising, edge-sharpening, and blotchy low-light watercolor smearing.
+**Project RawEdge** is an open-source, cinema-grade camera application engineered for modern Google Pixel devices (Pixel 8 / 9 / 10 series). It completely bypasses Google's hardware Image Signal Processor (ISP) computational photography pipeline—eliminating aggressive temporal smoothing, artificial edge-sharpening, multi-frame synthetic HDR tone-mapping, and blotchy low-light watercolor smearing.
+
+Instead, the application accesses raw uncompressed sensor data directly, applies a dedicated GPU debayering and cinema color science pipeline, and records 10-bit master footage with the **R-Log transfer curve** in wide-gamut Rec.2020 color space.
 
 ---
 
-## Key Features
-
-- **Pure Sensor RAW10 Ingestion:** Direct low-level frame capture via `libcamera2ndk` (`AIMAGE_FORMAT_RAW10`).
-- **Complete ISP Bypass:** Noise reduction, edge enhancement, and tone-mapping set to `OFF`/manual.
-- **Real-Time GPU Debayering:** Malvar-He-Cutler (MHC) $5 \times 5$ gradient-corrected bilinear demosaic running on Vulkan Compute.
-- **R-Log Color Science:** Custom logarithmic Opto-Electronic Transfer Function (OETF) calibrated to the Pixel's ~11.5 stop dynamic range.
-  - 18% Middle Gray sits at **40% IRE** (code value 553 / 1023 in 10-bit).
-  - Sensor clip point sits at **95% IRE** (smooth highlight shoulder).
-- **Cinema Standard Exposure Controls:**
-  - 180° Shutter Angle Lock (with 90°, 270°, 360° presets).
-  - Manual ISO ladder (50 to 3200).
-  - Manual White Balance (Kelvin 2000K–10000K & Tint) with **"Tap to Lock Neutral Gray"**.
-- **Professional Monitoring Tools:**
-  - Viewfinder Rec.709 Preview LUT toggle.
-  - False Color (standard IRE color ramp for skin tones and clipping).
-  - Focus Peaking (cinema green edge detection overlay).
-  - Animated Zebra stripes (95%+ highlight warning).
-- **Stabilization Options:**
-  - Hardware Voice-Coil Lens OIS toggle.
-  - High-rate IMU Gyro logging for post-stabilization in Gyroflow.
-- **Framing & Aspect Ratio:**
-  - 16:9 4K UHD center crop ($3840 \times 2160$).
-  - 4:3 Open-Gate ($3840 \times 2880$ full sensor binned readout).
-
----
-
-## Repository Structure
+## Architecture & System Objective
 
 ```
-R-Camera/
-├── android/
-│   ├── app/src/main/
-│   │   ├── cpp/
-│   │   │   ├── CMakeLists.txt              # Native build config (C++20)
-│   │   │   ├── camera_engine.h/.cpp        # NDK Camera2 RAW10 ingestion & ISP bypass
-│   │   │   ├── vulkan_compute.h/.cpp       # Vulkan Compute zero-copy GPU pipeline
-│   │   │   ├── native_bridge.cpp           # C-ABI bridge for Dart FFI
-│   │   │   └── shaders/
-│   │   │       ├── mhc_rlog.comp           # GLSL compute shader (MHC demosaic + R-Log)
-│   │   │       ├── mhc_rlog.spv            # Compiled SPIR-V bytecode
-│   │   │       └── mhc_rlog_spv.h          # Embedded bytecode header
-│   │   └── AndroidManifest.xml             # Camera, audio, sensor permissions
-├── color_science/
-│   ├── R-Log_to_Rec709.dctl               # DaVinci Resolve Studio DCTL plugin
-│   ├── R-Log_to_Rec709.cube               # 33x33x33 3D conversion LUT (Premiere / FCP / Resolve)
-│   └── generate_rlog_cube.py              # Precision LUT generator script
-├── lib/
-│   ├── main.dart                          # Flutter entrypoint
-│   ├── services/
-│   │   └── rcamera_native.dart            # Dart FFI communication layer
-│   └── ui/
-│       └── camera_screen.dart             # Cinema UI, dials, scopes & HUD
-└── test/
-    ├── offline_raw_processor.py           # Desktop raw validation harness
-    └── widget_test.dart                   # Smoke test
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│                             PHYSICAL SENSOR (Google Pixel)                       │
+│                     Raw 50MP Quad-Bayer / 12.5MP Binned RAW10                    │
+└────────────────────────────────────────┬─────────────────────────────────────────┘
+                                         │ libcamera2ndk (TEMPLATE_MANUAL)
+                                         │ Hardware ISP Bypassed (NR/Edge/Tone OFF)
+                                         ▼
+                             ┌───────────────────────┐
+                             │     AImageReader      │
+                             │ (AHardwareBuffer GPU) │
+                             └───────────┬───────────┘
+                                         │ Zero-copy AHardwareBuffer
+                                         ▼
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│                      GPU COMPUTE PIPELINE (Vulkan / GLSL)                        │
+│                                                                                  │
+│   1. Sensor Linearization & Dynamic Black / White Level Calibration              │
+│   2. 5x5 Malvar-He-Cutler (MHC) Gradient-Corrected Bilinear Bayer Debayering     │
+│   3. Manual White Balance Multipliers (Kelvin 2000K-10000K & Green/Magenta Tint) │
+│   4. Color Space Transformation: Sensor RGB -> CIE XYZ (D65) -> Linear Rec.2020  │
+│   5. Logarithmic OETF: Linear Rec.2020 -> 10-bit R-Log Transfer Curve            │
+│   6. Live Monitoring Transforms (Rec.709 LUT, False Color, Peaking, Zebras)      │
+└──────────────────┬───────────────────────────────────────────────┬───────────────┘
+                   │ Binding 1                                     │ Binding 2
+                   │ Clean 10-bit R-Log Master                     │ WYSIWYG Monitoring Feed
+                   ▼                                               ▼
+     ┌────────────────────────────┐                 ┌─────────────────────────────┐
+     │        AMediaCodec         │                 │   Flutter TextureRegistry   │
+     │ (10-bit HEVC / H.265 Rec)  │                 │  (SurfaceProducer / Surface │
+     │  Cinema Container Master   │                 │   Viewfinder Live Preview)  │
+     └────────────────────────────┘                 └─────────────────────────────┘
 ```
 
 ---
 
-## Color Grading in DaVinci Resolve
+## What We Are Trying to Achieve
 
-### Option A: Using the DCTL (Recommended for DaVinci Resolve Studio)
-1. Copy `color_science/R-Log_to_Rec709.dctl` to your DaVinci Resolve LUT directory:
+1. **True WYSIWYG Cinema Monitoring ("Option B" Pipeline):**
+   - The live viewfinder on screen must display **what is actually being recorded** rather than an arbitrary preview generated by Android's internal HAL ISP.
+   - Users must see the genuine flat, high-dynamic-range **R-Log logarithmic curve** (or the toggleable **Rec.709 Preview LUT** with filmic highlight roll-off).
+   - Real-time professional camera monitoring tools:
+     - **False Color (IRE heatmap):** Color-coded exposure analysis (pink for skin tones, red for 95%+ clipping, blue/purple for shadows).
+     - **Focus Peaking:** Green high-frequency edge detection overlay.
+     - **Zebras:** Animated diagonal crosshatch on regions exceeding 95% IRE.
+2. **True ISP-Bypass Cinema Capture:**
+   - Raw sensor Bayer data (`AIMAGE_FORMAT_RAW10`) captured directly with manual shutter angle (e.g., 180° motion blur), manual ISO, fixed manual focus, and manual white balance gains.
+   - Zero aggressive de-noising, zero edge-enhancement haloes, and zero HDR dynamic range compression from phone algorithms.
+3. **Correct Sensor & Display Geometry:**
+   - The camera viewfinder and recorded output must be upright and correctly oriented in landscape mode, compensating for the physical $90^\circ$ sensor orientation offset on Google Pixel hardware.
+4. **Cinematic Post-Production Workflow:**
+   - Full post-production support with calibrated **DaVinci Resolve Studio DCTL** plugins and standard 3D `.cube` conversion LUTs for Adobe Premiere, Final Cut Pro, and DaVinci Resolve.
+
+---
+
+## Current Status: What Has Been Done
+
+### 1. Camera2 NDK Sensor Ingestion (`android/app/src/main/cpp/camera_engine.cpp`)
+- [x] Initialized `ACameraManager` and camera enumeration routines.
+- [x] Implemented sensor identification to detect cameras supporting `AIMAGE_FORMAT_RAW10`.
+- [x] Added sensor calibration metadata extraction:
+  - Dynamic black levels (`ACAMERA_SENSOR_DYNAMIC_BLACK_LEVEL`).
+  - Sensor white level (`ACAMERA_SENSOR_INFO_WHITE_LEVEL`).
+  - Active array dimensions (`ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE`).
+  - Color filter arrangement (`ACAMERA_SENSOR_INFO_COLOR_FILTER_ARRANGEMENT`).
+  - Color transform matrix 1 (`ACAMERA_SENSOR_COLOR_TRANSFORM1`).
+  - Forward matrix 1 (`ACAMERA_SENSOR_FORWARD_MATRIX1`).
+- [x] Configured capture request with strict **ISP Bypass**:
+  - `ACAMERA_NOISE_REDUCTION_MODE = OFF`
+  - `ACAMERA_EDGE_MODE = OFF`
+  - `ACAMERA_TONEMAP_MODE = CONTRAST_CURVE`
+  - `ACAMERA_SHADING_MODE = OFF`
+  - `ACAMERA_CONTROL_AE_MODE = OFF`
+  - `ACAMERA_CONTROL_AWB_MODE = OFF`
+  - `ACAMERA_CONTROL_AF_MODE = OFF`
+- [x] Implemented manual exposure time (`ACAMERA_SENSOR_EXPOSURE_TIME`), sensitivity/ISO (`ACAMERA_SENSOR_SENSITIVITY`), white balance gains (`ACAMERA_COLOR_CORRECTION_GAINS`), and optical image stabilization (`ACAMERA_LENS_OPTICAL_STABILIZATION_MODE`).
+- [x] Created `AImageReader` with `AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE` for zero-copy GPU consumption.
+
+### 2. GPU Compute & Color Science (`android/app/src/main/cpp/shaders/mhc_rlog.comp`)
+- [x] Written GLSL compute shader featuring:
+  - 5x5 Malvar-He-Cutler (MHC) gradient-corrected bilinear demosaic algorithm.
+  - Sensor linearization and black level subtraction.
+  - White balance multiplier stage (Kelvin & Tint).
+  - Sensor RGB $\to$ CIE XYZ (D65) $\to$ Linear Rec.2020 transformation.
+  - Mathematical **R-Log transfer function** mapping:
+    - 18% Middle Gray sits at **40% IRE** (code value 553 / 1023 in 10-bit).
+    - Sensor clip point sits at **95% IRE** (smooth highlight shoulder).
+  - Viewfinder monitoring modes:
+    - Mode 0: Clean flat R-Log.
+    - Mode 1: Rec.709 Preview LUT (filmic S-curve roll-off).
+    - Mode 2: Standard 6-zone IRE False Color ramp.
+    - Mode 3: Cinema-green focus peaking overlay.
+    - Mode 4: 95% IRE highlight zebra stripes.
+  - 16:9 UHD center crop vs. 4:3 open-gate coordinate calculation.
+- [x] Compiled shader to SPIR-V bytecode (`mhc_rlog.spv`) and embedded C++ array header (`mhc_rlog_spv.h`).
+
+### 3. Vulkan Pipeline Architecture (`android/app/src/main/cpp/vulkan_compute.cpp`)
+- [x] Initialized Vulkan instance and selected physical device with compute queue capability.
+- [x] Configured logical device with Android Hardware Buffer external memory extensions (`VK_ANDROID_external_memory_android_hardware_buffer`, `VK_KHR_external_memory`, `VK_KHR_sampler_ycbcr_conversion`).
+- [x] Created compute pipeline, push constant ranges, and descriptor set layout bindings (Binding 0: Raw Bayer texture, Binding 1: Codec image, Binding 2: Viewfinder image).
+- [x] Set up command pool and primary command buffers for compute submission.
+
+### 4. Flutter UI & Platform Bridging
+- [x] **Native Bridge (`native_bridge.cpp`):** Exported C-ABI functions for camera initialization, camera enumeration, sensor opening, streaming start/stop, manual exposure/shutter/ISO adjustments, white balance, OIS, and crop modes.
+- [x] **JNI Surface Bridging (`MainActivity.kt`):** Implemented `MethodChannel("com.rawedge.r_camera/texture")` creating Flutter `SurfaceProducer` / `SurfaceTexture` entries and forwarding the native `ANativeWindow` surface down to JNI (`nativeSetViewfinderSurface`).
+- [x] **Dart FFI Service (`rcamera_native.dart`):** Built dynamic library bindings, device enumeration parser, control dispatchers, and texture lifecycle handlers (`createViewfinderTexture`, `destroyViewfinderTexture`).
+- [x] **Cinema Viewfinder HUD (`camera_screen.dart`):**
+  - Full landscape cinema interface.
+  - Live shutter angle selector (90°, 180°, 270°, 360°).
+  - Exposure & ISO ladder (50 to 3200).
+  - White balance Kelvin dial (2000K-10000K) and Green/Magenta tint dial (-50 to +50) with "Tap to Lock Neutral Gray".
+  - Live monitoring mode switcher (R-Log, Rec.709, False Color, Peaking, Zebras).
+  - 16:9 UHD vs. 4:3 Open-Gate framing toggle.
+  - OIS hardware toggle.
+  - Timecode display and recording indicator.
+  - Embedded `Texture(textureId: _textureId)` widget inside responsive framing canvas.
+
+---
+
+## What Needs to Be Done (Remaining Roadmap)
+
+### Phase 1: Viewfinder WYSIWYG & Orientation Fix (Immediate Priority)
+- [ ] **Decouple Viewfinder Surface from Direct Camera HAL:**
+  - Remove `viewfinderWindow_` from `ACaptureSessionOutputContainer` and `ACaptureRequest` in `camera_engine.cpp`.
+  - Camera2 must strictly output RAW10 to `AImageReader`.
+- [ ] **Wire Compute Pipeline Output to Viewfinder Surface:**
+  - Complete the Vulkan image-to-surface presentation or direct buffer presentation (`ANativeWindow_lock` / `ANativeWindow_unlockAndPost` or Vulkan swapchain presentation) so each processed frame in `sOnImageAvailable` renders to the Flutter `SurfaceProducer`.
+- [ ] **Correct Landscape Sensor Orientation ($90^\circ$ Offset):**
+  - Compensate for the physical sensor mounting angle ($90^\circ$ clockwise relative to device portrait) so that the live viewfinder in landscape mode is right-side up and un-mirrored.
+  - Apply coordinate transposition in `mhc_rlog.comp` or rotational transformation in Flutter's `Texture` widget.
+
+### Phase 2: AMediaCodec 10-Bit Recording Pipeline
+- [ ] **10-Bit HEVC / H.265 Encoder Setup:**
+  - Initialize Android NDK `AMediaCodec` for hardware-accelerated 10-bit HEVC (`COLOR_FormatSurface` / Main10 Profile).
+  - Obtain input `ANativeWindow` from `AMediaCodec_createInputSurface`.
+- [ ] **MPEG-4 Container Muxing (`AMediaMuxer`):**
+  - Stream encoded video packets into `.mp4` / `.mov` container on local storage.
+  - Include sample timestamps and sync frames (IDR).
+- [ ] **Audio Recording:**
+  - Capture 48 kHz / 24-bit uncompressed PCM stereo audio via `AAudio` or `Oboe`.
+  - Mux audio track synchronously with video.
+
+### Phase 3: Gyroflow IMU Logging
+- [ ] **High-Frequency Gyroscope & Accelerometer Ingestion:**
+  - Ingest hardware IMU telemetry via `ASensorManager` at 200 Hz+.
+- [ ] **CSV / Motion Metadata Export:**
+  - Write synchronous camera motion metadata compatible with the open-source **Gyroflow** stabilizer for optical post-stabilization without distortion.
+
+---
+
+## Detailed Component Matrix
+
+| Component | Status | Technology | Description |
+| :--- | :---: | :--- | :--- |
+| **Sensor Capture** | Done | NDK `libcamera2ndk` | RAW10 Bayer ingestion with zero-ISP manual capture request |
+| **Sensor Calibration**| Done | NDK Metadata | Dynamic black levels, white level, color matrices |
+| **MHC Debayering** | Done | GLSL Compute | 5x5 Malvar-He-Cutler gradient-corrected demosaicing |
+| **R-Log Transfer** | Done | GLSL Compute | Custom high-dynamic-range logarithmic OETF |
+| **Monitoring Scopes** | Done | GLSL Compute | False color IRE, peaking, zebras, Rec.709 preview LUT |
+| **Texture Bridge** | Done | Kotlin / Dart FFI | Flutter `SurfaceProducer` $\to$ NDK `ANativeWindow` |
+| **Viewfinder R-Log Wire** | **In Progress** | C++ / Vulkan | Present compute shader output directly to `ANativeWindow` |
+| **Sensor Orientation** | **In Progress** | GLSL / Flutter | Correct $90^\circ$ hardware sensor offset to upright landscape |
+| **10-Bit Recording** | Planned | NDK `AMediaCodec` | 10-bit HEVC Main10 recording to MP4 master |
+| **Gyroflow Logging** | Planned | NDK Sensors | High-rate IMU motion logging for post-stabilization |
+
+---
+
+## Color Grading & Post-Production Reference
+
+### Using the DCTL in DaVinci Resolve Studio (Recommended)
+1. Copy `color_science/R-Log_to_Rec709.dctl` into DaVinci Resolve's LUT folder:
    - **Windows:** `%ALLUSERSPROFILE%\Blackmagic Design\DaVinci Resolve\Support\LUT\`
    - **macOS:** `/Library/Application Support/Blackmagic Design/DaVinci Resolve/LUT/`
-2. In DaVinci Resolve (Color Page), add a DCTL node and select `R-Log_to_Rec709`.
-3. Adjust Exposure Compensation and Highlight Roll-off sliders dynamically!
+2. In DaVinci Resolve (Color Page), add a DCTL OFX node to your node graph.
+3. Select `R-Log_to_Rec709`.
+4. Adjust exposure compensation, filmic highlight roll-off, and white point dynamically.
 
-### Option B: Using the 3D `.cube` LUT (Any Editor)
+### Using the 3D `.cube` LUT
 1. Import `color_science/R-Log_to_Rec709.cube` into Premiere Pro, Final Cut Pro, or DaVinci Resolve.
 2. Apply the LUT directly to your clip on a Rec.709 timeline.
+3. Use the generator script `python color_science/generate_rlog_cube.py` to regenerate or re-mesh the 3D LUT at custom resolutions (e.g. 65x65x65).
 
 ---
 
 ## How to Build & Run
 
 ### Prerequisites
-- Flutter SDK 3.24+ (Dart 3.5+)
-- Android SDK 34+ with NDK 27+ / 28+
-- Android Studio / JDK 21
+- **Flutter SDK:** 3.24+ (Dart 3.5+)
+- **Android SDK:** API 34+
+- **Android NDK:** Version 27+ / 28+ (C++20 enabled)
+- **Target Hardware:** Physical Google Pixel (Pixel 8 / 9 / 10 series)
 
-### Run on Connected Device
+### Build & Install
 ```bash
-# Verify ADB connection to Pixel device
+# Verify device connection (Pixel 10)
 adb devices
 
-# Build and run
-flutter run --release
+# Build debug APK
+flutter build apk --debug
+
+# Install and launch
+flutter run --debug -d <device-id>
 ```
