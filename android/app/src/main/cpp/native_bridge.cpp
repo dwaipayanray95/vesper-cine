@@ -124,7 +124,13 @@ EXPORT int32_t rcamera_open_camera(const char* cameraId) {
         const auto& meta = gCameraEngine->getCalibrationMetadata();
         gUniforms.whiteLevel = static_cast<float>(meta.whiteLevel);
         std::memcpy(gUniforms.blackLevel, meta.blackLevel, sizeof(meta.blackLevel));
-        PackMat3ForPushConstant(meta.colorTransform1, gUniforms.sensorToXyzMatrix);
+        // ACAMERA_SENSOR_FORWARD_MATRIX1 maps white-balanced sensor RGB -> CIE XYZ
+        // (D50) — the direction this pipeline needs (xyz = matrix * wbRgb below).
+        // ACAMERA_SENSOR_COLOR_TRANSFORM1 (meta.colorTransform1, previously used
+        // here by mistake) is the *inverse* direction (XYZ -> camera-native), used
+        // for AWB estimation, not rendering; applying it forward instead of
+        // ForwardMatrix1 produced a strong wrong color cast.
+        PackMat3ForPushConstant(meta.forwardMatrix1, gUniforms.sensorToXyzMatrix);
         gUniforms.cfaPattern = meta.cfaPattern;
         gUniforms.rawWidth = meta.activeArrayWidth;
         gUniforms.rawHeight = meta.activeArrayHeight;

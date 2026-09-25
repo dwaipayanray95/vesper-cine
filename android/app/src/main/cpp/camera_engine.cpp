@@ -216,12 +216,18 @@ void CameraEngine::querySensorCalibration(ACameraMetadata* metadata) {
         }
     }
 
-    // Forward matrix 1
+    // Forward matrix 1: maps white-balanced sensor RGB -> CIE XYZ (D50). This is
+    // the matrix the render pipeline actually needs (see native_bridge.cpp).
+    // ACAMERA_SENSOR_FORWARD_MATRIX1 is OPTIONAL per the Camera2/DNG spec — if a
+    // device's camera HAL doesn't populate it, forwardMatrix1 silently stays at
+    // the identity default below, which the log line makes visible.
+    bool haveForwardMatrix = false;
     if (ACameraMetadata_getConstEntry(metadata, ACAMERA_SENSOR_FORWARD_MATRIX1, &entry) == ACAMERA_OK && entry.count >= 9) {
         for (int i = 0; i < 9; ++i) {
             calibrationMetadata_.forwardMatrix1[i] = static_cast<float>(entry.data.r[i].numerator) /
                                                      static_cast<float>(entry.data.r[i].denominator);
         }
+        haveForwardMatrix = true;
     }
 
     LOGI("Queried Sensor Calibration: WhiteLevel=%d, BlackLevel=[%.1f, %.1f, %.1f, %.1f], ActiveArray=%dx%d, CFA=%d, SensorOrientation=%d",
@@ -230,6 +236,10 @@ void CameraEngine::querySensorCalibration(ACameraMetadata* metadata) {
          calibrationMetadata_.blackLevel[2], calibrationMetadata_.blackLevel[3],
          calibrationMetadata_.activeArrayWidth, calibrationMetadata_.activeArrayHeight,
          calibrationMetadata_.cfaPattern, calibrationMetadata_.sensorOrientation);
+
+    const auto& fm = calibrationMetadata_.forwardMatrix1;
+    LOGI("ForwardMatrix1 present=%d: [%.4f %.4f %.4f / %.4f %.4f %.4f / %.4f %.4f %.4f]",
+         haveForwardMatrix, fm[0], fm[1], fm[2], fm[3], fm[4], fm[5], fm[6], fm[7], fm[8]);
 }
 
 bool CameraEngine::startCaptureSession(int32_t width, int32_t height, FrameCallback callback) {
