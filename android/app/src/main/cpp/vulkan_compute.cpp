@@ -440,7 +440,14 @@ bool VulkanComputeEngine::ensureExternalFormatResources(AHardwareBuffer* hwBuffe
     if (rawImmutableSampler_) { vkDestroySampler(device_, rawImmutableSampler_, nullptr); rawImmutableSampler_ = VK_NULL_HANDLE; }
     if (rawYcbcrConversion_) { vkDestroySamplerYcbcrConversion(device_, rawYcbcrConversion_, nullptr); rawYcbcrConversion_ = VK_NULL_HANDLE; }
 
-    bool useExternalFormat = (formatProps.format == VK_FORMAT_UNDEFINED);
+    // This binding is always RAW10 Bayer sensor data, never a real RGBA texture.
+    // Some vendor gralloc/Vulkan implementations still report a plausible-looking
+    // concrete VkFormat (e.g. R8G8B8A8_UNORM) in formatProps.format for a RAW/BLOB
+    // AHardwareBuffer despite the actual memory being packed 10-bit sensor data —
+    // trusting that format then mismatches gralloc's real byte layout and crashes
+    // (observed: SIGTRAP inside libcustomer_gralloc_ddk_api.so's bpp calculator).
+    // Always go through the opaque external-format path instead of formatProps.format.
+    bool useExternalFormat = true;
 
     VkExternalFormatANDROID externalFormatInfo{};
     externalFormatInfo.sType = VK_STRUCTURE_TYPE_EXTERNAL_FORMAT_ANDROID;
@@ -630,7 +637,10 @@ bool VulkanComputeEngine::importFrameImage(AHardwareBuffer* hwBuffer, int32_t wi
         return false;
     }
 
-    bool useExternalFormat = (formatProps.format == VK_FORMAT_UNDEFINED);
+    // See the matching comment in ensureExternalFormatResources(): always import
+    // this binding as an opaque external format rather than trusting whatever
+    // concrete VkFormat the driver reports for the RAW/BLOB AHardwareBuffer.
+    bool useExternalFormat = true;
 
     VkExternalFormatANDROID externalFormatInfo{};
     externalFormatInfo.sType = VK_STRUCTURE_TYPE_EXTERNAL_FORMAT_ANDROID;
