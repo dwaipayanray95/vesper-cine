@@ -11,7 +11,7 @@
     <uses-feature android:name="android.hardware.sensor.gyroscope" android:required="false" />
 
     <application
-        android:label="r_camera"
+        android:label="Vesper Cine"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity

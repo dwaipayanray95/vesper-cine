@@ -12,7 +12,7 @@ class RawEdgeApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Project RawEdge (R-Camera)',
+      title: 'Vesper Cine',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,
