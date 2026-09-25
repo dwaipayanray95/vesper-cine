@@ -232,6 +232,15 @@ void main() {
         srcY = (uCoord.y * ubo.rawDimensions.y) / uDims.y;
     }
 
+    // Snap onto a consistent Bayer phase (even, even) before demosaicing. The
+    // raw->output ratio above (e.g. 4000px raw / 3840px output) is essentially
+    // never an exact integer, so without this, consecutive output pixels drift
+    // in and out of phase with the CFA's 2-pixel period as srcX/srcY sweep
+    // across the frame — a classic resampling/moire beat pattern that shows up
+    // as a regular checkerboard texture over the whole image.
+    srcX &= ~1;
+    srcY &= ~1;
+
     // 1. Debayer with Malvar-He-Cutler 5x5
     vec3 rawRgb = demosaicMHC(srcX, srcY);
 

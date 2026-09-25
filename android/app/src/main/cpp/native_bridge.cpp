@@ -170,8 +170,16 @@ EXPORT int32_t rcamera_open_camera(const char* cameraId) {
         gUniforms.cfaPattern = meta.cfaPattern;
         gUniforms.rawWidth = meta.activeArrayWidth;
         gUniforms.rawHeight = meta.activeArrayHeight;
-        gUniforms.outputWidth = 3840;
-        gUniforms.outputHeight = 2160;
+        // 1920x1080 rather than full 3840x2160: measured on-device, the compute
+        // shader alone was taking ~92ms/frame at 4K on this hardware (a naive
+        // per-pixel RAW10 SSBO unpack with no texture-cache benefit, over 8.3M
+        // pixels), capping the viewfinder at ~7fps. Quartering the pixel count
+        // directly targets that cost. Nothing consumes the full-res codec output
+        // yet (AMediaCodec recording is a future phase — see README), so there's
+        // no current downside; revisit once recording lands and/or the shader
+        // is optimized (e.g. workgroup shared-memory tiling for the 5x5 kernel).
+        gUniforms.outputWidth = 1920;
+        gUniforms.outputHeight = 1080;
 
         // The app is locked to a single fixed landscape hold (see camera_screen.dart),
         // which corresponds to a display rotation of 90 degrees. The total rotation the
@@ -261,12 +269,14 @@ EXPORT void rcamera_set_ois(int32_t enable) {
 EXPORT void rcamera_set_crop_mode(int32_t cropMode) {
     // 0: 16:9 UHD crop, 1: 4:3 open gate
     gUniforms.cropMode = cropMode;
+    // See the matching comment in rcamera_open_camera() for why these are
+    // 1920-wide rather than full 3840-wide right now.
     if (cropMode == 1) {
-        gUniforms.outputWidth = 3840;
-        gUniforms.outputHeight = 2880;
+        gUniforms.outputWidth = 1920;
+        gUniforms.outputHeight = 1440;
     } else {
-        gUniforms.outputWidth = 3840;
-        gUniforms.outputHeight = 2160;
+        gUniforms.outputWidth = 1920;
+        gUniforms.outputHeight = 1080;
     }
 
     if (gVulkanCompute) {
