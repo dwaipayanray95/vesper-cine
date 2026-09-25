@@ -209,13 +209,14 @@ aaudio_data_callback_result_t Recorder::audioCallback(AAudioStream*, void* user,
 }
 
 void Recorder::submitVideoFrame(int slot, int64_t ts) {
-    if (!accepting_) {
-        if (gpu_) gpu_->releaseEncoderFrame(slot);
-        return;
-    }
     {
         std::lock_guard<std::mutex> lk(jobMutex_);
-        jobs_.push_back({slot, ts});
+        if (accepting_) {
+            jobs_.push_back({slot, ts});
+        } else {
+            if (gpu_) gpu_->releaseEncoderFrame(slot);
+            return;
+        }
     }
     jobCv_.notify_one();
 }
@@ -241,7 +242,8 @@ RecorderStatus Recorder::status() {
 
 void Recorder::threadMain() {
     bool videoEos = false, audioEos = audioCodec_ == nullptr;
-    bool eosQueued = false;
+    bool eosQueued = false, audioEosQueued = false;
+    int64_t eosDeadlineNs = 0;
     while (true) {
         VideoJob job{-1, 0};
         {
@@ -252,7 +254,10 @@ void Recorder::threadMain() {
         if (job.slot >= 0) encodeVideo(job);
 
         bool stopping = stopRequested_.load();
-        if (stopping) accepting_ = false;
+        if (stopping) {
+            std::lock_guard<std::mutex> lk(jobMutex_);
+            accepting_ = false;
+        }
         bool jobsLeft;
         { std::lock_guard<std::mutex> lk(jobMutex_); jobsLeft = !jobs_.empty(); }
 
@@ -262,16 +267,22 @@ void Recorder::threadMain() {
                 AMediaCodec_queueInputBuffer(video_, static_cast<size_t>(idx), 0, 0,
                                              static_cast<uint64_t>(std::max<int64_t>(lastVideoPtsUs_ + 1, 0)),
                                              AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM);
-                if (audioCodec_) feedAudio(true);
                 eosQueued = true;
+                eosDeadlineNs = clockNs(CLOCK_MONOTONIC) + 3'000'000'000LL;
             }
         } else if (audioCodec_ && !eosQueued) {
             feedAudio(false);
         }
+        // Audio EOS is retried every pass until the codec accepts it.
+        if (eosQueued && audioCodec_ && !audioEosQueued) audioEosQueued = feedAudio(true);
 
         if (!videoEos) drain(video_, videoTrack_, videoEos, eosQueued ? 10'000 : 0);
         if (!audioEos) drain(audioCodec_, audioTrack_, audioEos, 0);
         if (eosQueued && videoEos && audioEos) break;
+        if (eosQueued && clockNs(CLOCK_MONOTONIC) > eosDeadlineNs) {
+            RLOGW("Encoder did not signal end of stream within 3s — finalising anyway");
+            break;
+        }
         if (!stopping) checkGuards();
     }
     closeAll();
@@ -324,12 +335,12 @@ void Recorder::encodeVideo(const VideoJob& job) {
     status_.durationUs = ptsUs;
 }
 
-void Recorder::feedAudio(bool endOfStream) {
-    if (!audioCodec_) return;
+bool Recorder::feedAudio(bool endOfStream) {
+    if (!audioCodec_) return true;
     if (firstVideoNs_ < 0 && !endOfStream) {
         // Nothing to sync to yet: discard captured audio so it starts with the picture.
         ringRead_ = ringWrite_.load(std::memory_order_acquire);
-        return;
+        return false;
     }
     const int64_t clock = firstAudioCallbackNs_.load();
     if (audioBaseNs_ < 0 && clock >= 0 && audioStream_) {
@@ -366,14 +377,17 @@ void Recorder::feedAudio(bool endOfStream) {
                                      static_cast<uint64_t>(ptsNs / 1000), 0);
     }
     if (endOfStream) {
-        ssize_t idx = AMediaCodec_dequeueInputBuffer(audioCodec_, 50'000);
-        if (idx >= 0) {
+        ssize_t idx = AMediaCodec_dequeueInputBuffer(audioCodec_, 10'000);
+        if (idx < 0) return false;
+        {
             int64_t ptsUs = std::max<int64_t>(0, (audioBaseNs_ + static_cast<int64_t>(ringRead_) * 1'000'000'000LL / kSampleRate - firstVideoNs_) / 1000);
             AMediaCodec_queueInputBuffer(audioCodec_, static_cast<size_t>(idx), 0, 0, static_cast<uint64_t>(ptsUs),
                                          AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM);
         }
         if (audioStream_) AAudioStream_requestStop(audioStream_);
+        return true;
     }
+    return false;
 }
 
 bool Recorder::drain(AMediaCodec* codec, int& track, bool& eos, int64_t timeoutUs) {
@@ -443,10 +457,10 @@ void Recorder::checkGuards() {
 }
 
 void Recorder::closeAll() {
-    accepting_ = false;
     {
         // Release any frames still queued so the GPU ring isn't starved.
         std::lock_guard<std::mutex> lk(jobMutex_);
+        accepting_ = false;
         for (auto& j : jobs_) if (gpu_) gpu_->releaseEncoderFrame(j.slot);
         jobs_.clear();
     }

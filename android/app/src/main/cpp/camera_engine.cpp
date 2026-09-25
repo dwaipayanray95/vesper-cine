@@ -40,8 +40,12 @@ int64_t nowMs() {
 } // namespace
 
 CameraEngine::~CameraEngine() {
-    closeCamera();
+    {
+        std::lock_guard<std::mutex> lock(recoveryMutex_);
+        closing_ = true;
+    }
     if (recoveryThread_.joinable()) recoveryThread_.join();
+    closeCamera();
     if (manager_) ACameraManager_delete(manager_);
 }
 
@@ -268,12 +272,14 @@ void CameraEngine::stopCaptureLocked() {
     }
     if (reader_) {
         AImageReader_setImageListener(reader_, nullptr);
-        // Wait out any frame callback still running on the reader thread
-        // before the reader (and the images it owns) are freed.
-        std::lock_guard<std::mutex> frameLock(frameMutex_);
-        AImageReader_delete(reader_); // also releases readerWindow_, which the reader owns
+        AImageReader* r = reader_;
         reader_ = nullptr;
         readerWindow_ = nullptr;
+        // Drain a frame callback already in progress, but delete outside the
+        // lock: AImageReader_delete joins the reader thread, which may be
+        // about to enter onImageAvailable and take frameMutex_.
+        { std::lock_guard<std::mutex> drain(frameMutex_); }
+        AImageReader_delete(r); // also releases the window the reader owns
     }
 }
 
@@ -398,6 +404,7 @@ void CameraEngine::onCaptureCompleted(const ACameraMetadata* r) {
 }
 
 void CameraEngine::onImageAvailable(AImageReader* reader) {
+    if (!streaming_) return;
     std::lock_guard<std::mutex> frameLock(frameMutex_);
     AImage* image = nullptr;
     if (AImageReader_acquireNextImage(reader, &image) != AMEDIA_OK || !image) return;
@@ -442,6 +449,8 @@ void CameraEngine::onDeviceError(int error) {
 // Recovery must not run on the camera callback thread (closing the device
 // from inside its own callback deadlocks), so it gets its own thread.
 void CameraEngine::scheduleRecovery() {
+    std::lock_guard<std::mutex> lock(recoveryMutex_);
+    if (closing_) return;
     int64_t now = nowMs();
     if (now - lastRecoveryMs_.load() < 2000) return;
     lastRecoveryMs_ = now;
@@ -457,7 +466,7 @@ void CameraEngine::scheduleRecovery() {
             h = streamH_;
             cb = callback_;
         }
-        if (id.empty() || w <= 0) return;
+        if (id.empty() || w <= 0 || closing_) return;
         LOGW("Recovering camera %s", id.c_str());
         if (openCamera(id) && startCapture(w, h, cb)) LOGI("Camera recovered");
         else LOGE("Camera recovery failed");

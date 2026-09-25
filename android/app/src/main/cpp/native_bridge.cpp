@@ -7,6 +7,7 @@
 
 #include <android/native_window_jni.h>
 #include <jni.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <chrono>
@@ -358,7 +359,10 @@ EXPORT void vesper_set_highlight_headroom(float stops) {
 
 // Takes ownership of `fd`. codec: 0 = HEVC, 1 = AV1. Returns 0 on success.
 EXPORT int32_t vesper_start_recording(int32_t fd, int32_t codec, int32_t audio) {
-    if (!gRecorder || !gGpu || !gCamera || !gCamera->isStreaming()) return -1;
+    if (!gRecorder || !gGpu || !gCamera || !gCamera->isStreaming()) {
+        if (fd >= 0) close(fd);
+        return -1;
+    }
     RecorderConfig cfg;
     cfg.fd = fd;
     {

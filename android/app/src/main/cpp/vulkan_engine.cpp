@@ -640,12 +640,14 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
         std::unique_lock<std::mutex> lk(encoderMutex_);
         if (!encoderCv_.wait_for(lk, std::chrono::milliseconds(250), [&] { return !s.encoderHold; })) {
             ++droppedFrames_;
+            nextSlot_ = (nextSlot_ + 1) % kRingSize; // don't wedge on one stuck slot
             VK_LOGW("Frame dropped: encoder still holds slot %d", idx);
             return false;
         }
     }
     if (vkWaitForFences(device_, 1, &s.fence, VK_TRUE, kFenceTimeoutNs) != VK_SUCCESS) {
         ++droppedFrames_;
+        nextSlot_ = (nextSlot_ + 1) % kRingSize;
         VK_LOGW("Frame dropped: GPU still busy with slot %d", idx);
         return false;
     }
@@ -773,7 +775,7 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
         pi.pSwapchains = &swapchain_;
         pi.pImageIndices = &imageIndex;
         VkResult pr = vkQueuePresentKHR(queue_, &pi);
-        if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_ERROR_SURFACE_LOST_KHR || pr == VK_SUBOPTIMAL_KHR) swapchainStale_ = true;
+        if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_ERROR_SURFACE_LOST_KHR) swapchainStale_ = true;
     }
 
     if (encoderSlot) {

@@ -67,7 +67,7 @@ private:
 
     void threadMain();
     void encodeVideo(const VideoJob& job);
-    void feedAudio(bool endOfStream);
+    bool feedAudio(bool endOfStream); // with endOfStream: true once EOS is queued
     bool drain(AMediaCodec* codec, int& track, bool& eos, int64_t timeoutUs);
     void writeSample(int track, const uint8_t* data, const AMediaCodecBufferInfo& info);
     void checkGuards();

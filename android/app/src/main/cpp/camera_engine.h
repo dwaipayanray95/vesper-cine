@@ -160,6 +160,8 @@ private:
     bool ois_ = true;
     float focusDiopters_ = 0.0f;
 
+    std::mutex recoveryMutex_; // guards recoveryThread_
+    std::atomic<bool> closing_{false};
     std::thread recoveryThread_;
     std::atomic<int64_t> lastRecoveryMs_{0};
 };
