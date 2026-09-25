@@ -63,6 +63,7 @@ public:
     void setWhitebalanceGains(float rGain, float gGain, float bGain);
     void setOpticalStabilization(bool enableOis);
     void setFocusDistance(float diopters);
+    void setViewfinderWindow(ANativeWindow* window);
 
     const SensorCalibrationMetadata& getCalibrationMetadata() const { return calibrationMetadata_; }
     bool isStreaming() const { return isStreaming_.load(); }
@@ -84,8 +85,10 @@ private:
     ACameraCaptureSession* captureSession_ = nullptr;
     ACaptureSessionOutputContainer* outputContainer_ = nullptr;
     ACaptureSessionOutput* sessionOutput_ = nullptr;
+    ACaptureSessionOutput* viewfinderOutput_ = nullptr;
     ACaptureRequest* captureRequest_ = nullptr;
     ANativeWindow* imageReaderWindow_ = nullptr;
+    ANativeWindow* viewfinderWindow_ = nullptr;
     AImageReader* imageReader_ = nullptr;
 
     std::string activeCameraId_;

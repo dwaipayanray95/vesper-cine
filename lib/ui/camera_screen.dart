@@ -28,6 +28,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   // Recording Timer
   late AnimationController _pulseController;
   int _recordedSeconds = 0;
+  int? _textureId;
 
   @override
   void initState() {
@@ -49,6 +50,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   @override
   void dispose() {
     _pulseController.dispose();
+    _camera.destroyViewfinderTexture();
     _camera.close();
     super.dispose();
   }
@@ -81,8 +83,10 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       _camera.setCropMode(_cropMode);
       _camera.setMonitoringMode(_monitoringMode);
 
+      final textureId = await _camera.createViewfinderTexture(width: 1920, height: 1080);
       final streamOk = _camera.startStream(rawCam.rawWidth, rawCam.rawHeight);
       setState(() {
+        _textureId = textureId;
         _isStreaming = streamOk;
         _statusMessage = "PIXEL SENSOR ACTIVE (RAW10 ${rawCam.rawWidth}x${rawCam.rawHeight})";
       });
@@ -187,7 +191,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       backgroundColor: Colors.black,
       body: Stack(
         children: [
-          // 1. Live Viewfinder Sensor Canvas (Mock / Native Surface Texture)
+          // 1. Live Viewfinder Sensor Canvas (Native Surface Texture / Fallback)
           Center(
             child: AspectRatio(
               aspectRatio: (_cropMode == 0) ? (16 / 9) : (4 / 3),
@@ -199,28 +203,32 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                     width: _isRecording ? 2.5 : 1.0,
                   ),
                 ),
-                child: Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        Icons.camera_rounded,
-                        size: 48,
-                        color: _isStreaming ? Colors.greenAccent.withValues(alpha: 0.5) : Colors.white.withValues(alpha: 0.15),
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        _statusMessage,
-                        style: TextStyle(
-                          color: Colors.white.withValues(alpha: 0.3),
-                          fontSize: 11,
-                          fontWeight: FontWeight.w600,
-                          letterSpacing: 1.5,
+                child: _textureId != null
+                    ? ClipRect(
+                        child: Texture(textureId: _textureId!),
+                      )
+                    : Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.camera_rounded,
+                              size: 48,
+                              color: _isStreaming ? Colors.greenAccent.withValues(alpha: 0.5) : Colors.white.withValues(alpha: 0.15),
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              _statusMessage,
+                              style: TextStyle(
+                                color: Colors.white.withValues(alpha: 0.3),
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                letterSpacing: 1.5,
+                              ),
+                            ),
+                          ],
                         ),
                       ),
-                    ],
-                  ),
-                ),
               ),
             ),
           ),

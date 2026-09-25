@@ -2,6 +2,7 @@
 #include "vulkan_compute.h"
 
 #include <jni.h>
+#include <android/native_window_jni.h>
 #include <string>
 #include <sstream>
 #include <cmath>
@@ -208,6 +209,19 @@ EXPORT void rcamera_close() {
     if (gVulkanCompute) {
         gVulkanCompute->release();
     }
+}
+
+JNIEXPORT jint JNICALL
+Java_com_rawedge_r_1camera_MainActivity_nativeSetViewfinderSurface(
+    JNIEnv* env, jobject /*thiz*/, jobject surface) {
+    if (!gCameraEngine) {
+        rcamera_init();
+    }
+    ANativeWindow* win = surface ? ANativeWindow_fromSurface(env, surface) : nullptr;
+    if (gCameraEngine) {
+        gCameraEngine->setViewfinderWindow(win);
+    }
+    return 0;
 }
 
 } // extern "C"

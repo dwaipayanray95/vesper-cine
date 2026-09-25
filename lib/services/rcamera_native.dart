@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
 import 'package:ffi/ffi.dart';
+import 'package:flutter/services.dart';
 
 // Native function signatures (C-ABI)
 typedef NativeRCameraInit = Int32 Function();
@@ -75,6 +76,8 @@ class DetectedCamera {
 class RCameraNative {
   static RCameraNative? _instance;
   static RCameraNative get instance => _instance ??= RCameraNative._();
+
+  static const MethodChannel _channel = MethodChannel('com.rawedge.r_camera/texture');
 
   DynamicLibrary? _dylib;
 
@@ -213,6 +216,29 @@ class RCameraNative {
   void setZebraThreshold(double threshold) {
     if (!_isLoaded) return;
     _setZebraThreshold(threshold);
+  }
+
+  Future<int?> createViewfinderTexture({int width = 1920, int height = 1080}) async {
+    if (!Platform.isAndroid) return null;
+    try {
+      final textureId = await _channel.invokeMethod<int>('createTexture', {
+        'width': width,
+        'height': height,
+      });
+      return textureId;
+    } on PlatformException {
+      // Failed to create texture
+      return null;
+    }
+  }
+
+  Future<void> destroyViewfinderTexture() async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _channel.invokeMethod<bool>('destroyTexture');
+    } on PlatformException {
+      // Ignored
+    }
   }
 
   void close() {

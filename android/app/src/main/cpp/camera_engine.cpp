@@ -41,10 +41,29 @@ CameraEngine::CameraEngine() = default;
 CameraEngine::~CameraEngine() {
     stopCaptureSession();
     closeCamera();
+    if (viewfinderWindow_) {
+        ANativeWindow_release(viewfinderWindow_);
+        viewfinderWindow_ = nullptr;
+    }
     if (cameraManager_) {
         ACameraManager_delete(cameraManager_);
         cameraManager_ = nullptr;
     }
+}
+
+void CameraEngine::setViewfinderWindow(ANativeWindow* window) {
+    std::lock_guard<std::mutex> lock(engineMutex_);
+    if (viewfinderWindow_ == window) {
+        return;
+    }
+    if (viewfinderWindow_) {
+        ANativeWindow_release(viewfinderWindow_);
+    }
+    viewfinderWindow_ = window;
+    if (viewfinderWindow_) {
+        ANativeWindow_acquire(viewfinderWindow_);
+    }
+    LOGI("CameraEngine: viewfinderWindow_ set to %p", viewfinderWindow_);
 }
 
 bool CameraEngine::initialize() {
@@ -270,6 +289,12 @@ bool CameraEngine::startCaptureSession(int32_t width, int32_t height, FrameCallb
     ACaptureSessionOutput_create(imageReaderWindow_, &sessionOutput_);
     ACaptureSessionOutputContainer_add(outputContainer_, sessionOutput_);
 
+    if (viewfinderWindow_) {
+        LOGI("Adding viewfinder surface to capture session");
+        ACaptureSessionOutput_create(viewfinderWindow_, &viewfinderOutput_);
+        ACaptureSessionOutputContainer_add(outputContainer_, viewfinderOutput_);
+    }
+
     ACameraCaptureSession_stateCallbacks sessionCallbacks {
         .context = this,
         .onClosed = sOnSessionClosed,
@@ -332,6 +357,13 @@ bool CameraEngine::configureCaptureRequest() {
     ACameraOutputTarget_create(imageReaderWindow_, &outputTarget);
     ACaptureRequest_addTarget(captureRequest_, outputTarget);
     ACameraOutputTarget_free(outputTarget);
+
+    if (viewfinderWindow_) {
+        ACameraOutputTarget* vfTarget = nullptr;
+        ACameraOutputTarget_create(viewfinderWindow_, &vfTarget);
+        ACaptureRequest_addTarget(captureRequest_, vfTarget);
+        ACameraOutputTarget_free(vfTarget);
+    }
 
     // =========================================================================
     // ISP BYPASS CONFIGURATION: Completely disable post-processing stages
@@ -404,6 +436,11 @@ void CameraEngine::stopCaptureSession() {
             ACaptureSessionOutputContainer_remove(outputContainer_, sessionOutput_);
             ACaptureSessionOutput_free(sessionOutput_);
             sessionOutput_ = nullptr;
+        }
+        if (viewfinderOutput_) {
+            ACaptureSessionOutputContainer_remove(outputContainer_, viewfinderOutput_);
+            ACaptureSessionOutput_free(viewfinderOutput_);
+            viewfinderOutput_ = nullptr;
         }
         ACaptureSessionOutputContainer_free(outputContainer_);
         outputContainer_ = nullptr;
