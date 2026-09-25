@@ -18,29 +18,47 @@ Instead, Vesper Cine accesses raw uncompressed sensor data directly, applies a d
                                          ▼
                              ┌───────────────────────┐
                              │     AImageReader      │
-                             │ (AHardwareBuffer GPU) │
+                             │ (CPU_READ_OFTEN)      │
                              └───────────┬───────────┘
-                                         │ Zero-copy AHardwareBuffer
+                                         │ AImage_getPlaneData() — see "Why CPU
+                                         │ upload, not AHardwareBuffer import" below
                                          ▼
 ┌──────────────────────────────────────────────────────────────────────────────────┐
 │                      GPU COMPUTE PIPELINE (Vulkan / GLSL)                        │
+│         Raw RAW10 bytes uploaded to a host-visible VkBuffer (binding 0)          │
 │                                                                                  │
-│   1. Sensor Linearization & Dynamic Black / White Level Calibration              │
-│   2. 5x5 Malvar-He-Cutler (MHC) Gradient-Corrected Bilinear Bayer Debayering     │
+│   1. Manual RAW10 unpack + per-frame live black level / white level linearize    │
+│   2. 5x5 Malvar-He-Cutler (MHC) gradient-corrected demosaic (dynamic CFA)        │
 │   3. Manual White Balance Multipliers (Kelvin 2000K-10000K & Green/Magenta Tint) │
-│   4. Color Space Transformation: Sensor RGB -> CIE XYZ (D65) -> Linear Rec.2020  │
+│   4. Color Space Transformation: Sensor RGB -> CIE XYZ (D50) -> Linear Rec.2020  │
+│      (dual-illuminant ForwardMatrix1/2, mired-interpolated by scene CCT)         │
 │   5. Logarithmic OETF: Linear Rec.2020 -> 10-bit R-Log Transfer Curve            │
 │   6. Live Monitoring Transforms (Rec.709 LUT, False Color, Peaking, Zebras)      │
 └──────────────────┬───────────────────────────────────────────────┬───────────────┘
                    │ Binding 1                                     │ Binding 2
-                   │ Clean 10-bit R-Log Master                     │ WYSIWYG Monitoring Feed
+                   │ Clean R-Log Master (rgba16f)                  │ WYSIWYG Monitoring Feed (rgba8)
                    ▼                                               ▼
      ┌────────────────────────────┐                 ┌─────────────────────────────┐
      │        AMediaCodec         │                 │   Flutter TextureRegistry   │
      │ (10-bit HEVC / H.265 Rec)  │                 │  (SurfaceProducer / Surface │
-     │  Cinema Container Master   │                 │   Viewfinder Live Preview)  │
+     │  NOT YET WIRED — Phase 2   │                 │   Viewfinder Live Preview)  │
      └────────────────────────────┘                 └─────────────────────────────┘
 ```
+
+### Why CPU upload, not AHardwareBuffer GPU import
+
+The original design imported each RAW10 frame as an `AHardwareBuffer` directly into
+Vulkan as a sampled image (zero-copy). On real Pixel 10 (Tensor G5) hardware this
+**crashes** — a `SIGTRAP` inside the vendor gralloc (`libcustomer_gralloc_ddk_api.so`,
+`gralloc_native_handle_bpp`), which can't compute bytes-per-pixel for a RAW10 buffer
+being imported as a Vulkan sampled image. This reproduced identically regardless of
+format flags and is a genuine driver limitation on this device's PowerVR GPU (Pixel
+10 switched from Mali to Imagination/PowerVR with Tensor G5), not a code bug. The
+pipeline now reads RAW10 bytes on the CPU via `AImage_getPlaneData()` and uploads
+them into a Vulkan storage buffer (`std430 readonly buffer RawBuffer`) that the
+compute shader unpacks by hand. Slower than zero-copy in theory, but it's what
+actually runs — see the Debugging Journal below for how the pipeline reached ~30fps
+anyway.
 
 ---
 
@@ -68,13 +86,19 @@ Instead, Vesper Cine accesses raw uncompressed sensor data directly, applies a d
 ### 1. Camera2 NDK Sensor Ingestion (`android/app/src/main/cpp/camera_engine.cpp`)
 - [x] Initialized `ACameraManager` and camera enumeration routines.
 - [x] Implemented sensor identification to detect cameras supporting `AIMAGE_FORMAT_RAW10`.
-- [x] Added sensor calibration metadata extraction:
-  - Dynamic black levels (`ACAMERA_SENSOR_DYNAMIC_BLACK_LEVEL`).
+- [x] Sensor calibration metadata extraction:
+  - Static black level pattern (`ACAMERA_SENSOR_BLACK_LEVEL_PATTERN`, remapped from
+    physical CFA position to logical `[R,Gr,Gb,B]` order) **and** live per-frame
+    black level via the capture-result callback (`ACAMERA_SENSOR_DYNAMIC_BLACK_LEVEL`
+    is CaptureResult-only — see Debugging Journal, item 5).
   - Sensor white level (`ACAMERA_SENSOR_INFO_WHITE_LEVEL`).
   - Active array dimensions (`ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE`).
-  - Color filter arrangement (`ACAMERA_SENSOR_INFO_COLOR_FILTER_ARRANGEMENT`).
-  - Color transform matrix 1 (`ACAMERA_SENSOR_COLOR_TRANSFORM1`).
-  - Forward matrix 1 (`ACAMERA_SENSOR_FORWARD_MATRIX1`).
+  - Color filter arrangement (`ACAMERA_SENSOR_INFO_COLOR_FILTER_ARRANGEMENT`) — read
+    dynamically per-device, not assumed RGGB (see Debugging Journal, item 3).
+  - Sensor orientation (`ACAMERA_SENSOR_ORIENTATION`).
+  - **Both** DNG calibration illuminants: `ACAMERA_SENSOR_COLOR_TRANSFORM{1,2}`,
+    `ACAMERA_SENSOR_FORWARD_MATRIX{1,2}`, `ACAMERA_SENSOR_REFERENCE_ILLUMINANT{1,2}`
+    (see Debugging Journal, item 9).
 - [x] Configured capture request with strict **ISP Bypass**:
   - `ACAMERA_NOISE_REDUCTION_MODE = OFF`
   - `ACAMERA_EDGE_MODE = OFF`
@@ -83,65 +107,266 @@ Instead, Vesper Cine accesses raw uncompressed sensor data directly, applies a d
   - `ACAMERA_CONTROL_AE_MODE = OFF`
   - `ACAMERA_CONTROL_AWB_MODE = OFF`
   - `ACAMERA_CONTROL_AF_MODE = OFF`
-- [x] Implemented manual exposure time (`ACAMERA_SENSOR_EXPOSURE_TIME`), sensitivity/ISO (`ACAMERA_SENSOR_SENSITIVITY`), white balance gains (`ACAMERA_COLOR_CORRECTION_GAINS`), and optical image stabilization (`ACAMERA_LENS_OPTICAL_STABILIZATION_MODE`).
-- [x] Created `AImageReader` with `AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE` for zero-copy GPU consumption.
+- [x] Manual exposure time (`ACAMERA_SENSOR_EXPOSURE_TIME`), sensitivity/ISO
+      (`ACAMERA_SENSOR_SENSITIVITY`), and optical image stabilization
+      (`ACAMERA_LENS_OPTICAL_STABILIZATION_MODE`). White balance is **not** applied via
+      `ACAMERA_COLOR_CORRECTION_GAINS` (that tag has no effect on a raw-Bayer stream —
+      see "Known Dead Code" below); it's applied entirely in the GPU shader instead.
+- [x] `AImageReader` configured `AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN` (not
+      `GPU_SAMPLED_IMAGE` — see "Why CPU upload" above) and read via
+      `AImage_getPlaneData()` / `AImage_getPlaneRowStride()`.
+- [x] **Fatal camera-device-error auto-recovery:** `onDeviceError` used to just log and
+      leave the viewfinder permanently frozen. `attemptDeviceErrorRecovery()` now
+      reopens the camera and restarts the capture session automatically (rate-limited
+      to one attempt/2s). Confirmed working on-device against real
+      `ERROR_CAMERA_DEVICE`/`ERROR_CAMERA_SERVICE` events.
 
 ### 2. GPU Compute & Color Science (`android/app/src/main/cpp/shaders/mhc_rlog.comp`)
-- [x] Written GLSL compute shader featuring:
-  - 5x5 Malvar-He-Cutler (MHC) gradient-corrected bilinear demosaic algorithm.
-  - Sensor linearization and black level subtraction.
-  - White balance multiplier stage (Kelvin & Tint).
-  - Sensor RGB $\to$ CIE XYZ (D65) $\to$ Linear Rec.2020 transformation.
-  - Mathematical **R-Log transfer function** mapping:
-    - 18% Middle Gray sits at **40% IRE** (code value 553 / 1023 in 10-bit).
-    - Sensor clip point sits at **95% IRE** (smooth highlight shoulder).
-  - Viewfinder monitoring modes:
-    - Mode 0: Clean flat R-Log.
-    - Mode 1: Rec.709 Preview LUT (filmic S-curve roll-off).
-    - Mode 2: Standard 6-zone IRE False Color ramp.
-    - Mode 3: Cinema-green focus peaking overlay.
-    - Mode 4: 95% IRE highlight zebra stripes.
-  - 16:9 UHD center crop vs. 4:3 open-gate coordinate calculation.
-- [x] Compiled shader to SPIR-V bytecode (`mhc_rlog.spv`) and embedded C++ array header (`mhc_rlog_spv.h`).
+- [x] Manual RAW10 unpack directly from a `std430 readonly buffer` (MIPI packing: 4
+      pixels per 5 bytes), not a sampled texture — required by the CPU-upload
+      architecture above.
+- [x] Dynamic CFA resolution (`cfaSiteAt()`): every black-level lookup and every
+      demosaic branch resolves R/Gr/Gb/B from the sensor's *actual* reported CFA
+      arrangement (`ubo.cfaPattern`), not a hardcoded RGGB assumption.
+- [x] 5x5 Malvar-He-Cutler (MHC) gradient-corrected demosaic.
+- [x] Bayer-phase snapping (`srcX &= ~1; srcY &= ~1;`) before demosaic, to eliminate
+      resampling moiré from the non-integer raw:output pixel ratio (see Debugging
+      Journal, item 6).
+- [x] White balance multiplier stage (Kelvin & Tint, and/or the raw-metered gains
+      from tap-to-white-balance — see below), applied in **linear**, pre-matrix space.
+- [x] Sensor RGB → CIE XYZ (**D50**, matching what `ForwardMatrix1/2` actually output)
+      → Linear Rec.2020, via a Bradford-adapted D50→Rec.2020 matrix (see Debugging
+      Journal, item 7).
+- [x] Mathematical **R-Log transfer function** mapping:
+  - 18% Middle Gray sits at **40% IRE**.
+  - Sensor clip point sits at **95% IRE** (smooth highlight shoulder).
+- [x] Viewfinder monitoring modes:
+  - Mode 0: Clean flat R-Log (**default**).
+  - Mode 1: Rec.709 Preview LUT (filmic S-curve roll-off).
+  - Mode 2: Standard 6-zone IRE False Color ramp.
+  - Mode 3: Cinema-green focus peaking overlay.
+  - Mode 4: 95% IRE highlight zebra stripes.
+- [x] Rotation-aware coordinate remap (0/90/180/270°) applied before crop, so
+      crop/demosaic math never special-cases rotation.
+- [x] 16:9 UHD center crop vs. 4:3 open-gate coordinate calculation.
+- [x] Compiled to SPIR-V (`mhc_rlog.spv`) and embedded as a C++ array header
+      (`mhc_rlog_spv.h`); regenerate with `glslangValidator -V mhc_rlog.comp -o
+      mhc_rlog.spv` after any shader edit.
 
 ### 3. Vulkan Pipeline Architecture (`android/app/src/main/cpp/vulkan_compute.cpp`)
 - [x] Initialized Vulkan instance and selected physical device with compute queue capability.
-- [x] Configured logical device with Android Hardware Buffer external memory extensions (`VK_ANDROID_external_memory_android_hardware_buffer`, `VK_KHR_external_memory`, `VK_KHR_sampler_ycbcr_conversion`).
-- [x] Created compute pipeline, push constant ranges, and descriptor set layout bindings (Binding 0: Raw Bayer texture, Binding 1: Codec image, Binding 2: Viewfinder image).
-- [x] Set up command pool and primary command buffers for compute submission.
-- [x] Per-frame `AHardwareBuffer` import as a sampled `VkImage` (immutable `VkSamplerYcbcrConversion` built from the buffer's Vulkan external format), with the descriptor set/pipeline rebuilt lazily the first time that format is seen.
-- [x] Device-local storage images for the codec (rgba16f) and viewfinder (rgba8) outputs, plus a host-visible staging buffer that copies the viewfinder image out and presents it to the Flutter `SurfaceProducer` via `ANativeWindow_lock`/`ANativeWindow_unlockAndPost`.
+- [x] Compute pipeline, push constant range (`ComputeUniformData`, byte-exact to the
+      shader's std430 layout — see `PackMat3ForPushConstant`'s column-major transpose),
+      and descriptor set layout: Binding 0 = raw storage buffer (re-uploaded every
+      frame), Binding 1 = codec output image, Binding 2 = viewfinder output image.
+- [x] **Output resolution: 1920x1080 (16:9) / 1920x1440 (4:3 open-gate)**, not full
+      sensor resolution — see Debugging Journal, item 4 for why.
+- [x] **Deferred-by-one-frame viewfinder presentation:** the GPU fence wait for a
+      frame's compute work happens at the *start* of the next frame's submission,
+      not synchronously at the end of the current one, removing a stall from the
+      per-frame critical path.
+- [x] Host-visible storage buffer for RAW10 upload (Binding 0), re-sized only when a
+      larger frame requires it; host-visible staging buffer for reading the
+      viewfinder image back out and presenting it to the Flutter `SurfaceProducer`
+      via `ANativeWindow_lock` / `ANativeWindow_unlockAndPost`.
+- [x] Per-frame timing instrumentation (`waitPrevFence`, `present`, `rawUpload`,
+      `recordCmds`, `submit`, `TOTAL`), logged every 30 frames to `RCamera_Vulkan`.
 
 ### 4. Flutter UI & Platform Bridging
-- [x] **Native Bridge (`native_bridge.cpp`):** Exported C-ABI functions for camera initialization, camera enumeration, sensor opening, streaming start/stop, manual exposure/shutter/ISO adjustments, white balance, OIS, and crop modes.
+- [x] **Native Bridge (`native_bridge.cpp`):** Exported C-ABI functions for camera initialization, camera enumeration, sensor opening, streaming start/stop, manual exposure/shutter/ISO adjustments, white balance (manual gains, Kelvin/tint dial, and raw-metered tap-to-WB), OIS, crop mode, and monitoring mode.
 - [x] **JNI Surface Bridging (`MainActivity.kt`):** Implemented `MethodChannel("com.rawedge.r_camera/texture")` creating Flutter `SurfaceProducer` / `SurfaceTexture` entries and forwarding the native `ANativeWindow` surface down to JNI (`nativeSetViewfinderSurface`).
 - [x] **Dart FFI Service (`rcamera_native.dart`):** Built dynamic library bindings, device enumeration parser, control dispatchers, and texture lifecycle handlers (`createViewfinderTexture`, `destroyViewfinderTexture`).
 - [x] **Cinema Viewfinder HUD (`camera_screen.dart`):**
   - Full landscape cinema interface.
   - Live shutter angle selector (90°, 180°, 270°, 360°).
   - Exposure & ISO ladder (50 to 3200).
-  - White balance Kelvin dial (2000K-10000K) and Green/Magenta tint dial (-50 to +50) with "Tap to Lock Neutral Gray".
-  - Live monitoring mode switcher (R-Log, Rec.709, False Color, Peaking, Zebras).
+  - White balance Kelvin dial (2000K-10000K) and Green/Magenta tint dial (-50 to
+    +50), plus a **real tap-to-calibrate eyedropper button** that meters the raw
+    sensor data (not a stub — see Debugging Journal, items 8-9).
+  - Live monitoring mode switcher (R-Log flat is the default; Rec.709, False Color,
+    Peaking, Zebras also available).
   - 16:9 UHD vs. 4:3 Open-Gate framing toggle.
-  - OIS hardware toggle.
-  - Timecode display and recording indicator.
+  - OIS toggle (hardware-wired).
+  - Timecode display and record button (**UI only — not yet wired to a recorder**,
+    see Phase 2).
+  - GYRO toggle (**UI only — no IMU code exists yet**, see Phase 3).
   - Embedded `Texture(textureId: _textureId)` widget inside responsive framing canvas.
 
 ---
 
-## What Needs to Be Done (Remaining Roadmap)
+## Debugging Journal: What Was Actually Wrong, and How It Was Found
 
-### Phase 1: Viewfinder WYSIWYG & Orientation Fix (Immediate Priority) — DONE
+This is a running log of real on-device bugs found via `adb logcat` and screenshots,
+in the order they were diagnosed and fixed, kept here because each one reflects a
+real lesson about this specific hardware/pipeline rather than a hypothetical. Every
+fix below was verified against real device logs, not assumed from a code read.
+
+1. **Native crash on startup — GPU `AHardwareBuffer` import.** `SIGTRAP` inside
+   `libcustomer_gralloc_ddk_api.so` (`gralloc_native_handle_bpp`) whenever a RAW10
+   `AHardwareBuffer` was imported as a sampled Vulkan image. Confirmed as a genuine
+   Pixel 10 / PowerVR GPU driver limitation (Tensor G5 moved from Mali to
+   Imagination/PowerVR — verified this isn't a "wrong test device" artifact).
+   **Fix:** abandoned zero-copy GPU import entirely; read RAW10 on the CPU via
+   `AImage_getPlaneData()` and upload as a Vulkan storage buffer instead (see
+   "Why CPU upload" above).
+
+2. **Fatal `ERROR_CAMERA_DEVICE` froze the viewfinder permanently.** `onDeviceError`
+   only logged the error; nothing reopened the camera. Found via a routine log
+   review, not user-reported. **Fix:** `attemptDeviceErrorRecovery()`, rate-limited
+   reopen + capture-session restart.
+
+3. **Checkerboard color-crossing / desaturation.** The demosaic hardcoded an RGGB
+   Bayer phase assumption; this sensor actually reports `CFA=1` (GRBG). **Fix:**
+   `cfaSiteAt()` (mirrored in both `camera_engine.cpp` and the shader) resolves the
+   logical channel from the sensor's *actual* reported CFA arrangement everywhere a
+   phase assumption was previously hardcoded (black-level lookup and demosaic both).
+
+4. **~7fps instead of the ~30fps the HAL reports as achievable.** Root-caused via
+   added per-stage GPU timing instrumentation: the compute dispatch itself was
+   taking ~92ms/frame at full 3840x2160 (a naive per-pixel RAW10 unpack over 8.3M
+   pixels, no texture-cache benefit since it's a manual buffer read). A first fix
+   attempt (deferred-frame presentation, removing a synchronous end-of-frame GPU
+   wait) did **not** resolve it — confirmed via a second clean-rebuild device test,
+   not assumed. **Actual fix:** dropped output resolution to 1920x1080 / 1920x1440,
+   cutting per-pixel GPU work ~4x. Confirmed ~10-20ms/frame and sustained ~30fps in
+   subsequent logs. (The deferred-presentation change was kept — it's a real
+   improvement — but it wasn't *the* fix.)
+
+5. **Black level always read the flat `{64,64,64,64}` struct default.**
+   `ACAMERA_SENSOR_DYNAMIC_BLACK_LEVEL` is a CaptureResult-only tag — querying it on
+   static `CameraCharacteristics` always silently misses. First fix attempt (switch
+   to the static `ACAMERA_SENSOR_BLACK_LEVEL_PATTERN` tag, remapped through the CFA
+   arrangement) *also* came back flat on this hardware, confirmed via a clean
+   rebuild + device test — this HAL doesn't populate that static tag either.
+   **Actual fix:** read it live, per-frame, from the capture-result callback
+   (`ACameraCaptureSession_captureCallbacks::onCaptureCompleted`), which does return
+   real values (though on this sensor they turned out to be a uniform ~64.0 anyway —
+   ruled out as the cause of the color casts investigated afterward, not fixed
+   further since there was nothing further to fix).
+
+6. **Bayer-phase / resampling moiré (separate from item 3).** The raw:output pixel
+   ratio (e.g. 4000/3840) is essentially never an integer, so consecutive output
+   pixels drift in and out of phase with the CFA's 2-pixel period as the source
+   coordinate sweeps across the frame — a textbook resampling beat pattern showing
+   up as a regular checkerboard texture. **Fix:** snap the demosaic's source
+   coordinate to an even (0,0)-phase position (`srcX &= ~1; srcY &= ~1;`) before
+   sampling.
+
+7. **Persistent yellow/warm color cast after the CFA and matrix-direction fixes.**
+   Root-caused via `numpy` verification (not guessing): `ACAMERA_SENSOR_FORWARD_MATRIX1`
+   outputs XYZ referenced to the D50 white point (per the DNG spec), but the
+   hardcoded XYZ→Rec.2020 matrix assumed D65 input with no chromatic adaptation.
+   Verified quantitatively — a neutral D50 white fed through the old matrix came out
+   `[1.09, 0.99, 0.75]` instead of `[1,1,1]`. **Fix:** a combined Bradford-adapted
+   D50→Rec.2020 matrix; the same test white point now maps to `[1.0003, 1.0000, 0.9994]`.
+
+8. **Tap-to-white-balance produced wildly unstable, noise-amplifying gains** (e.g.
+   one calibration on a white table gave `R=1.9 B=6.9`, immediately suspicious for a
+   neutral target). Two compounding bugs, found and fixed in sequence:
+   - **Domain mismatch:** the calibration sampled the on-screen viewfinder buffer,
+     which is R-Log **encoded**, and computed a correction ratio directly on those
+     log values — then applied that ratio as a **linear**-domain gain multiplier
+     (gains are applied before the log curve in the shader). The log curve's
+     nonzero black-floor offset makes an ordinary dark/noisy sample look like a
+     massive color imbalance. First fix: delog the sample before computing the
+     ratio (`rLogToLinear()`, the shader curve's exact inverse) — necessary, but not
+     sufficient (see next item).
+   - **Wrong sampling point entirely:** even after delogging, the sample was still
+     taken **downstream of the color matrix**, which mixes channels via non-trivial
+     off-diagonal terms — a ratio measured after that mixing doesn't invert cleanly
+     through the shader's simple pre-matrix diagonal gain multiply. This is why
+     gains kept swinging to extremes between calibrations. **Actual fix:** meter
+     directly off **raw sensor bytes** (`sampleRawCenterPatch()`, running in the
+     existing frame callback, before the data even reaches the GPU) — exactly what
+     a real camera's 3A AWB stats block does. Gains are now stable and consistent
+     across repeated calibrations (`R≈1.465 B≈0.986`, confirmed 3x in a row on the
+     same scene).
+
+9. **Green/yellow cast persisted even with correct, stable WB gains.** With gains
+   now known-correct, the remaining cast had to be the color matrix itself. Root
+   cause: the pipeline used `ForwardMatrix1` (calibrated at a single reference
+   illuminant, typically ~2856K tungsten) **unconditionally**, regardless of actual
+   scene lighting. DNG-calibrated sensors ship *two* reference-illuminant matrices
+   (typically tungsten and ~6504K daylight) specifically because one matrix can't
+   correctly render color across the full range of real-world spectra — narrow-
+   spectrum sources like LED/fluorescent (the test scene's actual lighting) have a
+   green emission spike neither single-illuminant matrix corrects for. **Fix:**
+   query `ForwardMatrix2`/`ColorTransform2`/`ReferenceIlluminant{1,2}` and
+   interpolate linearly between both matrices in mired (1/Kelvin) space by the
+   scene's estimated CCT — matching how the DNG SDK, libraw, and AOSP's own raw
+   post-processing all handle this. Wired into camera-open (defaults to 5600K),
+   the Kelvin dial, and tap-to-WB (which now also estimates scene CCT from the raw
+   neutral sample via a Planckian-locus grid search and re-picks the matrix to
+   match). **Status: implemented and pushed, not yet confirmed on-device** — see
+   "What We're Currently Doing" below.
+
+---
+
+## What We're Currently Doing
+
+**Immediate focus: verifying the color pipeline is actually correct on real hardware
+under real indoor (LED/fluorescent) lighting**, before moving on to Phase 2 recording.
+White balance gain calculation (Debugging Journal item 8) is confirmed fixed and
+stable via three repeated on-device calibrations. The dual-illuminant color matrix
+fix (item 9) is implemented and pushed but **not yet confirmed** — next step is a
+rebuild + on-device retest, checking:
+- The `Dual-illuminant forward matrix available (illuminant1=...K, illuminant2=...K)`
+  log line, to confirm this sensor's HAL actually populates `ForwardMatrix2` (some
+  HALs only populate one matrix, which the log will also make visible if so).
+- Whether the green/yellow cast is gone under the same LED-lit test scene that
+  exposed it.
+- Whether the tap-to-WB button's estimated scene CCT (logged alongside the gains)
+  is in a plausible range for the light actually being pointed at.
+
+Once color is confirmed correct and stable, the plan is to move on to Phase 2
+(actual recording — the record button is currently UI-only, see below).
+
+## Known Dead Code / Deferred Items
+
+Found during codebase audits but not yet actioned, since the user's focus has
+stayed on the color/performance pipeline. Listed here so they aren't silently
+forgotten:
+
+- **Tap-to-focus:** no implementation at all; focus is fixed-manual only.
+- **GYRO toggle:** pure UI decoration — no `ASensorManager`/IMU code exists (this
+  is Phase 3 work, listed below).
+- **Record button:** doesn't actually record — no `AMediaCodec` integration yet
+  (Phase 2, below). Pressing it currently only toggles the UI's recording indicator.
+- **Zebra threshold:** wired end-to-end natively (`rcamera_set_zebra_threshold`,
+  `ubo.zebraThreshold`) but there's no UI control exposing it — it's stuck at
+  whatever default the native side sets.
+- **`ACAMERA_COLOR_CORRECTION_GAINS`:** still set on the capture request in
+  `camera_engine.cpp`, but this tag has no effect on a raw-Bayer (`RAW10`) capture
+  stream — it only affects YUV/JPEG ISP output, which this pipeline bypasses
+  entirely. Harmless (the tag is simply ignored by the HAL for this stream type)
+  but dead code that should eventually be removed to avoid confusion.
+- **`calibrationTransform1`/`calibrationTransform2`:** queried into
+  `SensorCalibrationMetadata` but never read anywhere in the render pipeline —
+  DNG's `CalibrationTransform` is meant to correct for *individual sample*
+  variation from the "golden" ColorMatrix/ForwardMatrix an OEM ships, which this
+  pipeline currently doesn't apply. Low priority — the per-illuminant Forward/Color
+  matrices already carry the vast majority of the correction.
+
+---
+
+## Roadmap
+
+### Phase 1: Viewfinder WYSIWYG, Orientation & Color Pipeline — DONE, color accuracy being verified
 - [x] **Decouple Viewfinder Surface from Direct Camera HAL:**
   - `viewfinderWindow_` no longer exists on `CameraEngine`; the capture session's `ACaptureSessionOutputContainer` and `ACaptureRequest` register only the `AImageReader` RAW10 target in `camera_engine.cpp`.
   - Camera2 now strictly outputs RAW10 to `AImageReader` — the Flutter surface is never a capture target.
 - [x] **Wire Compute Pipeline Output to Viewfinder Surface:**
   - `native_bridge.cpp`'s `nativeSetViewfinderSurface` now hands the `ANativeWindow` straight to `VulkanComputeEngine::setViewfinderWindow`.
-  - `VulkanComputeEngine` imports each frame's `AHardwareBuffer` as a sampled Vulkan image (via `VkSamplerYcbcrConversion` + `VkExternalFormatANDROID`, the standard mechanism for opaque/external AHardwareBuffer formats), dispatches `mhc_rlog.comp`, and presents the WYSIWYG monitoring output (binding 2) to the Flutter `SurfaceProducer` via direct buffer writes (`ANativeWindow_lock` / `ANativeWindow_unlockAndPost` — Option 3A).
+  - `VulkanComputeEngine` uploads each frame's RAW10 bytes as a Vulkan storage buffer (see "Why CPU upload, not AHardwareBuffer import" above — the original zero-copy GPU-import design crashed on real Pixel 10 hardware), dispatches `mhc_rlog.comp`, and presents the WYSIWYG monitoring output (binding 2) to the Flutter `SurfaceProducer` via direct buffer writes (`ANativeWindow_lock` / `ANativeWindow_unlockAndPost`).
   - Fixed the compute push-constant struct's byte layout (`ComputeUniformData`) to match the shader's std430 `mat3`/`ivec2` packing exactly, which the previous flat `float[9]` layout did not.
 - [x] **Correct Landscape Sensor Orientation ($90^\circ$ Offset):**
   - `ACAMERA_SENSOR_ORIENTATION` is now queried in `camera_engine.cpp` and combined with the app's fixed landscape hold into a single `sensorOrientation` push-constant field.
   - `mhc_rlog.comp` rotates the output coordinate grid (0/90/180/270°) before the existing crop remap, so the crop/demosaic math never needs to special-case rotation.
+- [x] **Color accuracy fixes** — dynamic CFA, correct matrix direction, D50/D65
+  chromatic adaptation, moiré phase-snapping, raw-domain white balance metering,
+  dual-illuminant color matrix interpolation. See the Debugging Journal above for
+  the full account of each; the last of these (dual-illuminant matrix) is pushed
+  but awaiting on-device confirmation — see "What We're Currently Doing" above.
 
 ### Phase 2: AMediaCodec 10-Bit Recording Pipeline
 - [ ] **10-Bit HEVC / H.265 Encoder Setup:**
@@ -166,14 +391,19 @@ Instead, Vesper Cine accesses raw uncompressed sensor data directly, applies a d
 
 | Component | Status | Technology | Description |
 | :--- | :---: | :--- | :--- |
-| **Sensor Capture** | Done | NDK `libcamera2ndk` | RAW10 Bayer ingestion with zero-ISP manual capture request |
-| **Sensor Calibration**| Done | NDK Metadata | Dynamic black levels, white level, color matrices |
-| **MHC Debayering** | Done | GLSL Compute | 5x5 Malvar-He-Cutler gradient-corrected demosaicing |
+| **Sensor Capture** | Done | NDK `libcamera2ndk` | RAW10 Bayer ingestion with zero-ISP manual capture request, CPU-read via `AImageReader` (not GPU-import — see architecture note) |
+| **Sensor Calibration**| Done | NDK Metadata | Live per-frame black level, white level, dynamic CFA, dual-illuminant color matrices |
+| **MHC Debayering** | Done | GLSL Compute | 5x5 Malvar-He-Cutler demosaic, dynamic CFA resolution, moiré phase-snapping |
+| **White Balance** | Done | C++ / GLSL | Kelvin/tint dial + real raw-domain tap-to-calibrate metering |
+| **Color Matrix** | Verifying | C++ / GLSL | Dual-illuminant ForwardMatrix1/2 interpolated by scene CCT — implemented, pending on-device confirmation |
 | **R-Log Transfer** | Done | GLSL Compute | Custom high-dynamic-range logarithmic OETF |
 | **Monitoring Scopes** | Done | GLSL Compute | False color IRE, peaking, zebras, Rec.709 preview LUT |
 | **Texture Bridge** | Done | Kotlin / Dart FFI | Flutter `SurfaceProducer` $\to$ NDK `ANativeWindow` |
-| **Viewfinder R-Log Wire** | Done | C++ / Vulkan | Present compute shader output directly to `ANativeWindow` |
+| **Viewfinder R-Log Wire** | Done | C++ / Vulkan | Present compute shader output directly to `ANativeWindow`, ~30fps at 1920x1080 |
 | **Sensor Orientation** | Done | GLSL | Correct $90^\circ$ hardware sensor offset to upright landscape |
+| **Device Error Recovery**| Done | NDK Camera2 | Auto-reopen camera + restart session on fatal `ERROR_CAMERA_DEVICE`/`ERROR_CAMERA_SERVICE` |
+| **Tap-to-Focus** | Not started | — | No implementation |
+| **Zebra Threshold UI** | Not started | — | Native support exists; no UI control exposes it |
 | **10-Bit Recording** | Planned | NDK `AMediaCodec` | 10-bit HEVC Main10 recording to MP4 master |
 | **Gyroflow Logging** | Planned | NDK Sensors | High-rate IMU motion logging for post-stabilization |
 
