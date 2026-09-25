@@ -131,6 +131,10 @@ private:
     VkDeviceMemory viewfinderStagingMemory_ = VK_NULL_HANDLE;
     void* viewfinderStagingMapped_ = nullptr;
     VkDeviceSize viewfinderStagingSize_ = 0;
+    // True when the last submitted frame's viewfinder output hasn't been
+    // presented to viewfinderWindow_ yet (see processRawFrame's deferred-by-
+    // one-frame present, which removes a synchronous end-of-frame GPU wait).
+    bool viewfinderPresentPending_ = false;
 
     ANativeWindow* codecWindow_ = nullptr;
     ANativeWindow* viewfinderWindow_ = nullptr;

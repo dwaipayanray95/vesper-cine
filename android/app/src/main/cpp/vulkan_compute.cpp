@@ -365,12 +365,17 @@ bool VulkanComputeEngine::createOutputImages() {
 void VulkanComputeEngine::destroyOutputImages() {
     if (!device_) return;
 
-    // Defensive: callers only reach here with the GPU already idle (processRawFrame
-    // waits on frameFence_ before releasing vkMutex_), but a stray in-flight submission
-    // referencing these images would be a use-after-free, so make it unconditional.
+    // processRawFrame() deliberately does not wait for its own GPU submission
+    // before returning (see there) — it waits at the *start* of the next call
+    // instead, so the camera thread isn't blocked on a full round trip every
+    // frame. That means GPU work referencing these images can genuinely still
+    // be in flight here (e.g. a crop-mode change right after a frame lands),
+    // so this wait is required, not just defensive.
     if (computeQueue_) {
         vkQueueWaitIdle(computeQueue_);
     }
+    // Any deferred present would now reference a stale/about-to-be-freed buffer.
+    viewfinderPresentPending_ = false;
 
     if (viewfinderStagingMapped_) {
         vkUnmapMemory(device_, viewfinderStagingMemory_);
@@ -608,12 +613,29 @@ bool VulkanComputeEngine::processRawFrame(const uint8_t* data, size_t dataLength
 
     std::lock_guard<std::mutex> lock(vkMutex_);
 
+    // Wait for the PREVIOUS frame's GPU work before reusing its command buffer /
+    // staging buffers. A full camera frame interval has normally already elapsed
+    // by the time we get here, so this is typically an instant no-op rather than
+    // a real stall — unlike waiting at the END of this function (the previous
+    // structure), which forced every single frame through a full synchronous
+    // CPU-upload -> GPU-dispatch -> GPU-wait -> CPU-readback round trip before
+    // the camera could even start delivering the next frame (measured ~7fps
+    // instead of the UI's target 24fps).
+    vkWaitForFences(device_, 1, &frameFence_, VK_TRUE, UINT64_MAX);
+
+    // Present the PREVIOUS frame's now-finished viewfinder output, deferred by
+    // one frame so this frame's GPU dispatch below can run concurrently with
+    // the camera delivering the next one instead of blocking on it.
+    if (viewfinderPresentPending_) {
+        presentViewfinder();
+        viewfinderPresentPending_ = false;
+    }
+
     if (!ensureRawStagingBuffer(static_cast<VkDeviceSize>(dataLength))) {
         return false;
     }
     std::memcpy(rawStagingMapped_, data, dataLength);
 
-    vkWaitForFences(device_, 1, &frameFence_, VK_TRUE, UINT64_MAX);
     vkResetFences(device_, 1, &frameFence_);
     vkResetCommandBuffer(commandBuffer_, 0);
 
@@ -675,10 +697,13 @@ bool VulkanComputeEngine::processRawFrame(const uint8_t* data, size_t dataLength
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &commandBuffer_;
     vkQueueSubmit(computeQueue_, 1, &submitInfo, frameFence_);
-    vkWaitForFences(device_, 1, &frameFence_, VK_TRUE, UINT64_MAX);
+    // Deliberately not waiting here — see the wait at the top of this function
+    // and viewfinderPresentPending_ above. Returning now lets the camera
+    // callback thread move on to the next frame while the GPU works in the
+    // background.
 
     if (wantsPresent) {
-        presentViewfinder();
+        viewfinderPresentPending_ = true;
     }
 
     return true;
