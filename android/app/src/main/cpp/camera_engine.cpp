@@ -130,9 +130,35 @@ std::vector<CameraDeviceInfo> CameraEngine::enumerateCameras() {
             }
         }
 
+        // What does the HAL itself claim the max achievable frame rate is for this
+        // exact RAW10 stream size? Diagnostic for a measured ~7fps far below the
+        // app's 24fps UI target — this settles whether that's a hardware/driver
+        // ceiling for full-resolution RAW10 readout (nothing app-level can change)
+        // versus a bug still to find in our own pipeline.
+        int64_t minFrameDurationNs = -1;
+        if (info.supportsRaw10 && ACameraMetadata_getConstEntry(
+                chars, ACAMERA_SCALER_AVAILABLE_MIN_FRAME_DURATIONS, &entry) == ACAMERA_OK) {
+            // Entry format: format, width, height, minFrameDurationNs
+            for (size_t c = 0; c + 3 < entry.count; c += 4) {
+                if (entry.data.i64[c] == AIMAGE_FORMAT_RAW10 &&
+                    entry.data.i64[c + 1] == info.rawWidth &&
+                    entry.data.i64[c + 2] == info.rawHeight) {
+                    minFrameDurationNs = entry.data.i64[c + 3];
+                    break;
+                }
+            }
+        }
+
         // Log camera details
         LOGI("Found Camera ID: %s, Facing: %d, HW Level: %d, Supports RAW10: %d, Max RAW: %dx%d",
              cameraId, facing, info.hardwareLevel, info.supportsRaw10, info.rawWidth, info.rawHeight);
+        if (minFrameDurationNs > 0) {
+            LOGI("RAW10 %dx%d min frame duration: %lld ns (HAL-reported max ~%.2f fps)",
+                 info.rawWidth, info.rawHeight, static_cast<long long>(minFrameDurationNs),
+                 1e9 / static_cast<double>(minFrameDurationNs));
+        } else if (info.supportsRaw10) {
+            LOGW("RAW10 %dx%d min frame duration not reported by this HAL", info.rawWidth, info.rawHeight);
+        }
 
         devices.push_back(info);
         ACameraMetadata_free(chars);
