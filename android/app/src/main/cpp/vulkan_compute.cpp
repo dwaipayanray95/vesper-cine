@@ -2,6 +2,7 @@
 #include "shaders/mhc_rlog_spv.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <vector>
 
@@ -611,6 +612,9 @@ bool VulkanComputeEngine::processRawFrame(const uint8_t* data, size_t dataLength
     if (!data || dataLength == 0) return false;
     if (!isInitialized_) return false;
 
+    using Clock = std::chrono::steady_clock;
+    auto t0 = Clock::now();
+
     std::lock_guard<std::mutex> lock(vkMutex_);
 
     // Wait for the PREVIOUS frame's GPU work before reusing its command buffer /
@@ -622,6 +626,7 @@ bool VulkanComputeEngine::processRawFrame(const uint8_t* data, size_t dataLength
     // the camera could even start delivering the next frame (measured ~7fps
     // instead of the UI's target 24fps).
     vkWaitForFences(device_, 1, &frameFence_, VK_TRUE, UINT64_MAX);
+    auto t1 = Clock::now();
 
     // Present the PREVIOUS frame's now-finished viewfinder output, deferred by
     // one frame so this frame's GPU dispatch below can run concurrently with
@@ -630,11 +635,13 @@ bool VulkanComputeEngine::processRawFrame(const uint8_t* data, size_t dataLength
         presentViewfinder();
         viewfinderPresentPending_ = false;
     }
+    auto t2 = Clock::now();
 
     if (!ensureRawStagingBuffer(static_cast<VkDeviceSize>(dataLength))) {
         return false;
     }
     std::memcpy(rawStagingMapped_, data, dataLength);
+    auto t3 = Clock::now();
 
     vkResetFences(device_, 1, &frameFence_);
     vkResetCommandBuffer(commandBuffer_, 0);
@@ -696,14 +703,31 @@ bool VulkanComputeEngine::processRawFrame(const uint8_t* data, size_t dataLength
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &commandBuffer_;
+    auto t4 = Clock::now();
     vkQueueSubmit(computeQueue_, 1, &submitInfo, frameFence_);
     // Deliberately not waiting here — see the wait at the top of this function
     // and viewfinderPresentPending_ above. Returning now lets the camera
     // callback thread move on to the next frame while the GPU works in the
     // background.
+    auto t5 = Clock::now();
 
     if (wantsPresent) {
         viewfinderPresentPending_ = true;
+    }
+
+    // Timing breakdown, logged periodically. Diagnostic for a measured ~7fps
+    // (vs the UI's 24fps target) that persisted even after removing the
+    // synchronous end-of-frame GPU wait, despite the HAL itself reporting
+    // 30fps is achievable at this RAW10 resolution — narrows down which
+    // stage(s) of this function are actually the bottleneck.
+    static int frameCounter = 0;
+    if (++frameCounter % 30 == 0) {
+        auto ms = [](Clock::time_point a, Clock::time_point b) {
+            return std::chrono::duration<double, std::milli>(b - a).count();
+        };
+        VK_LOGI("processRawFrame timing (ms): waitPrevFence=%.2f present=%.2f rawUpload=%.2f "
+                "recordCmds=%.2f submit=%.2f TOTAL=%.2f",
+                ms(t0, t1), ms(t1, t2), ms(t2, t3), ms(t3, t4), ms(t4, t5), ms(t0, t5));
     }
 
     return true;
