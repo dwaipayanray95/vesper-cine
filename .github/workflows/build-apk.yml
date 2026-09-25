@@ -71,17 +71,25 @@ jobs:
       - name: flutter doctor
         run: flutter doctor -v
 
-      # arm64-v8a only (Pixel 10 / Tensor G5), single-ABI so nothing for
-      # x86_64 gets built or bundled — this is what actually keeps the APK
-      # small; --split-per-abi just makes the output filename explicit.
-      # Release mode also gets Flutter/R8's default code shrinking,
-      # resource shrinking and tree-shaken icon fonts for free.
+      # arm64-v8a only (Pixel 10 / Tensor G5): --target-platform android-arm64
+      # alone restricts what's actually compiled/bundled to arm64-v8a, which
+      # is what keeps the APK small. NOT using --split-per-abi here: that
+      # configures Gradle's `splits.abi` block to just arm64-v8a, but
+      # android/app/build.gradle.kts's own `ndk.abiFilters` still lists both
+      # arm64-v8a and x86_64 (kept for local dev builds) — AGP refuses to
+      # have ndk.abiFilters list more ABIs than splits.abi does
+      # ("Conflicting configuration ... cannot be present when splits abi
+      # filters are set"), so the two flags fight. --target-platform alone
+      # already does everything --split-per-abi would add here, since only
+      # one platform is ever requested.
+      #
+      # Release mode also gets Flutter/R8's default code shrinking, resource
+      # shrinking, and tree-shaken icon fonts for free.
       - name: Build APK (arm64-v8a, ${{ inputs.build_mode }})
         run: |
           flutter build apk \
             --${{ inputs.build_mode }} \
-            --target-platform android-arm64 \
-            --split-per-abi
+            --target-platform android-arm64
 
       - name: Report APK size
         run: |
@@ -96,6 +104,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: vesper-cine-arm64-${{ inputs.build_mode }}-${{ github.run_number }}
-          path: build/app/outputs/flutter-apk/app-arm64-v8a-${{ inputs.build_mode }}.apk
+          path: build/app/outputs/flutter-apk/app-${{ inputs.build_mode }}.apk
           if-no-files-found: error
           retention-days: 30
