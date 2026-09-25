@@ -18,11 +18,6 @@ target_include_directories(rcamera_engine PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-# Required for the Android-specific Vulkan structs/typedefs used to import
-# AHardwareBuffer frames as sampled images (VkAndroidHardwareBufferPropertiesANDROID,
-# VkImportAndroidHardwareBufferInfoANDROID, VkExternalFormatANDROID, etc.)
-target_compile_definitions(rcamera_engine PRIVATE VK_USE_PLATFORM_ANDROID_KHR)
-
 find_library(CAMERA2NDK_LIB camera2ndk)
 find_library(MEDIANDK_LIB mediandk)
 find_library(ANDROID_LIB android)

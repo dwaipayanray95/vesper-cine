@@ -1,11 +1,11 @@
 #pragma once
 
 #include <vulkan/vulkan.h>
-#include <vulkan/vulkan_android.h>
-#include <android/hardware_buffer.h>
 #include <android/native_window.h>
 #include <android/log.h>
 
+#include <cstdint>
+#include <cstddef>
 #include <vector>
 #include <mutex>
 #include <memory>
@@ -37,6 +37,7 @@ struct ComputeUniformData {
     float peakingThreshold;        // e.g. 0.15                    — offset 156
     float whiteLevel;              // e.g. 1023.0                  — offset 160
     int32_t sensorOrientation;     // 0/90/180/270 clockwise       — offset 164
+    int32_t rawRowStrideBytes;     // AImage_getPlaneRowStride()   — offset 168
 };
 
 // Packs a plain row-major 3x3 (9 floats, src9[row*3+col]) into the 12-float,
@@ -58,11 +59,13 @@ public:
     bool initialize(ANativeWindow* codecWindow, ANativeWindow* viewfinderWindow);
     void release();
 
-    // Process a raw frame from AHardwareBuffer: debayers + grades it on the
-    // GPU and presents the WYSIWYG monitoring output straight to the
-    // viewfinder ANativeWindow. Takes ownership of one reference on
-    // hwBuffer (releases it before returning).
-    bool processRawFrame(AHardwareBuffer* hwBuffer, const ComputeUniformData& uniforms);
+    // Uploads one frame's packed RAW10 bytes (as read via AImage_getPlaneData on
+    // the CPU — this device's GPU driver cannot import a RAW10 AHardwareBuffer as
+    // a sampled Vulkan image, see importFrameImage's removal history) into a
+    // storage buffer, debayers + grades it on the GPU, and presents the WYSIWYG
+    // monitoring output straight to the viewfinder ANativeWindow. `data` need only
+    // remain valid for the duration of this call.
+    bool processRawFrame(const uint8_t* data, size_t dataLength, const ComputeUniformData& uniforms);
 
     void setOutputDimensions(int32_t width, int32_t height);
 
@@ -74,21 +77,14 @@ public:
 private:
     bool initInstance();
     bool initDevice();
-    bool createComputePipeline(VkSampler immutableRawSampler);
+    bool createComputePipeline();
     bool createOutputImages();
     void destroyOutputImages();
 
-    // Lazily imports the AHardwareBuffer's opaque/external format as a
-    // VkSamplerYcbcrConversion + immutable VkSampler the first time a frame
-    // arrives (or whenever the buffer's external format changes), then
-    // rebuilds the descriptor set layout / pipeline layout / pipeline to
-    // bind it, since ycbcr conversion samplers must be immutable.
-    bool ensureExternalFormatResources(AHardwareBuffer* hwBuffer);
-
-    // Imports one frame's AHardwareBuffer as a transient sampled VkImage,
-    // updates descriptor binding 0, and frees the previous frame's import.
-    bool importFrameImage(AHardwareBuffer* hwBuffer, int32_t width, int32_t height);
-    void releaseFrameImage();
+    // Ensures the host-visible raw-frame staging buffer is at least
+    // `requiredSize` bytes, (re)creating it and rewriting descriptor binding 0
+    // if needed.
+    bool ensureRawStagingBuffer(VkDeviceSize requiredSize);
 
     // Copies the viewfinder storage image to the host-visible staging
     // buffer and blits it into the ANativeWindow's next buffer.
@@ -112,13 +108,11 @@ private:
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline computePipeline_ = VK_NULL_HANDLE;
 
-    // Raw sensor input: per-frame imported AHardwareBuffer (binding 0)
-    VkSamplerYcbcrConversion rawYcbcrConversion_ = VK_NULL_HANDLE;
-    VkSampler rawImmutableSampler_ = VK_NULL_HANDLE;
-    uint64_t cachedExternalFormat_ = 0;
-    VkImage rawFrameImage_ = VK_NULL_HANDLE;
-    VkDeviceMemory rawFrameMemory_ = VK_NULL_HANDLE;
-    VkImageView rawFrameView_ = VK_NULL_HANDLE;
+    // Raw sensor input: host-visible storage buffer, re-uploaded every frame (binding 0)
+    VkBuffer rawStagingBuffer_ = VK_NULL_HANDLE;
+    VkDeviceMemory rawStagingMemory_ = VK_NULL_HANDLE;
+    void* rawStagingMapped_ = nullptr;
+    VkDeviceSize rawStagingCapacity_ = 0;
 
     // Output 1: clean R-Log master feeding AMediaCodec (binding 1)
     VkImage codecImage_ = VK_NULL_HANDLE;
@@ -145,9 +139,6 @@ private:
 
     std::mutex vkMutex_;
     bool isInitialized_ = false;
-
-    // Vulkan Android Hardware Buffer function pointers
-    PFN_vkGetAndroidHardwareBufferPropertiesANDROID vkGetAndroidHardwareBufferPropertiesANDROID_ = nullptr;
 };
 
 } // namespace rcamera

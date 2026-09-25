@@ -1,8 +1,13 @@
 #version 450
 layout(local_size_x = 16, local_size_y = 16) in;
 
-// Input raw sensor image (sampled from imported AHardwareBuffer or storage image)
-layout(binding = 0) uniform sampler2D rawBayerTexture;
+// Input raw sensor frame: packed RAW10 bytes uploaded from the CPU each frame
+// (see VulkanComputeEngine::processRawFrame), read here as 32-bit words. This
+// device's GPU driver cannot import a RAW10 AHardwareBuffer as a sampled
+// image, so the buffer is read manually and unpacked in fetchBayer() below.
+layout(std430, binding = 0) readonly buffer RawBuffer {
+    uint rawWords[];
+} rawBuf;
 
 // Output 1: Clean 10-bit R-Log surface for AMediaCodec (16:9 crop or 4:3 open-gate)
 layout(binding = 1, rgba16f) uniform writeonly image2D outputCodecImage;
@@ -24,6 +29,7 @@ layout(push_constant) uniform UniformData {
     float peakingThreshold;    // e.g. 0.15 edge sharpness threshold
     float whiteLevel;          // e.g. 1023.0
     int sensorOrientation;     // 0/90/180/270: raw buffer -> upright display rotation (clockwise)
+    int rawRowStrideBytes;     // AImage_getPlaneRowStride() for the RAW10 plane
 } ubo;
 
 // R-Log OETF Transfer Function (Opto-Electronic Transfer Function)
@@ -74,13 +80,30 @@ vec3 getFalseColor(float luma) {
     return vec3(luma); // Grayscale passthrough for other tones
 }
 
+// Reads one byte from the packed RAW10 buffer (std430 storage buffers only
+// address 32-bit words, so byte-granular access is done by hand).
+uint fetchByte(int byteOffset) {
+    int wordIndex = byteOffset >> 2;
+    int shift = (byteOffset & 3) * 8;
+    return (rawBuf.rawWords[wordIndex] >> shift) & 0xFFu;
+}
+
 // Fetch raw Bayer sample with linearization and black level subtraction
 float fetchBayer(int x, int y) {
     x = clamp(x, 0, ubo.rawDimensions.x - 1);
     y = clamp(y, 0, ubo.rawDimensions.y - 1);
-    
-    vec2 uv = (vec2(x, y) + 0.5) / vec2(ubo.rawDimensions);
-    float raw = texture(rawBayerTexture, uv).r * ubo.whiteLevel;
+
+    // Android/MIPI RAW10 packing: every 4 pixels occupy 5 bytes — 4 bytes of
+    // 8 MSBs (one per pixel, in order) followed by 1 byte packing the 4
+    // pixels' 2 LSBs each (pixel 0 in bits[1:0] .. pixel 3 in bits[7:6]).
+    int groupIndex = x >> 2;
+    int pixelInGroup = x & 3;
+    int groupByteOffset = y * ubo.rawRowStrideBytes + groupIndex * 5;
+
+    uint msb = fetchByte(groupByteOffset + pixelInGroup);
+    uint lsbByte = fetchByte(groupByteOffset + 4);
+    uint lsb = (lsbByte >> (pixelInGroup * 2)) & 0x3u;
+    float raw = float((msb << 2) | lsb);
 
     // Determine CFA pattern quadrant (0: R, 1: Gr, 2: Gb, 3: B)
     int cfaIndex = ((y & 1) << 1) | (x & 1);

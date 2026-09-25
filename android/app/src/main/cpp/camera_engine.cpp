@@ -242,9 +242,12 @@ bool CameraEngine::startCaptureSession(int32_t width, int32_t height, FrameCallb
     stopCaptureSession();
     frameCallback_ = callback;
 
-    // Create AImageReader with RAW10 format and GPU sampling usage
-    uint64_t usage = AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE | AHARDWAREBUFFER_USAGE_CPU_READ_NEVER;
-    int32_t maxImages = 6; // Quad-buffered ring for smooth zero-copy GPU consumption
+    // CPU-read usage: this hardware's GPU driver cannot import a RAW10
+    // AHardwareBuffer as a sampled Vulkan image (see VulkanComputeEngine), so
+    // frames are read on the CPU via AImage_getPlaneData and uploaded to the
+    // GPU as a storage buffer instead of a zero-copy sampled image.
+    uint64_t usage = AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN;
+    int32_t maxImages = 6; // Ring buffer depth for smooth capture
 
     media_status_t mStatus = AImageReader_newWithUsage(
         width, height,
@@ -523,12 +526,16 @@ void CameraEngine::onImageAvailable(AImageReader* reader) {
     int64_t timestamp = 0;
     AImage_getTimestamp(image, &timestamp);
 
-    AHardwareBuffer* hwBuffer = nullptr;
-    AImage_getHardwareBuffer(image, &hwBuffer);
+    uint8_t* data = nullptr;
+    int dataLength = 0;
+    int32_t rowStride = 0;
+    media_status_t planeStatus = AImage_getPlaneData(image, 0, &data, &dataLength);
+    AImage_getPlaneRowStride(image, 0, &rowStride);
 
-    if (hwBuffer && frameCallback_) {
-        AHardwareBuffer_acquire(hwBuffer);
-        frameCallback_(hwBuffer, timestamp);
+    if (planeStatus == AMEDIA_OK && data && dataLength > 0 && frameCallback_) {
+        // Synchronous: frameCallback_ (GPU dispatch) fully completes, including its
+        // fence wait, before returning, so `data` stays valid for its whole duration.
+        frameCallback_(data, static_cast<size_t>(dataLength), rowStride, timestamp);
     }
 
     AImage_delete(image);

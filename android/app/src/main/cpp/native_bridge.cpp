@@ -149,11 +149,13 @@ EXPORT int32_t rcamera_start_stream(int32_t width, int32_t height) {
     gUniforms.rawWidth = width;
     gUniforms.rawHeight = height;
 
-    bool ok = gCameraEngine->startCaptureSession(width, height, [](AHardwareBuffer* buffer, int64_t timestampNs) {
-        if (gVulkanCompute) {
-            gVulkanCompute->processRawFrame(buffer, gUniforms);
-        }
-    });
+    bool ok = gCameraEngine->startCaptureSession(width, height,
+        [](const uint8_t* data, size_t dataLength, int32_t rowStrideBytes, int64_t timestampNs) {
+            if (gVulkanCompute) {
+                gUniforms.rawRowStrideBytes = rowStrideBytes;
+                gVulkanCompute->processRawFrame(data, dataLength, gUniforms);
+            }
+        });
 
     return ok ? 0 : -1;
 }

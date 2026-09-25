@@ -37,6 +37,14 @@ bool VulkanComputeEngine::initialize(ANativeWindow* codecWindow, ANativeWindow* 
         return false;
     }
 
+    // Binding 0 (the raw-frame storage buffer) is format-independent, so the
+    // whole pipeline can be built up front rather than deferred to first frame.
+    if (!createComputePipeline()) {
+        VK_LOGE("Failed to create compute pipeline");
+        isInitialized_ = false;
+        return false;
+    }
+
     if (viewfinderWindow) {
         // Inline what setViewfinderWindow() does rather than calling it: vkMutex_
         // is already held here (non-recursive), so calling that setter would deadlock.
@@ -45,7 +53,7 @@ bool VulkanComputeEngine::initialize(ANativeWindow* codecWindow, ANativeWindow* 
         ANativeWindow_setBuffersGeometry(viewfinderWindow_, outputWidth_, outputHeight_, WINDOW_FORMAT_RGBA_8888);
     }
 
-    VK_LOGI("Vulkan compute engine initialized (%dx%d); compute pipeline finishes building on first frame", outputWidth_, outputHeight_);
+    VK_LOGI("Vulkan compute engine fully initialized (%dx%d)", outputWidth_, outputHeight_);
     return true;
 }
 
@@ -82,13 +90,6 @@ void VulkanComputeEngine::setOutputDimensions(int32_t width, int32_t height) {
 }
 
 bool VulkanComputeEngine::initInstance() {
-    std::vector<const char*> instanceExtensions = {
-        VK_KHR_SURFACE_EXTENSION_NAME,
-        VK_KHR_ANDROID_SURFACE_EXTENSION_NAME,
-        VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME,
-        VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME
-    };
-
     VkApplicationInfo appInfo = {
         .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
         .pApplicationName = "Vesper Cine",
@@ -98,11 +99,11 @@ bool VulkanComputeEngine::initInstance() {
         .apiVersion = VK_API_VERSION_1_1
     };
 
+    // Pure headless compute: no VkSurfaceKHR, no external-memory interop, so
+    // no instance extensions are required.
     VkInstanceCreateInfo createInfo = {
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
-        .pApplicationInfo = &appInfo,
-        .enabledExtensionCount = static_cast<uint32_t>(instanceExtensions.size()),
-        .ppEnabledExtensionNames = instanceExtensions.data()
+        .pApplicationInfo = &appInfo
     };
 
     VkResult res = vkCreateInstance(&createInfo, nullptr, &instance_);
@@ -143,27 +144,12 @@ bool VulkanComputeEngine::initDevice() {
         .pQueuePriorities = &queuePriority
     };
 
-    std::vector<const char*> deviceExtensions = {
-        VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME,
-        VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
-        VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME,
-        VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME,
-        VK_KHR_MAINTENANCE1_EXTENSION_NAME,
-        VK_KHR_BIND_MEMORY_2_EXTENSION_NAME,
-        VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME
-    };
-
-    VkPhysicalDeviceSamplerYcbcrConversionFeatures ycbcrFeatures{};
-    ycbcrFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLER_YCBCR_CONVERSION_FEATURES;
-    ycbcrFeatures.samplerYcbcrConversion = VK_TRUE;
-
+    // No device extensions required: everything used (buffers, storage images,
+    // compute pipelines) is Vulkan 1.0/1.1 core.
     VkDeviceCreateInfo deviceCreateInfo{};
     deviceCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-    deviceCreateInfo.pNext = &ycbcrFeatures;
     deviceCreateInfo.queueCreateInfoCount = 1;
     deviceCreateInfo.pQueueCreateInfos = &queueCreateInfo;
-    deviceCreateInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
-    deviceCreateInfo.ppEnabledExtensionNames = deviceExtensions.data();
 
     VkResult res = vkCreateDevice(physicalDevice_, &deviceCreateInfo, nullptr, &device_);
     if (res != VK_SUCCESS) {
@@ -172,15 +158,6 @@ bool VulkanComputeEngine::initDevice() {
     }
 
     vkGetDeviceQueue(device_, computeQueueFamilyIndex_, 0, &computeQueue_);
-
-    vkGetAndroidHardwareBufferPropertiesANDROID_ =
-        reinterpret_cast<PFN_vkGetAndroidHardwareBufferPropertiesANDROID>(
-            vkGetDeviceProcAddr(device_, "vkGetAndroidHardwareBufferPropertiesANDROID"));
-
-    if (!vkGetAndroidHardwareBufferPropertiesANDROID_) {
-        VK_LOGE("Failed to get vkGetAndroidHardwareBufferPropertiesANDROID function pointer");
-        return false;
-    }
 
     VkCommandPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -411,94 +388,7 @@ void VulkanComputeEngine::destroyOutputImages() {
     if (viewfinderImageMemory_) { vkFreeMemory(device_, viewfinderImageMemory_, nullptr); viewfinderImageMemory_ = VK_NULL_HANDLE; }
 }
 
-bool VulkanComputeEngine::ensureExternalFormatResources(AHardwareBuffer* hwBuffer) {
-    VkAndroidHardwareBufferFormatPropertiesANDROID formatProps{};
-    formatProps.sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_ANDROID;
-
-    VkAndroidHardwareBufferPropertiesANDROID bufferProps{};
-    bufferProps.sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID;
-    bufferProps.pNext = &formatProps;
-
-    if (vkGetAndroidHardwareBufferPropertiesANDROID_(device_, hwBuffer, &bufferProps) != VK_SUCCESS) {
-        VK_LOGE("vkGetAndroidHardwareBufferPropertiesANDROID failed");
-        return false;
-    }
-
-    if (rawImmutableSampler_ != VK_NULL_HANDLE && cachedExternalFormat_ == formatProps.externalFormat) {
-        return true; // Already built for this buffer's format; nothing to do.
-    }
-
-    VK_LOGI("Building GPU pipeline for AHardwareBuffer externalFormat=%llu (vkFormat=%d)",
-            static_cast<unsigned long long>(formatProps.externalFormat), formatProps.format);
-
-    // Tear down anything built for a previous (different) format.
-    releaseFrameImage();
-    if (computePipeline_) { vkDestroyPipeline(device_, computePipeline_, nullptr); computePipeline_ = VK_NULL_HANDLE; }
-    if (pipelineLayout_) { vkDestroyPipelineLayout(device_, pipelineLayout_, nullptr); pipelineLayout_ = VK_NULL_HANDLE; }
-    if (descriptorPool_) { vkDestroyDescriptorPool(device_, descriptorPool_, nullptr); descriptorPool_ = VK_NULL_HANDLE; descriptorSet_ = VK_NULL_HANDLE; }
-    if (descriptorSetLayout_) { vkDestroyDescriptorSetLayout(device_, descriptorSetLayout_, nullptr); descriptorSetLayout_ = VK_NULL_HANDLE; }
-    if (rawImmutableSampler_) { vkDestroySampler(device_, rawImmutableSampler_, nullptr); rawImmutableSampler_ = VK_NULL_HANDLE; }
-    if (rawYcbcrConversion_) { vkDestroySamplerYcbcrConversion(device_, rawYcbcrConversion_, nullptr); rawYcbcrConversion_ = VK_NULL_HANDLE; }
-
-    // This binding is always RAW10 Bayer sensor data, never a real RGBA texture.
-    // Some vendor gralloc/Vulkan implementations still report a plausible-looking
-    // concrete VkFormat (e.g. R8G8B8A8_UNORM) in formatProps.format for a RAW/BLOB
-    // AHardwareBuffer despite the actual memory being packed 10-bit sensor data —
-    // trusting that format then mismatches gralloc's real byte layout and crashes
-    // (observed: SIGTRAP inside libcustomer_gralloc_ddk_api.so's bpp calculator).
-    // Always go through the opaque external-format path instead of formatProps.format.
-    bool useExternalFormat = true;
-
-    VkExternalFormatANDROID externalFormatInfo{};
-    externalFormatInfo.sType = VK_STRUCTURE_TYPE_EXTERNAL_FORMAT_ANDROID;
-    externalFormatInfo.externalFormat = formatProps.externalFormat;
-
-    VkSamplerYcbcrConversionCreateInfo convInfo{};
-    convInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_CREATE_INFO;
-    convInfo.pNext = useExternalFormat ? &externalFormatInfo : nullptr;
-    convInfo.format = useExternalFormat ? VK_FORMAT_UNDEFINED : formatProps.format;
-    convInfo.ycbcrModel = formatProps.suggestedYcbcrModel;
-    convInfo.ycbcrRange = formatProps.suggestedYcbcrRange;
-    convInfo.components = formatProps.samplerYcbcrConversionComponents;
-    convInfo.xChromaOffset = formatProps.suggestedXChromaOffset;
-    convInfo.yChromaOffset = formatProps.suggestedYChromaOffset;
-    // Raw Bayer sensor data is never chroma-subsampled: never interpolate across texels.
-    convInfo.chromaFilter = VK_FILTER_NEAREST;
-    convInfo.forceExplicitReconstruction = VK_FALSE;
-
-    if (vkCreateSamplerYcbcrConversion(device_, &convInfo, nullptr, &rawYcbcrConversion_) != VK_SUCCESS) {
-        VK_LOGE("vkCreateSamplerYcbcrConversion failed");
-        return false;
-    }
-
-    VkSamplerYcbcrConversionInfo samplerConvInfo{};
-    samplerConvInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_INFO;
-    samplerConvInfo.conversion = rawYcbcrConversion_;
-
-    VkSamplerCreateInfo samplerInfo{};
-    samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    samplerInfo.pNext = &samplerConvInfo;
-    samplerInfo.magFilter = VK_FILTER_NEAREST;
-    samplerInfo.minFilter = VK_FILTER_NEAREST;
-    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    samplerInfo.maxAnisotropy = 1.0f;
-    samplerInfo.compareOp = VK_COMPARE_OP_NEVER;
-    samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
-
-    if (vkCreateSampler(device_, &samplerInfo, nullptr, &rawImmutableSampler_) != VK_SUCCESS) {
-        VK_LOGE("vkCreateSampler (raw ycbcr) failed");
-        return false;
-    }
-
-    cachedExternalFormat_ = formatProps.externalFormat;
-
-    return createComputePipeline(rawImmutableSampler_);
-}
-
-bool VulkanComputeEngine::createComputePipeline(VkSampler immutableRawSampler) {
+bool VulkanComputeEngine::createComputePipeline() {
     VkShaderModuleCreateInfo shaderModuleInfo{};
     shaderModuleInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
     shaderModuleInfo.codeSize = MHC_RLOG_SPV_SIZE;
@@ -510,12 +400,15 @@ bool VulkanComputeEngine::createComputePipeline(VkSampler immutableRawSampler) {
         return false;
     }
 
+    // Binding 0: raw sensor frame, uploaded from the CPU each frame (see
+    // ensureRawStagingBuffer) rather than imported as a sampled image — this
+    // device's gralloc cannot report a byte-per-pixel size for a RAW10
+    // AHardwareBuffer when asked to import it as a Vulkan sampled image.
     VkDescriptorSetLayoutBinding bindings[3]{};
     bindings[0].binding = 0;
-    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[0].descriptorCount = 1;
     bindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    bindings[0].pImmutableSamplers = &immutableRawSampler;
 
     bindings[1].binding = 1;
     bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
@@ -573,7 +466,7 @@ bool VulkanComputeEngine::createComputePipeline(VkSampler immutableRawSampler) {
     }
 
     VkDescriptorPoolSize poolSizes[2]{};
-    poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    poolSizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     poolSizes[0].descriptorCount = 1;
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     poolSizes[1].descriptorCount = 2;
@@ -599,6 +492,8 @@ bool VulkanComputeEngine::createComputePipeline(VkSampler immutableRawSampler) {
     }
 
     // Output storage images already exist (created in initialize()); bind them now.
+    // Binding 0 (the raw-frame buffer) is written lazily by ensureRawStagingBuffer()
+    // on the first frame, once its required size is known.
     VkDescriptorImageInfo codecInfo{};
     codecInfo.imageView = codecImageView_;
     codecInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -620,121 +515,66 @@ bool VulkanComputeEngine::createComputePipeline(VkSampler immutableRawSampler) {
 
     vkUpdateDescriptorSets(device_, 2, writes, 0, nullptr);
 
-    VK_LOGI("Vulkan compute pipeline (re)built");
+    VK_LOGI("Vulkan compute pipeline built");
     return true;
 }
 
-bool VulkanComputeEngine::importFrameImage(AHardwareBuffer* hwBuffer, int32_t width, int32_t height) {
-    releaseFrameImage();
+bool VulkanComputeEngine::ensureRawStagingBuffer(VkDeviceSize requiredSize) {
+    if (rawStagingBuffer_ != VK_NULL_HANDLE && rawStagingCapacity_ >= requiredSize) {
+        return true;
+    }
 
-    VkAndroidHardwareBufferFormatPropertiesANDROID formatProps{};
-    formatProps.sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_ANDROID;
-    VkAndroidHardwareBufferPropertiesANDROID bufferProps{};
-    bufferProps.sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID;
-    bufferProps.pNext = &formatProps;
-    if (vkGetAndroidHardwareBufferPropertiesANDROID_(device_, hwBuffer, &bufferProps) != VK_SUCCESS) {
-        VK_LOGE("vkGetAndroidHardwareBufferPropertiesANDROID (per-frame) failed");
+    if (rawStagingMapped_) { vkUnmapMemory(device_, rawStagingMemory_); rawStagingMapped_ = nullptr; }
+    if (rawStagingBuffer_) { vkDestroyBuffer(device_, rawStagingBuffer_, nullptr); rawStagingBuffer_ = VK_NULL_HANDLE; }
+    if (rawStagingMemory_) { vkFreeMemory(device_, rawStagingMemory_, nullptr); rawStagingMemory_ = VK_NULL_HANDLE; }
+    rawStagingCapacity_ = 0;
+
+    VkBufferCreateInfo bufInfo{};
+    bufInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufInfo.size = requiredSize;
+    bufInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    bufInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (vkCreateBuffer(device_, &bufInfo, nullptr, &rawStagingBuffer_) != VK_SUCCESS) {
+        VK_LOGE("vkCreateBuffer (raw staging) failed");
         return false;
     }
 
-    // See the matching comment in ensureExternalFormatResources(): always import
-    // this binding as an opaque external format rather than trusting whatever
-    // concrete VkFormat the driver reports for the RAW/BLOB AHardwareBuffer.
-    bool useExternalFormat = true;
-
-    VkExternalFormatANDROID externalFormatInfo{};
-    externalFormatInfo.sType = VK_STRUCTURE_TYPE_EXTERNAL_FORMAT_ANDROID;
-    externalFormatInfo.externalFormat = formatProps.externalFormat;
-
-    VkExternalMemoryImageCreateInfo extMemImageInfo{};
-    extMemImageInfo.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
-    extMemImageInfo.pNext = useExternalFormat ? static_cast<void*>(&externalFormatInfo) : nullptr;
-    extMemImageInfo.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID;
-
-    VkImageCreateInfo imageInfo{};
-    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    imageInfo.pNext = &extMemImageInfo;
-    imageInfo.imageType = VK_IMAGE_TYPE_2D;
-    imageInfo.format = useExternalFormat ? VK_FORMAT_UNDEFINED : formatProps.format;
-    imageInfo.extent = { static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1 };
-    imageInfo.mipLevels = 1;
-    imageInfo.arrayLayers = 1;
-    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-    imageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
-    imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-    if (vkCreateImage(device_, &imageInfo, nullptr, &rawFrameImage_) != VK_SUCCESS) {
-        VK_LOGE("vkCreateImage (raw frame import) failed");
-        return false;
-    }
-
-    VkImportAndroidHardwareBufferInfoANDROID importInfo{};
-    importInfo.sType = VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID;
-    importInfo.buffer = hwBuffer;
-
-    VkMemoryDedicatedAllocateInfo dedicatedInfo{};
-    dedicatedInfo.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
-    dedicatedInfo.pNext = &importInfo;
-    dedicatedInfo.image = rawFrameImage_;
-
+    VkMemoryRequirements memReq;
+    vkGetBufferMemoryRequirements(device_, rawStagingBuffer_, &memReq);
     VkMemoryAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocInfo.pNext = &dedicatedInfo;
-    allocInfo.allocationSize = bufferProps.allocationSize;
-    allocInfo.memoryTypeIndex = findMemoryType(bufferProps.memoryTypeBits, 0);
-
-    if (vkAllocateMemory(device_, &allocInfo, nullptr, &rawFrameMemory_) != VK_SUCCESS) {
-        VK_LOGE("vkAllocateMemory (raw frame import) failed");
+    allocInfo.allocationSize = memReq.size;
+    allocInfo.memoryTypeIndex = findMemoryType(
+        memReq.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (vkAllocateMemory(device_, &allocInfo, nullptr, &rawStagingMemory_) != VK_SUCCESS) {
+        VK_LOGE("vkAllocateMemory (raw staging) failed");
         return false;
     }
-    if (vkBindImageMemory(device_, rawFrameImage_, rawFrameMemory_, 0) != VK_SUCCESS) {
-        VK_LOGE("vkBindImageMemory (raw frame import) failed");
+    if (vkBindBufferMemory(device_, rawStagingBuffer_, rawStagingMemory_, 0) != VK_SUCCESS) {
+        VK_LOGE("vkBindBufferMemory (raw staging) failed");
         return false;
     }
-
-    VkSamplerYcbcrConversionInfo samplerConvInfo{};
-    samplerConvInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_INFO;
-    samplerConvInfo.conversion = rawYcbcrConversion_;
-
-    VkImageViewCreateInfo viewInfo{};
-    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    viewInfo.pNext = &samplerConvInfo;
-    viewInfo.image = rawFrameImage_;
-    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    viewInfo.format = useExternalFormat ? VK_FORMAT_UNDEFINED : formatProps.format;
-    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    viewInfo.subresourceRange.levelCount = 1;
-    viewInfo.subresourceRange.layerCount = 1;
-
-    if (vkCreateImageView(device_, &viewInfo, nullptr, &rawFrameView_) != VK_SUCCESS) {
-        VK_LOGE("vkCreateImageView (raw frame import) failed");
+    if (vkMapMemory(device_, rawStagingMemory_, 0, requiredSize, 0, &rawStagingMapped_) != VK_SUCCESS) {
+        VK_LOGE("vkMapMemory (raw staging) failed");
         return false;
     }
+    rawStagingCapacity_ = requiredSize;
 
-    VkDescriptorImageInfo descImageInfo{};
-    descImageInfo.sampler = rawImmutableSampler_; // ignored by the driver for immutable-sampler bindings
-    descImageInfo.imageView = rawFrameView_;
-    descImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkDescriptorBufferInfo bufDescInfo{};
+    bufDescInfo.buffer = rawStagingBuffer_;
+    bufDescInfo.offset = 0;
+    bufDescInfo.range = VK_WHOLE_SIZE;
 
     VkWriteDescriptorSet write{};
     write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     write.dstSet = descriptorSet_;
     write.dstBinding = 0;
     write.descriptorCount = 1;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    write.pImageInfo = &descImageInfo;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    write.pBufferInfo = &bufDescInfo;
     vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
 
     return true;
-}
-
-void VulkanComputeEngine::releaseFrameImage() {
-    if (!device_) return;
-    if (rawFrameView_) { vkDestroyImageView(device_, rawFrameView_, nullptr); rawFrameView_ = VK_NULL_HANDLE; }
-    if (rawFrameImage_) { vkDestroyImage(device_, rawFrameImage_, nullptr); rawFrameImage_ = VK_NULL_HANDLE; }
-    if (rawFrameMemory_) { vkFreeMemory(device_, rawFrameMemory_, nullptr); rawFrameMemory_ = VK_NULL_HANDLE; }
 }
 
 bool VulkanComputeEngine::presentViewfinder() {
@@ -762,27 +602,16 @@ bool VulkanComputeEngine::presentViewfinder() {
     return true;
 }
 
-bool VulkanComputeEngine::processRawFrame(AHardwareBuffer* hwBuffer, const ComputeUniformData& uniforms) {
-    if (!hwBuffer) return false;
-    if (!isInitialized_) {
-        AHardwareBuffer_release(hwBuffer);
-        return false;
-    }
+bool VulkanComputeEngine::processRawFrame(const uint8_t* data, size_t dataLength, const ComputeUniformData& uniforms) {
+    if (!data || dataLength == 0) return false;
+    if (!isInitialized_) return false;
 
     std::lock_guard<std::mutex> lock(vkMutex_);
 
-    AHardwareBuffer_Desc desc{};
-    AHardwareBuffer_describe(hwBuffer, &desc);
-
-    if (!ensureExternalFormatResources(hwBuffer)) {
-        AHardwareBuffer_release(hwBuffer);
+    if (!ensureRawStagingBuffer(static_cast<VkDeviceSize>(dataLength))) {
         return false;
     }
-
-    if (!importFrameImage(hwBuffer, static_cast<int32_t>(desc.width), static_cast<int32_t>(desc.height))) {
-        AHardwareBuffer_release(hwBuffer);
-        return false;
-    }
+    std::memcpy(rawStagingMapped_, data, dataLength);
 
     vkWaitForFences(device_, 1, &frameFence_, VK_TRUE, UINT64_MAX);
     vkResetFences(device_, 1, &frameFence_);
@@ -796,21 +625,18 @@ bool VulkanComputeEngine::processRawFrame(AHardwareBuffer* hwBuffer, const Compu
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(commandBuffer_, &beginInfo);
 
-    // Freshly-imported raw frame: UNDEFINED -> SHADER_READ_ONLY_OPTIMAL.
-    VkImageMemoryBarrier toShaderRead{};
-    toShaderRead.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    toShaderRead.srcAccessMask = 0;
-    toShaderRead.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    toShaderRead.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    toShaderRead.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    toShaderRead.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    toShaderRead.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    toShaderRead.image = rawFrameImage_;
-    toShaderRead.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    toShaderRead.subresourceRange.levelCount = 1;
-    toShaderRead.subresourceRange.layerCount = 1;
-    vkCmdPipelineBarrier(commandBuffer_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                          0, 0, nullptr, 0, nullptr, 1, &toShaderRead);
+    // The CPU write above must be visible to the shader's buffer read.
+    VkBufferMemoryBarrier hostToShaderRead{};
+    hostToShaderRead.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    hostToShaderRead.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+    hostToShaderRead.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    hostToShaderRead.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    hostToShaderRead.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    hostToShaderRead.buffer = rawStagingBuffer_;
+    hostToShaderRead.offset = 0;
+    hostToShaderRead.size = VK_WHOLE_SIZE;
+    vkCmdPipelineBarrier(commandBuffer_, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                          0, 0, nullptr, 1, &hostToShaderRead, 0, nullptr);
 
     vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_COMPUTE, computePipeline_);
     vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout_, 0, 1, &descriptorSet_, 0, nullptr);
@@ -855,11 +681,6 @@ bool VulkanComputeEngine::processRawFrame(AHardwareBuffer* hwBuffer, const Compu
         presentViewfinder();
     }
 
-    // The imported per-frame image/view/memory must not outlive this frame's
-    // AHardwareBuffer; drop it now that the GPU work has completed.
-    releaseFrameImage();
-    AHardwareBuffer_release(hwBuffer);
-
     return true;
 }
 
@@ -869,14 +690,14 @@ void VulkanComputeEngine::release() {
 
     if (device_) {
         vkDeviceWaitIdle(device_);
-        releaseFrameImage();
         destroyOutputImages();
+        if (rawStagingMapped_) { vkUnmapMemory(device_, rawStagingMemory_); rawStagingMapped_ = nullptr; }
+        if (rawStagingBuffer_) vkDestroyBuffer(device_, rawStagingBuffer_, nullptr);
+        if (rawStagingMemory_) vkFreeMemory(device_, rawStagingMemory_, nullptr);
         if (computePipeline_) vkDestroyPipeline(device_, computePipeline_, nullptr);
         if (pipelineLayout_) vkDestroyPipelineLayout(device_, pipelineLayout_, nullptr);
         if (descriptorPool_) vkDestroyDescriptorPool(device_, descriptorPool_, nullptr);
         if (descriptorSetLayout_) vkDestroyDescriptorSetLayout(device_, descriptorSetLayout_, nullptr);
-        if (rawImmutableSampler_) vkDestroySampler(device_, rawImmutableSampler_, nullptr);
-        if (rawYcbcrConversion_) vkDestroySamplerYcbcrConversion(device_, rawYcbcrConversion_, nullptr);
         if (frameFence_) vkDestroyFence(device_, frameFence_, nullptr);
         if (commandPool_) vkDestroyCommandPool(device_, commandPool_, nullptr);
         vkDestroyDevice(device_, nullptr);
@@ -900,9 +721,9 @@ void VulkanComputeEngine::release() {
     descriptorPool_ = VK_NULL_HANDLE;
     descriptorSetLayout_ = VK_NULL_HANDLE;
     descriptorSet_ = VK_NULL_HANDLE;
-    rawImmutableSampler_ = VK_NULL_HANDLE;
-    rawYcbcrConversion_ = VK_NULL_HANDLE;
-    cachedExternalFormat_ = 0;
+    rawStagingBuffer_ = VK_NULL_HANDLE;
+    rawStagingMemory_ = VK_NULL_HANDLE;
+    rawStagingCapacity_ = 0;
     frameFence_ = VK_NULL_HANDLE;
     commandPool_ = VK_NULL_HANDLE;
     commandBuffer_ = VK_NULL_HANDLE;

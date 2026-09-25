@@ -5,6 +5,7 @@
 #include <camera/NdkCameraCaptureSession.h>
 #include <camera/NdkCameraMetadata.h>
 #include <media/NdkImageReader.h>
+#include <media/NdkImage.h>
 #include <android/native_window.h>
 #include <android/hardware_buffer.h>
 #include <android/log.h>
@@ -43,7 +44,11 @@ struct CameraDeviceInfo {
     int32_t rawHeight = 0;
 };
 
-using FrameCallback = std::function<void(AHardwareBuffer* buffer, int64_t timestampNs)>;
+// Delivers the RAW10 plane's raw bytes directly (CPU-mapped via AImage_getPlaneData),
+// valid only for the duration of the call. This device's GPU driver cannot import a
+// RAW10 AHardwareBuffer as a sampled Vulkan image (see VulkanComputeEngine), so the
+// pipeline reads the packed bytes on the CPU and uploads them as a storage buffer.
+using FrameCallback = std::function<void(const uint8_t* data, size_t dataLength, int32_t rowStrideBytes, int64_t timestampNs)>;
 
 class CameraEngine {
 public:
