@@ -496,8 +496,18 @@ void CameraEngine::onSessionReady(ACameraCaptureSession* session) {
 void CameraEngine::onImageAvailable(AImageReader* reader) {
     AImage* image = nullptr;
     media_status_t status = AImageReader_acquireLatestImageAsync(reader, &image, nullptr);
-    if (status != AMEDIA_OK || !image) {
+    if (status != AMEDIA_OK) {
+        static int errCount = 0;
+        if (++errCount % 30 == 0) {
+            LOGW("AImageReader_acquireLatestImageAsync returned error: %d", status);
+        }
         return;
+    }
+    if (!image) return;
+
+    static int frameCounter = 0;
+    if (++frameCounter % 30 == 0) {
+        LOGI("Successfully received %d RAW10 frames from Pixel sensor!", frameCounter);
     }
 
     int64_t timestamp = 0;
@@ -507,7 +517,6 @@ void CameraEngine::onImageAvailable(AImageReader* reader) {
     AImage_getHardwareBuffer(image, &hwBuffer);
 
     if (hwBuffer && frameCallback_) {
-        // Retain hardware buffer for asynchronous GPU compute processing
         AHardwareBuffer_acquire(hwBuffer);
         frameCallback_(hwBuffer, timestamp);
     }
