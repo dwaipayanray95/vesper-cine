@@ -15,7 +15,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   // Settings State
   bool _isStreaming = false;
   bool _isRecording = false;
-  int _monitoringMode = 1; // 0: Flat R-Log, 1: Rec.709 LUT, 2: False Color, 3: Focus Peaking, 4: Zebras
+  int _monitoringMode = 0; // 0: Flat R-Log, 1: Rec.709 LUT, 2: False Color, 3: Focus Peaking, 4: Zebras
   int _cropMode = 0;       // 0: 16:9 4K UHD, 1: 4:3 Open Gate
   double _shutterAngle = 180.0;
   double _fps = 24.0;

@@ -94,14 +94,25 @@ EXPORT int32_t rcamera_init() {
         gVulkanCompute = std::make_unique<VulkanComputeEngine>();
     }
 
-    // Default Rec.2020 matrix and standard D65 matrices
-    // CIE XYZ -> Rec.2020 Linear matrix
-    const float kXyzToRec2020[9] = {
-         1.7166511880f, -0.3556707838f, -0.2533662814f,
-        -0.6666843518f,  1.6164812366f,  0.0157685458f,
-         0.0176398574f, -0.0427706133f,  0.9421031212f
+    // CIE XYZ (D50) -> Linear Rec.2020 matrix. ACAMERA_SENSOR_FORWARD_MATRIX1
+    // (used for sensorToXyzMatrix, see rcamera_open_camera) is documented by
+    // the DNG spec to output XYZ referenced to the D50 white point — but a
+    // standard "XYZ -> Rec.2020" matrix normally assumes D65 input (Rec.2020's
+    // own white point). Feeding D50-referenced XYZ through a D65-assuming
+    // matrix with no chromatic adaptation between them is a real, measured bug
+    // (mathematically verified: a perfectly neutral D50 white point run
+    // through the plain D65 matrix comes out as [1.09, 0.99, 0.75] — red
+    // boosted, blue crushed by 25% — a textbook color-temperature shift, and
+    // exactly the "everything looks yellow/warm" symptom this was causing).
+    // This constant is the plain D65 matrix pre-multiplied by a standard
+    // Bradford D50->D65 chromatic adaptation matrix, combining both steps
+    // into one 3x3 (same neutral D50 white point now maps to [1.0, 1.0, 1.0]).
+    const float kXyzD50ToRec2020[9] = {
+         1.6473375051f, -0.3935674606f, -0.2359962568f,
+        -0.6826034874f,  1.6475886001f,  0.0128191127f,
+         0.0296523668f, -0.0628993298f,  1.2531278582f
     };
-    PackMat3ForPushConstant(kXyzToRec2020, gUniforms.xyzToRec2020Matrix);
+    PackMat3ForPushConstant(kXyzD50ToRec2020, gUniforms.xyzToRec2020Matrix);
 
     // Default WB gains (5600K Daylight)
     gUniforms.wbGains[0] = 1.8f;
@@ -110,7 +121,7 @@ EXPORT int32_t rcamera_init() {
     gUniforms.wbGains[3] = 0.0f;
 
     gUniforms.cropMode = 0;          // Default 16:9 crop
-    gUniforms.monitoringMode = 1;    // Default Rec.709 preview LUT
+    gUniforms.monitoringMode = 0;    // Default flat R-Log
     gUniforms.zebraThreshold = 0.95f;
     gUniforms.peakingThreshold = 0.15f;
 
