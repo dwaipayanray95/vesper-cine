@@ -278,6 +278,8 @@ bool CameraEngine::startCaptureSession(int32_t width, int32_t height, FrameCallb
 
     stopCaptureSession();
     frameCallback_ = callback;
+    lastStreamWidth_ = width;
+    lastStreamHeight_ = height;
 
     // CPU-read usage: this hardware's GPU driver cannot import a RAW10
     // AHardwareBuffer as a sampled Vulkan image (see VulkanComputeEngine), so
@@ -529,6 +531,50 @@ void CameraEngine::onDeviceDisconnected(ACameraDevice* device) {
 void CameraEngine::onDeviceError(ACameraDevice* device, int error) {
     LOGE("Camera device error: %d", error);
     isStreaming_ = false;
+
+    // ERROR_CAMERA_DEVICE / ERROR_CAMERA_SERVICE are documented as fatal: the
+    // ACameraDevice is already unusable and the framework expects the app to
+    // close and reopen it. Previously this callback only logged and left the
+    // engine idle forever (viewfinder frozen until the app was killed).
+    if (error == ERROR_CAMERA_DEVICE || error == ERROR_CAMERA_SERVICE) {
+        attemptDeviceErrorRecovery();
+    }
+}
+
+void CameraEngine::attemptDeviceErrorRecovery() {
+    // Rate-limit: a truly dead camera/driver would otherwise retrigger this
+    // callback in a tight loop as each recovery attempt itself fails.
+    int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (nowMs - lastRecoveryAttemptMs_ < 2000) {
+        LOGW("Skipping camera device recovery attempt (rate-limited)");
+        return;
+    }
+    lastRecoveryAttemptMs_ = nowMs;
+
+    if (activeCameraId_.empty() || lastStreamWidth_ <= 0 || lastStreamHeight_ <= 0) {
+        LOGE("Cannot recover camera device: no prior session to restore");
+        return;
+    }
+
+    LOGW("Attempting camera device recovery: reopening %s and restarting %dx%d stream",
+         activeCameraId_.c_str(), lastStreamWidth_, lastStreamHeight_);
+
+    std::string cameraId = activeCameraId_; // openCamera() below reassigns this member
+    FrameCallback callback = frameCallback_; // startCaptureSession() below reassigns this member
+    int32_t width = lastStreamWidth_;
+    int32_t height = lastStreamHeight_;
+
+    if (!openCamera(cameraId)) {
+        LOGE("Camera device recovery failed: could not reopen %s", cameraId.c_str());
+        return;
+    }
+    if (!startCaptureSession(width, height, callback)) {
+        LOGE("Camera device recovery failed: could not restart capture session");
+        return;
+    }
+
+    LOGI("Camera device recovery succeeded");
 }
 
 void CameraEngine::onSessionActive(ACameraCaptureSession* session) {

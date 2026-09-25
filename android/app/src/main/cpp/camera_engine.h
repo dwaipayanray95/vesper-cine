@@ -16,6 +16,7 @@
 #include <functional>
 #include <mutex>
 #include <atomic>
+#include <chrono>
 
 #define TAG "RCamera_Engine"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
@@ -84,6 +85,7 @@ public:
 private:
     void querySensorCalibration(ACameraMetadata* metadata);
     bool configureCaptureRequest();
+    void attemptDeviceErrorRecovery();
 
     ACameraManager* cameraManager_ = nullptr;
     ACameraDevice* cameraDevice_ = nullptr;
@@ -97,6 +99,9 @@ private:
     std::string activeCameraId_;
     SensorCalibrationMetadata calibrationMetadata_;
     FrameCallback frameCallback_;
+    int32_t lastStreamWidth_ = 0;
+    int32_t lastStreamHeight_ = 0;
+    int64_t lastRecoveryAttemptMs_ = 0;
 
     std::mutex engineMutex_;
     std::atomic<bool> isStreaming_{false};
