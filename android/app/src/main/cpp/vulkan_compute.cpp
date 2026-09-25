@@ -384,6 +384,13 @@ bool VulkanComputeEngine::createOutputImages() {
 void VulkanComputeEngine::destroyOutputImages() {
     if (!device_) return;
 
+    // Defensive: callers only reach here with the GPU already idle (processRawFrame
+    // waits on frameFence_ before releasing vkMutex_), but a stray in-flight submission
+    // referencing these images would be a use-after-free, so make it unconditional.
+    if (computeQueue_) {
+        vkQueueWaitIdle(computeQueue_);
+    }
+
     if (viewfinderStagingMapped_) {
         vkUnmapMemory(device_, viewfinderStagingMemory_);
         viewfinderStagingMapped_ = nullptr;

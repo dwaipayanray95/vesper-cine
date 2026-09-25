@@ -39,12 +39,15 @@ struct ComputeUniformData {
     int32_t sensorOrientation;     // 0/90/180/270 clockwise       — offset 164
 };
 
-// Packs a plain row-major 3x3 (9 floats) into the 12-float, column-padded
-// layout the compute shader's `mat3` push-constant field expects.
+// Packs a plain row-major 3x3 (9 floats, src9[row*3+col]) into the 12-float,
+// column-padded layout the compute shader's `mat3` push-constant field
+// expects. GLSL mat3 is column-major, so `M * v` requires storage column j
+// to hold (M[0][j], M[1][j], M[2][j]) — this transposes src9 while packing
+// so that `mat3(dst12...) * v` reproduces the intended row-major M * v.
 inline void PackMat3ForPushConstant(const float src9[9], float dst12[12]) {
-    dst12[0] = src9[0]; dst12[1] = src9[1]; dst12[2] = src9[2]; dst12[3] = 0.0f;
-    dst12[4] = src9[3]; dst12[5] = src9[4]; dst12[6] = src9[5]; dst12[7] = 0.0f;
-    dst12[8] = src9[6]; dst12[9] = src9[7]; dst12[10] = src9[8]; dst12[11] = 0.0f;
+    dst12[0] = src9[0]; dst12[1] = src9[3]; dst12[2] = src9[6]; dst12[3] = 0.0f;
+    dst12[4] = src9[1]; dst12[5] = src9[4]; dst12[6] = src9[7]; dst12[7] = 0.0f;
+    dst12[8] = src9[2]; dst12[9] = src9[5]; dst12[10] = src9[8]; dst12[11] = 0.0f;
 }
 
 class VulkanComputeEngine {
