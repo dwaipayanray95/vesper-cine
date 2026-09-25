@@ -31,6 +31,27 @@ struct SensorCalibrationMetadata {
     float colorTransform1[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
     float calibrationTransform1[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
     float forwardMatrix1[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+    // Second DNG calibration illuminant/matrix set. Most sensors are factory
+    // calibrated at TWO reference illuminants (typically Standard Light A /
+    // ~2856K tungsten, and D65 / ~6504K daylight) precisely because a single
+    // matrix doesn't hold up across very different light spectra — under
+    // in-between or narrow-spectrum lighting (LED, fluorescent) a single
+    // fixed ForwardMatrix1 measurably mis-renders color (a green/yellow
+    // cast is a classic symptom, since many LED/fluorescent sources have a
+    // sharp green emission spike a single daylight- or tungsten-tuned
+    // matrix doesn't account for). Real raw pipelines (DNG SDK, libraw,
+    // AOSP camera post-processing) interpolate between both matrices by the
+    // scene's estimated color temperature; see native_bridge.cpp's
+    // interpolateForwardMatrix().
+    float colorTransform2[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+    float calibrationTransform2[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+    float forwardMatrix2[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+    bool haveForwardMatrix2 = false;
+    // ACAMERA_SENSOR_REFERENCE_ILLUMINANT{1,2}: TIFF/EP LightSource enum
+    // (17=StandardLightA/tungsten~2856K, 21=D65~6504K, etc — see
+    // referenceIlluminantToKelvin() in native_bridge.cpp for the full map).
+    int32_t referenceIlluminant1 = 17; // default: Standard Light A
+    int32_t referenceIlluminant2 = 21; // default: D65
     int32_t activeArrayWidth = 4080;
     int32_t activeArrayHeight = 3072;
     int32_t cfaPattern = 0; // 0=RGGB, 1=GRBG, 2=GBRG, 3=BGGR

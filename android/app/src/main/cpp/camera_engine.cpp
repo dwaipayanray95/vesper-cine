@@ -289,6 +289,30 @@ void CameraEngine::querySensorCalibration(ACameraMetadata* metadata) {
         haveForwardMatrix = true;
     }
 
+    // Second calibration illuminant's matrices, queried the same way. Per
+    // the DNG spec every properly calibrated sensor ships both — using only
+    // Illuminant1's matrix regardless of actual scene lighting is what
+    // native_bridge.cpp's interpolateForwardMatrix() now avoids.
+    if (ACameraMetadata_getConstEntry(metadata, ACAMERA_SENSOR_COLOR_TRANSFORM2, &entry) == ACAMERA_OK && entry.count >= 9) {
+        for (int i = 0; i < 9; ++i) {
+            calibrationMetadata_.colorTransform2[i] = static_cast<float>(entry.data.r[i].numerator) /
+                                                      static_cast<float>(entry.data.r[i].denominator);
+        }
+    }
+    if (ACameraMetadata_getConstEntry(metadata, ACAMERA_SENSOR_FORWARD_MATRIX2, &entry) == ACAMERA_OK && entry.count >= 9) {
+        for (int i = 0; i < 9; ++i) {
+            calibrationMetadata_.forwardMatrix2[i] = static_cast<float>(entry.data.r[i].numerator) /
+                                                     static_cast<float>(entry.data.r[i].denominator);
+        }
+        calibrationMetadata_.haveForwardMatrix2 = true;
+    }
+    if (ACameraMetadata_getConstEntry(metadata, ACAMERA_SENSOR_REFERENCE_ILLUMINANT1, &entry) == ACAMERA_OK) {
+        calibrationMetadata_.referenceIlluminant1 = entry.data.u8[0];
+    }
+    if (ACameraMetadata_getConstEntry(metadata, ACAMERA_SENSOR_REFERENCE_ILLUMINANT2, &entry) == ACAMERA_OK) {
+        calibrationMetadata_.referenceIlluminant2 = entry.data.u8[0];
+    }
+
     LOGI("Queried Sensor Calibration: WhiteLevel=%d, BlackLevel=[%.1f, %.1f, %.1f, %.1f], ActiveArray=%dx%d, CFA=%d, SensorOrientation=%d",
          calibrationMetadata_.whiteLevel,
          calibrationMetadata_.blackLevel[0], calibrationMetadata_.blackLevel[1],
@@ -297,8 +321,13 @@ void CameraEngine::querySensorCalibration(ACameraMetadata* metadata) {
          calibrationMetadata_.cfaPattern, calibrationMetadata_.sensorOrientation);
 
     const auto& fm = calibrationMetadata_.forwardMatrix1;
-    LOGI("ForwardMatrix1 present=%d: [%.4f %.4f %.4f / %.4f %.4f %.4f / %.4f %.4f %.4f]",
-         haveForwardMatrix, fm[0], fm[1], fm[2], fm[3], fm[4], fm[5], fm[6], fm[7], fm[8]);
+    LOGI("ForwardMatrix1 present=%d (illuminant=%d): [%.4f %.4f %.4f / %.4f %.4f %.4f / %.4f %.4f %.4f]",
+         haveForwardMatrix, calibrationMetadata_.referenceIlluminant1,
+         fm[0], fm[1], fm[2], fm[3], fm[4], fm[5], fm[6], fm[7], fm[8]);
+    const auto& fm2 = calibrationMetadata_.forwardMatrix2;
+    LOGI("ForwardMatrix2 present=%d (illuminant=%d): [%.4f %.4f %.4f / %.4f %.4f %.4f / %.4f %.4f %.4f]",
+         calibrationMetadata_.haveForwardMatrix2, calibrationMetadata_.referenceIlluminant2,
+         fm2[0], fm2[1], fm2[2], fm2[3], fm2[4], fm2[5], fm2[6], fm2[7], fm2[8]);
 }
 
 bool CameraEngine::startCaptureSession(int32_t width, int32_t height, FrameCallback callback) {

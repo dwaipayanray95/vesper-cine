@@ -7,6 +7,7 @@
 #include <sstream>
 #include <cmath>
 #include <algorithm>
+#include <limits>
 
 using namespace rcamera;
 
@@ -94,6 +95,148 @@ static void sampleRawCenterPatch(const uint8_t* data, size_t dataLength, int32_t
     gRawCenterG = static_cast<float>(sumG / static_cast<double>(countG));
     gRawCenterB = static_cast<float>(sumB / static_cast<double>(countB));
     gHasRawCenterSample = true;
+}
+
+// --- Dual-illuminant forward-matrix interpolation --------------------------
+//
+// DNG-calibrated sensors ship TWO reference-illuminant color matrices
+// (typically ~2856K tungsten and ~6504K daylight) precisely because no
+// single matrix renders color correctly across the full range of real-world
+// light spectra. Using only ForwardMatrix1 unconditionally (the previous
+// behavior here) measurably mis-renders color under in-between or
+// narrow-spectrum lighting (LED, fluorescent) — a green/yellow cast is a
+// classic symptom, since many LED/fluorescent sources have a sharp green
+// emission spike neither a daylight- nor tungsten-tuned matrix alone
+// corrects for. This mirrors what the DNG SDK / libraw / AOSP's own raw
+// post-processing do: interpolate linearly between both matrices in
+// "mired" (1e6/Kelvin) space, by the scene's actual/assumed CCT.
+static float gForwardMatrix1[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+static float gForwardMatrix2[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+static float gColorTransform1[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+static float gColorTransform2[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+static float gIlluminant1Kelvin = 2856.0f;
+static float gIlluminant2Kelvin = 6504.0f;
+static bool gHaveForwardMatrix2 = false;
+
+// TIFF/EXIF LightSource enum (also used by DNG's CalibrationIlluminant1/2)
+// -> approximate correlated color temperature. Covers the values real
+// sensor calibrations use in practice; anything unlisted falls back to a
+// neutral 5500K daylight guess.
+static float referenceIlluminantToKelvin(int32_t code) {
+    switch (code) {
+        case 1:  return 5500.0f;  // Daylight
+        case 2:  return 4200.0f;  // Fluorescent
+        case 3:  return 3200.0f;  // Tungsten (incandescent)
+        case 4:  return 5500.0f;  // Flash
+        case 9:  return 5500.0f;  // Fine weather
+        case 10: return 6500.0f;  // Cloudy weather
+        case 11: return 7500.0f;  // Shade
+        case 12: return 6500.0f;  // Daylight fluorescent
+        case 13: return 5000.0f;  // Day white fluorescent
+        case 14: return 4200.0f;  // Cool white fluorescent
+        case 15: return 3450.0f;  // White fluorescent
+        case 17: return 2856.0f;  // Standard light A
+        case 18: return 4874.0f;  // Standard light B
+        case 19: return 6774.0f;  // Standard light C
+        case 20: return 5503.0f;  // D55
+        case 21: return 6504.0f;  // D65
+        case 22: return 7504.0f;  // D75
+        case 23: return 5003.0f;  // D50
+        case 24: return 3200.0f;  // ISO studio tungsten
+        default: return 5500.0f;
+    }
+}
+
+static void lerpMatrix9(const float a[9], const float b[9], float t, float out[9]) {
+    for (int i = 0; i < 9; ++i) out[i] = a[i] + (b[i] - a[i]) * t;
+}
+
+// Row-major 3x3 * 3-vector (same convention as PackMat3ForPushConstant's src9).
+static void matVec3(const float m[9], const float v[3], float out[3]) {
+    out[0] = m[0]*v[0] + m[1]*v[1] + m[2]*v[2];
+    out[1] = m[3]*v[0] + m[4]*v[1] + m[5]*v[2];
+    out[2] = m[6]*v[0] + m[7]*v[1] + m[8]*v[2];
+}
+
+// CIE Planckian-locus chromaticity at temperature T (Kelvin), via Krystek's
+// polynomial approximation (matches CIE standard tables to a close fit
+// across ~1000-15000K, the range any real light source's CCT falls in).
+static void planckianLocusXY(float kelvin, float& x, float& y) {
+    float T = kelvin;
+    float T2 = T * T;
+    float u = (0.860117757f + 1.54118254e-4f*T + 1.28641212e-7f*T2) /
+              (1.0f + 8.42420235e-4f*T + 7.08145163e-7f*T2);
+    float v = (0.317398726f + 4.22806245e-5f*T + 4.20481691e-8f*T2) /
+              (1.0f - 2.89741816e-5f*T + 1.61456053e-7f*T2);
+    float denom = 2.0f*u - 8.0f*v + 4.0f;
+    x = 3.0f*u / denom;
+    y = 2.0f*v / denom;
+}
+
+// Estimates the scene's correlated color temperature from a raw-domain
+// neutral sample (camera-native RGB of something known to be gray/white —
+// the same thing DNG calls "AsShotNeutral"). Searches for the mired value
+// whose interpolated ColorTransform (XYZ->camera at that CCT) maps the
+// Planckian-locus white point at that same CCT closest to the observed
+// neutral's chromaticity ratios — i.e. the CCT at which the calibration
+// data best explains what the sensor is actually seeing. Conceptually the
+// same fixed-point idea DNG converters use for illuminant estimation,
+// simplified to a direct grid search since we only need "close enough to
+// pick the right matrix blend", not exact CCT to the Kelvin.
+static float estimateSceneKelvin(const float neutralRgb[3]) {
+    if (!gHaveForwardMatrix2) return 5600.0f;
+
+    float navg = (neutralRgb[0] + neutralRgb[1] + neutralRgb[2]) / 3.0f;
+    if (navg < 1e-6f) return 5600.0f;
+    float nr = neutralRgb[0] / navg;
+    float nb = neutralRgb[2] / navg;
+
+    float mired1 = 1.0e6f / gIlluminant1Kelvin;
+    float mired2 = 1.0e6f / gIlluminant2Kelvin;
+    float miredLo = std::min(mired1, mired2);
+    float miredHi = std::max(mired1, mired2);
+
+    float bestMired = (mired1 + mired2) * 0.5f;
+    float bestErr = std::numeric_limits<float>::max();
+
+    constexpr int kSteps = 32;
+    for (int i = 0; i <= kSteps; ++i) {
+        float t = static_cast<float>(i) / static_cast<float>(kSteps);
+        float mired = miredLo + (miredHi - miredLo) * t;
+        float kelvin = 1.0e6f / mired;
+        float g = std::clamp((mired - mired1) / (mired2 - mired1), 0.0f, 1.0f);
+        float ct[9];
+        lerpMatrix9(gColorTransform1, gColorTransform2, g, ct);
+
+        float lx, ly;
+        planckianLocusXY(kelvin, lx, ly);
+        float locusXyz[3] = { lx / ly, 1.0f, (1.0f - lx - ly) / ly };
+        float predicted[3];
+        matVec3(ct, locusXyz, predicted);
+        float pavg = (predicted[0] + predicted[1] + predicted[2]) / 3.0f;
+        if (pavg < 1e-6f) continue;
+
+        float err = std::fabs(predicted[0]/pavg - nr) + std::fabs(predicted[2]/pavg - nb);
+        if (err < bestErr) {
+            bestErr = err;
+            bestMired = mired;
+        }
+    }
+    return 1.0e6f / bestMired;
+}
+
+// Builds the mired-interpolated ForwardMatrix for a given target Kelvin and
+// writes it into gUniforms (packed for the shader push-constant). No-op if
+// the device's calibration only provides a single illuminant's matrix.
+static void applyForwardMatrixForKelvin(float kelvin) {
+    if (!gHaveForwardMatrix2) return;
+    float mired1 = 1.0e6f / gIlluminant1Kelvin;
+    float mired2 = 1.0e6f / gIlluminant2Kelvin;
+    float miredTarget = 1.0e6f / kelvin;
+    float g = std::clamp((miredTarget - mired1) / (mired2 - mired1), 0.0f, 1.0f);
+    float interpolated[9];
+    lerpMatrix9(gForwardMatrix1, gForwardMatrix2, g, interpolated);
+    PackMat3ForPushConstant(interpolated, gUniforms.sensorToXyzMatrix);
 }
 
 // Converts Kelvin (2000K - 10000K) and Tint (-50 to +50) to RGB gains
@@ -257,7 +400,22 @@ EXPORT int32_t rcamera_open_camera(const char* cameraId) {
         // here by mistake) is the *inverse* direction (XYZ -> camera-native), used
         // for AWB estimation, not rendering; applying it forward instead of
         // ForwardMatrix1 produced a strong wrong color cast.
-        PackMat3ForPushConstant(meta.forwardMatrix1, gUniforms.sensorToXyzMatrix);
+        std::memcpy(gForwardMatrix1, meta.forwardMatrix1, sizeof(gForwardMatrix1));
+        std::memcpy(gForwardMatrix2, meta.forwardMatrix2, sizeof(gForwardMatrix2));
+        std::memcpy(gColorTransform1, meta.colorTransform1, sizeof(gColorTransform1));
+        std::memcpy(gColorTransform2, meta.colorTransform2, sizeof(gColorTransform2));
+        gIlluminant1Kelvin = referenceIlluminantToKelvin(meta.referenceIlluminant1);
+        gIlluminant2Kelvin = referenceIlluminantToKelvin(meta.referenceIlluminant2);
+        gHaveForwardMatrix2 = meta.haveForwardMatrix2;
+        if (gHaveForwardMatrix2) {
+            // Start at the same 5600K reference the Kelvin dial defaults to.
+            applyForwardMatrixForKelvin(5600.0f);
+            LOGI("Dual-illuminant forward matrix available (illuminant1=%.0fK, illuminant2=%.0fK) — interpolating by scene CCT",
+                 gIlluminant1Kelvin, gIlluminant2Kelvin);
+        } else {
+            PackMat3ForPushConstant(meta.forwardMatrix1, gUniforms.sensorToXyzMatrix);
+            LOGW("Only ForwardMatrix1 available on this device — color matrix is fixed regardless of scene lighting");
+        }
         computeCalibratedNeutralGains(meta.colorTransform1, gCalibratedRGain, gCalibratedGGain, gCalibratedBGain);
         LOGI("Calibrated neutral WB gains from ColorTransform1: R=%.3f G=%.3f B=%.3f",
              gCalibratedRGain, gCalibratedGGain, gCalibratedBGain);
@@ -369,6 +527,12 @@ EXPORT void rcamera_set_kelvin_tint(int32_t kelvin, int32_t tint) {
     float r = gCalibratedRGain * (rAtKelvin / rAtRef);
     float b = gCalibratedBGain * (bAtKelvin / bAtRef);
     rcamera_set_white_balance_gains(r, gCalibratedGGain, b);
+
+    // Also pick the color matrix appropriate for this Kelvin setting (see
+    // applyForwardMatrixForKelvin's doc comment) — a fixed single-illuminant
+    // matrix mis-renders color once the dial moves away from that
+    // illuminant's own calibration temperature.
+    applyForwardMatrixForKelvin(static_cast<float>(kelvin));
 }
 
 // Sets the white balance gains from the most recent raw-sensor-domain
@@ -415,8 +579,18 @@ EXPORT int32_t rcamera_lock_white_balance_from_center() {
     newR = std::clamp(newR, 0.25f, 4.0f);
     newB = std::clamp(newB, 0.25f, 4.0f);
 
-    LOGI("White balance locked from raw center patch: sampled(raw linear) R=%.4f G=%.4f B=%.4f -> gains R=%.3f G=%.3f B=%.3f",
-         r, g, b, newR, newG, newB);
+    // Also re-pick the color matrix to match the scene's actual color
+    // temperature (see applyForwardMatrixForKelvin/estimateSceneKelvin) —
+    // the WB gains alone only neutralize the sampled patch; under
+    // in-between or narrow-spectrum lighting (LED/fluorescent) a matrix
+    // still fixed to a single calibration illuminant leaves a visible
+    // cast (classically green/yellow) elsewhere in the frame.
+    float neutral[3] = { r, g, b };
+    float estimatedKelvin = estimateSceneKelvin(neutral);
+    applyForwardMatrixForKelvin(estimatedKelvin);
+
+    LOGI("White balance locked from raw center patch: sampled(raw linear) R=%.4f G=%.4f B=%.4f -> gains R=%.3f G=%.3f B=%.3f, estimated scene CCT=%.0fK",
+         r, g, b, newR, newG, newB, estimatedKelvin);
     rcamera_set_white_balance_gains(newR, newG, newB);
     return 0;
 }
