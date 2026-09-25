@@ -41,29 +41,10 @@ CameraEngine::CameraEngine() = default;
 CameraEngine::~CameraEngine() {
     stopCaptureSession();
     closeCamera();
-    if (viewfinderWindow_) {
-        ANativeWindow_release(viewfinderWindow_);
-        viewfinderWindow_ = nullptr;
-    }
     if (cameraManager_) {
         ACameraManager_delete(cameraManager_);
         cameraManager_ = nullptr;
     }
-}
-
-void CameraEngine::setViewfinderWindow(ANativeWindow* window) {
-    std::lock_guard<std::mutex> lock(engineMutex_);
-    if (viewfinderWindow_ == window) {
-        return;
-    }
-    if (viewfinderWindow_) {
-        ANativeWindow_release(viewfinderWindow_);
-    }
-    viewfinderWindow_ = window;
-    if (viewfinderWindow_) {
-        ANativeWindow_acquire(viewfinderWindow_);
-    }
-    LOGI("CameraEngine: viewfinderWindow_ set to %p", viewfinderWindow_);
 }
 
 bool CameraEngine::initialize() {
@@ -221,6 +202,12 @@ void CameraEngine::querySensorCalibration(ACameraMetadata* metadata) {
         calibrationMetadata_.cfaPattern = entry.data.u8[0];
     }
 
+    // Physical sensor mounting angle relative to the device's natural (portrait) orientation.
+    // On Pixel rear cameras this is typically 90 degrees clockwise.
+    if (ACameraMetadata_getConstEntry(metadata, ACAMERA_SENSOR_ORIENTATION, &entry) == ACAMERA_OK) {
+        calibrationMetadata_.sensorOrientation = entry.data.i32[0];
+    }
+
     // Color transform 1 (3x3 rational/float)
     if (ACameraMetadata_getConstEntry(metadata, ACAMERA_SENSOR_COLOR_TRANSFORM1, &entry) == ACAMERA_OK && entry.count >= 9) {
         for (int i = 0; i < 9; ++i) {
@@ -237,12 +224,12 @@ void CameraEngine::querySensorCalibration(ACameraMetadata* metadata) {
         }
     }
 
-    LOGI("Queried Sensor Calibration: WhiteLevel=%d, BlackLevel=[%.1f, %.1f, %.1f, %.1f], ActiveArray=%dx%d, CFA=%d",
+    LOGI("Queried Sensor Calibration: WhiteLevel=%d, BlackLevel=[%.1f, %.1f, %.1f, %.1f], ActiveArray=%dx%d, CFA=%d, SensorOrientation=%d",
          calibrationMetadata_.whiteLevel,
          calibrationMetadata_.blackLevel[0], calibrationMetadata_.blackLevel[1],
          calibrationMetadata_.blackLevel[2], calibrationMetadata_.blackLevel[3],
          calibrationMetadata_.activeArrayWidth, calibrationMetadata_.activeArrayHeight,
-         calibrationMetadata_.cfaPattern);
+         calibrationMetadata_.cfaPattern, calibrationMetadata_.sensorOrientation);
 }
 
 bool CameraEngine::startCaptureSession(int32_t width, int32_t height, FrameCallback callback) {
@@ -284,16 +271,14 @@ bool CameraEngine::startCaptureSession(int32_t width, int32_t height, FrameCallb
         return false;
     }
 
-    // Configure capture session output container
+    // Option B: Camera2 outputs exclusively to the AImageReader (RAW10). The
+    // Flutter viewfinder surface is never registered as a capture target —
+    // it is fed by the GPU compute pipeline (see VulkanComputeEngine), so
+    // what's on screen is always what the R-Log color pipeline produced,
+    // never the ISP's own tonemapped preview.
     ACaptureSessionOutputContainer_create(&outputContainer_);
     ACaptureSessionOutput_create(imageReaderWindow_, &sessionOutput_);
     ACaptureSessionOutputContainer_add(outputContainer_, sessionOutput_);
-
-    if (viewfinderWindow_) {
-        LOGI("Adding viewfinder surface to capture session");
-        ACaptureSessionOutput_create(viewfinderWindow_, &viewfinderOutput_);
-        ACaptureSessionOutputContainer_add(outputContainer_, viewfinderOutput_);
-    }
 
     ACameraCaptureSession_stateCallbacks sessionCallbacks {
         .context = this,
@@ -357,13 +342,6 @@ bool CameraEngine::configureCaptureRequest() {
     ACameraOutputTarget_create(imageReaderWindow_, &outputTarget);
     ACaptureRequest_addTarget(captureRequest_, outputTarget);
     ACameraOutputTarget_free(outputTarget);
-
-    if (viewfinderWindow_) {
-        ACameraOutputTarget* vfTarget = nullptr;
-        ACameraOutputTarget_create(viewfinderWindow_, &vfTarget);
-        ACaptureRequest_addTarget(captureRequest_, vfTarget);
-        ACameraOutputTarget_free(vfTarget);
-    }
 
     // =========================================================================
     // ISP BYPASS CONFIGURATION: Completely disable post-processing stages
@@ -436,11 +414,6 @@ void CameraEngine::stopCaptureSession() {
             ACaptureSessionOutputContainer_remove(outputContainer_, sessionOutput_);
             ACaptureSessionOutput_free(sessionOutput_);
             sessionOutput_ = nullptr;
-        }
-        if (viewfinderOutput_) {
-            ACaptureSessionOutputContainer_remove(outputContainer_, viewfinderOutput_);
-            ACaptureSessionOutput_free(viewfinderOutput_);
-            viewfinderOutput_ = nullptr;
         }
         ACaptureSessionOutputContainer_free(outputContainer_);
         outputContainer_ = nullptr;

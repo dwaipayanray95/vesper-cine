@@ -32,6 +32,7 @@ struct SensorCalibrationMetadata {
     int32_t activeArrayWidth = 4080;
     int32_t activeArrayHeight = 3072;
     int32_t cfaPattern = 0; // 0=RGGB, 1=GRBG, 2=GBRG, 3=BGGR
+    int32_t sensorOrientation = 90; // ACAMERA_SENSOR_ORIENTATION, degrees clockwise
 };
 
 struct CameraDeviceInfo {
@@ -63,7 +64,6 @@ public:
     void setWhitebalanceGains(float rGain, float gGain, float bGain);
     void setOpticalStabilization(bool enableOis);
     void setFocusDistance(float diopters);
-    void setViewfinderWindow(ANativeWindow* window);
 
     const SensorCalibrationMetadata& getCalibrationMetadata() const { return calibrationMetadata_; }
     bool isStreaming() const { return isStreaming_.load(); }
@@ -85,10 +85,8 @@ private:
     ACameraCaptureSession* captureSession_ = nullptr;
     ACaptureSessionOutputContainer* outputContainer_ = nullptr;
     ACaptureSessionOutput* sessionOutput_ = nullptr;
-    ACaptureSessionOutput* viewfinderOutput_ = nullptr;
     ACaptureRequest* captureRequest_ = nullptr;
     ANativeWindow* imageReaderWindow_ = nullptr;
-    ANativeWindow* viewfinderWindow_ = nullptr;
     AImageReader* imageReader_ = nullptr;
 
     std::string activeCameraId_;

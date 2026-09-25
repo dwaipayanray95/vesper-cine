@@ -23,6 +23,7 @@ layout(push_constant) uniform UniformData {
     float zebraThreshold;      // e.g. 0.95 (95% IRE)
     float peakingThreshold;    // e.g. 0.15 edge sharpness threshold
     float whiteLevel;          // e.g. 1023.0
+    int sensorOrientation;     // 0/90/180/270: raw buffer -> upright display rotation (clockwise)
 } ubo;
 
 // R-Log OETF Transfer Function (Opto-Electronic Transfer Function)
@@ -155,7 +156,29 @@ void main() {
         return;
     }
 
-    // Remap output coordinate to sensor coordinate based on crop mode
+    // Compensate for the physical sensor mounting angle: rotate the *output*
+    // coordinate back into the raw buffer's native (unrotated) coordinate
+    // space before doing the crop remap below, so the crop math below never
+    // has to know about rotation. `uCoord`/`uDims` is that virtual unrotated
+    // output grid (swapped width/height for a +/-90 degree mount).
+    int rot = ((ubo.sensorOrientation % 360) + 360) % 360;
+    ivec2 uCoord;
+    ivec2 uDims;
+    if (rot == 90) {
+        uDims = ivec2(ubo.outputDimensions.y, ubo.outputDimensions.x);
+        uCoord = ivec2(outCoord.y, ubo.outputDimensions.x - 1 - outCoord.x);
+    } else if (rot == 180) {
+        uDims = ubo.outputDimensions;
+        uCoord = ivec2(ubo.outputDimensions.x - 1 - outCoord.x, ubo.outputDimensions.y - 1 - outCoord.y);
+    } else if (rot == 270) {
+        uDims = ivec2(ubo.outputDimensions.y, ubo.outputDimensions.x);
+        uCoord = ivec2(ubo.outputDimensions.y - 1 - outCoord.y, outCoord.x);
+    } else {
+        uDims = ubo.outputDimensions;
+        uCoord = outCoord;
+    }
+
+    // Remap (rotation-corrected) output coordinate to sensor coordinate based on crop mode
     int srcX = 0;
     int srcY = 0;
 
@@ -164,12 +187,12 @@ void main() {
         // e.g. 3840x2160 from 4080x3072: offset Y by (3072 - (4080 * 9 / 16)) / 2
         int activeCropHeight = (ubo.rawDimensions.x * 9) / 16;
         int yOffset = (ubo.rawDimensions.y - activeCropHeight) / 2;
-        srcX = (outCoord.x * ubo.rawDimensions.x) / ubo.outputDimensions.x;
-        srcY = yOffset + (outCoord.y * activeCropHeight) / ubo.outputDimensions.y;
+        srcX = (uCoord.x * ubo.rawDimensions.x) / uDims.x;
+        srcY = yOffset + (uCoord.y * activeCropHeight) / uDims.y;
     } else {
         // 4:3 Open-Gate (Full sensor binned array)
-        srcX = (outCoord.x * ubo.rawDimensions.x) / ubo.outputDimensions.x;
-        srcY = (outCoord.y * ubo.rawDimensions.y) / ubo.outputDimensions.y;
+        srcX = (uCoord.x * ubo.rawDimensions.x) / uDims.x;
+        srcY = (uCoord.y * ubo.rawDimensions.y) / uDims.y;
     }
 
     // 1. Debayer with Malvar-He-Cutler 5x5

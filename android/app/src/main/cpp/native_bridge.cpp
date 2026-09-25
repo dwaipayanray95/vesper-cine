@@ -68,7 +68,7 @@ EXPORT int32_t rcamera_init() {
         -0.6666843518f,  1.6164812366f,  0.0157685458f,
          0.0176398574f, -0.0427706133f,  0.9421031212f
     };
-    std::memcpy(gUniforms.xyzToRec2020Matrix, kXyzToRec2020, sizeof(kXyzToRec2020));
+    PackMat3ForPushConstant(kXyzToRec2020, gUniforms.xyzToRec2020Matrix);
 
     // Default WB gains (5600K Daylight)
     gUniforms.wbGains[0] = 1.8f;
@@ -82,6 +82,11 @@ EXPORT int32_t rcamera_init() {
     gUniforms.peakingThreshold = 0.15f;
 
     bool ok = gCameraEngine->initialize();
+    if (ok) {
+        // Option B: the GPU compute pipeline owns the viewfinder surface directly;
+        // Camera2 never touches it (see CameraEngine::startCaptureSession).
+        ok = gVulkanCompute->initialize(/*codecWindow=*/nullptr, /*viewfinderWindow=*/nullptr);
+    }
     LOGI("rcamera_init status: %d", ok);
     return ok ? 0 : -1;
 }
@@ -119,11 +124,22 @@ EXPORT int32_t rcamera_open_camera(const char* cameraId) {
         const auto& meta = gCameraEngine->getCalibrationMetadata();
         gUniforms.whiteLevel = static_cast<float>(meta.whiteLevel);
         std::memcpy(gUniforms.blackLevel, meta.blackLevel, sizeof(meta.blackLevel));
-        std::memcpy(gUniforms.sensorToXyzMatrix, meta.colorTransform1, sizeof(meta.colorTransform1));
+        PackMat3ForPushConstant(meta.colorTransform1, gUniforms.sensorToXyzMatrix);
         gUniforms.rawWidth = meta.activeArrayWidth;
         gUniforms.rawHeight = meta.activeArrayHeight;
         gUniforms.outputWidth = 3840;
         gUniforms.outputHeight = 2160;
+
+        // The app is locked to a single fixed landscape hold (see camera_screen.dart),
+        // which corresponds to a display rotation of 90 degrees. The total rotation the
+        // compute shader must apply to the raw buffer to land upright is therefore the
+        // sensor's physical mounting angle minus that fixed display rotation.
+        constexpr int32_t kFixedDisplayRotationDeg = 90;
+        gUniforms.sensorOrientation = ((meta.sensorOrientation - kFixedDisplayRotationDeg) % 360 + 360) % 360;
+
+        if (gVulkanCompute) {
+            gVulkanCompute->setOutputDimensions(gUniforms.outputWidth, gUniforms.outputHeight);
+        }
     }
     return ok ? 0 : -1;
 }
@@ -191,6 +207,10 @@ EXPORT void rcamera_set_crop_mode(int32_t cropMode) {
         gUniforms.outputWidth = 3840;
         gUniforms.outputHeight = 2160;
     }
+
+    if (gVulkanCompute) {
+        gVulkanCompute->setOutputDimensions(gUniforms.outputWidth, gUniforms.outputHeight);
+    }
 }
 
 EXPORT void rcamera_set_monitoring_mode(int32_t mode) {
@@ -217,9 +237,13 @@ Java_com_rawedge_r_1camera_MainActivity_nativeSetViewfinderSurface(
     if (!gCameraEngine) {
         rcamera_init();
     }
+    // Option B: the Flutter viewfinder surface is fed by the GPU compute
+    // pipeline directly, never by Camera2 (see CameraEngine::startCaptureSession).
     ANativeWindow* win = surface ? ANativeWindow_fromSurface(env, surface) : nullptr;
-    if (gCameraEngine) {
-        gCameraEngine->setViewfinderWindow(win);
+    if (gVulkanCompute) {
+        gVulkanCompute->setViewfinderWindow(win);
+    } else if (win) {
+        ANativeWindow_release(win);
     }
     return 0;
 }

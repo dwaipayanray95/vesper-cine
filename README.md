@@ -109,6 +109,8 @@ Instead, Vesper Cine accesses raw uncompressed sensor data directly, applies a d
 - [x] Configured logical device with Android Hardware Buffer external memory extensions (`VK_ANDROID_external_memory_android_hardware_buffer`, `VK_KHR_external_memory`, `VK_KHR_sampler_ycbcr_conversion`).
 - [x] Created compute pipeline, push constant ranges, and descriptor set layout bindings (Binding 0: Raw Bayer texture, Binding 1: Codec image, Binding 2: Viewfinder image).
 - [x] Set up command pool and primary command buffers for compute submission.
+- [x] Per-frame `AHardwareBuffer` import as a sampled `VkImage` (immutable `VkSamplerYcbcrConversion` built from the buffer's Vulkan external format), with the descriptor set/pipeline rebuilt lazily the first time that format is seen.
+- [x] Device-local storage images for the codec (rgba16f) and viewfinder (rgba8) outputs, plus a host-visible staging buffer that copies the viewfinder image out and presents it to the Flutter `SurfaceProducer` via `ANativeWindow_lock`/`ANativeWindow_unlockAndPost`.
 
 ### 4. Flutter UI & Platform Bridging
 - [x] **Native Bridge (`native_bridge.cpp`):** Exported C-ABI functions for camera initialization, camera enumeration, sensor opening, streaming start/stop, manual exposure/shutter/ISO adjustments, white balance, OIS, and crop modes.
@@ -129,15 +131,17 @@ Instead, Vesper Cine accesses raw uncompressed sensor data directly, applies a d
 
 ## What Needs to Be Done (Remaining Roadmap)
 
-### Phase 1: Viewfinder WYSIWYG & Orientation Fix (Immediate Priority)
-- [ ] **Decouple Viewfinder Surface from Direct Camera HAL:**
-  - Remove `viewfinderWindow_` from `ACaptureSessionOutputContainer` and `ACaptureRequest` in `camera_engine.cpp`.
-  - Camera2 must strictly output RAW10 to `AImageReader`.
-- [ ] **Wire Compute Pipeline Output to Viewfinder Surface:**
-  - Complete the Vulkan image-to-surface presentation or direct buffer presentation (`ANativeWindow_lock` / `ANativeWindow_unlockAndPost` or Vulkan swapchain presentation) so each processed frame in `sOnImageAvailable` renders to the Flutter `SurfaceProducer`.
-- [ ] **Correct Landscape Sensor Orientation ($90^\circ$ Offset):**
-  - Compensate for the physical sensor mounting angle ($90^\circ$ clockwise relative to device portrait) so that the live viewfinder in landscape mode is right-side up and un-mirrored.
-  - Apply coordinate transposition in `mhc_rlog.comp` or rotational transformation in Flutter's `Texture` widget.
+### Phase 1: Viewfinder WYSIWYG & Orientation Fix (Immediate Priority) — DONE
+- [x] **Decouple Viewfinder Surface from Direct Camera HAL:**
+  - `viewfinderWindow_` no longer exists on `CameraEngine`; the capture session's `ACaptureSessionOutputContainer` and `ACaptureRequest` register only the `AImageReader` RAW10 target in `camera_engine.cpp`.
+  - Camera2 now strictly outputs RAW10 to `AImageReader` — the Flutter surface is never a capture target.
+- [x] **Wire Compute Pipeline Output to Viewfinder Surface:**
+  - `native_bridge.cpp`'s `nativeSetViewfinderSurface` now hands the `ANativeWindow` straight to `VulkanComputeEngine::setViewfinderWindow`.
+  - `VulkanComputeEngine` imports each frame's `AHardwareBuffer` as a sampled Vulkan image (via `VkSamplerYcbcrConversion` + `VkExternalFormatANDROID`, the standard mechanism for opaque/external AHardwareBuffer formats), dispatches `mhc_rlog.comp`, and presents the WYSIWYG monitoring output (binding 2) to the Flutter `SurfaceProducer` via direct buffer writes (`ANativeWindow_lock` / `ANativeWindow_unlockAndPost` — Option 3A).
+  - Fixed the compute push-constant struct's byte layout (`ComputeUniformData`) to match the shader's std430 `mat3`/`ivec2` packing exactly, which the previous flat `float[9]` layout did not.
+- [x] **Correct Landscape Sensor Orientation ($90^\circ$ Offset):**
+  - `ACAMERA_SENSOR_ORIENTATION` is now queried in `camera_engine.cpp` and combined with the app's fixed landscape hold into a single `sensorOrientation` push-constant field.
+  - `mhc_rlog.comp` rotates the output coordinate grid (0/90/180/270°) before the existing crop remap, so the crop/demosaic math never needs to special-case rotation.
 
 ### Phase 2: AMediaCodec 10-Bit Recording Pipeline
 - [ ] **10-Bit HEVC / H.265 Encoder Setup:**
@@ -168,8 +172,8 @@ Instead, Vesper Cine accesses raw uncompressed sensor data directly, applies a d
 | **R-Log Transfer** | Done | GLSL Compute | Custom high-dynamic-range logarithmic OETF |
 | **Monitoring Scopes** | Done | GLSL Compute | False color IRE, peaking, zebras, Rec.709 preview LUT |
 | **Texture Bridge** | Done | Kotlin / Dart FFI | Flutter `SurfaceProducer` $\to$ NDK `ANativeWindow` |
-| **Viewfinder R-Log Wire** | **In Progress** | C++ / Vulkan | Present compute shader output directly to `ANativeWindow` |
-| **Sensor Orientation** | **In Progress** | GLSL / Flutter | Correct $90^\circ$ hardware sensor offset to upright landscape |
+| **Viewfinder R-Log Wire** | Done | C++ / Vulkan | Present compute shader output directly to `ANativeWindow` |
+| **Sensor Orientation** | Done | GLSL | Correct $90^\circ$ hardware sensor offset to upright landscape |
 | **10-Bit Recording** | Planned | NDK `AMediaCodec` | 10-bit HEVC Main10 recording to MP4 master |
 | **Gyroflow Logging** | Planned | NDK Sensors | High-rate IMU motion logging for post-stabilization |
 
