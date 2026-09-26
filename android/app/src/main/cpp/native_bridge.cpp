@@ -30,6 +30,7 @@ struct Settings {
     float peaking = 0.06f;   // Apple Log code-value gradient
     float headroomStops = 5.5f; // stops of highlight headroom above 18% grey -> clip
     double shutterAngle = 180.0;
+    int64_t fixedExposureNs = 0; // > 0: shutter set as a speed, not an angle
     int32_t iso = 100;
     ColorState color;
 };
@@ -44,6 +45,16 @@ Settings gSettings;
 
 // Raw centre-patch metering (camera thread writes, WB lock reads), gStateMutex.
 Vec3 gCentreRaw{0, 0, 0};
+
+// Whole-frame exposure statistics for the auto-exposure assist (gStateMutex).
+struct MeterStats {
+    double logMeanG = 0;   // mean of ln(green), green normalised 0..1 of clip
+    double p995 = 0;       // 99.5th percentile of the brightest channel per quad
+    int64_t exposureNs = 0;
+    int32_t iso = 0;
+    bool valid = false;
+};
+MeterStats gMeter;
 bool gHaveCentreSample = false;
 
 // Frame statistics, camera thread only (published under gStateMutex).
@@ -70,12 +81,15 @@ int rotationDegrees() {
 void applyShutter() {
     double angle;
     int32_t iso;
+    int64_t fixed;
     {
         std::lock_guard<std::mutex> lk(gStateMutex);
         angle = gSettings.shutterAngle;
         iso = gSettings.iso;
+        fixed = gSettings.fixedExposureNs;
     }
-    gCamera->setExposure(static_cast<int64_t>(angle / 360.0 / gCamera->frameRate() * 1e9), iso);
+    int64_t ns = fixed > 0 ? fixed : static_cast<int64_t>(angle / 360.0 / gCamera->frameRate() * 1e9);
+    gCamera->setExposure(ns, iso);
 }
 
 void setColorLocked(const ColorState& c) { gSettings.color = c; }
@@ -110,6 +124,43 @@ void meterCentre(const RawFrame& f) {
     gHaveCentreSample = true;
 }
 
+// Whole-frame metering on a sparse grid of 2x2 quads (~12k samples), from
+// raw data before white balance: log-average green for mid-tones and the
+// 99.5th percentile of each quad's brightest channel for highlight clipping.
+void meterFrame(const RawFrame& f) {
+    const CaptureMetadata& m = *f.meta;
+    const int cfa = gCamera->sensorInfo().cfa;
+    constexpr int kBins = 512;
+    int hist[kBins] = {};
+    double logSum = 0;
+    int n = 0;
+    const int step = std::max(8, (f.width / 128) & ~3);
+    for (int y = step / 2 & ~1; y + 1 < f.height; y += step) {
+        for (int x = step / 2 & ~3; x + 1 < f.width; x += step) {
+            float g = 0, mx = 0;
+            for (int k = 0; k < 4; ++k) {
+                int px = x + (k & 1), py = y + (k >> 1);
+                const uint8_t* grp = f.data + static_cast<size_t>(py) * f.rowStride + (px / 4) * 5;
+                if (grp + 5 > f.data + f.size) return;
+                int i = px & 3;
+                int dn = (grp[i] << 2) | ((grp[4] >> (2 * i)) & 3);
+                int site = cfaSite(cfa, px, py);
+                float v = std::max(0.0f, (dn - m.blackLevel[site]) / (m.whiteLevel - m.blackLevel[site]));
+                if (site == 1 || site == 2) g += 0.5f * v;
+                mx = std::max(mx, v);
+            }
+            logSum += std::log(std::max(g, 1e-4f));
+            ++hist[std::min(kBins - 1, static_cast<int>(mx * (kBins - 1)))];
+            ++n;
+        }
+    }
+    if (n == 0) return;
+    int target = static_cast<int>(n * 0.995), acc = 0, bin = kBins - 1;
+    for (int b = 0; b < kBins; ++b) { acc += hist[b]; if (acc >= target) { bin = b; break; } }
+    std::lock_guard<std::mutex> lk(gStateMutex);
+    gMeter = {logSum / n, static_cast<double>(bin) / (kBins - 1), m.exposureNs, m.iso, true};
+}
+
 void onFrame(const RawFrame& f) {
     if (!gGpu) return;
     static int frameIndex = 0;
@@ -125,6 +176,7 @@ void onFrame(const RawFrame& f) {
     }
     gLastTimestampNs = f.timestampNs;
     if ((++frameIndex & 3) == 0) meterCentre(f);
+    if ((frameIndex & 3) == 2) meterFrame(f);
 
     Settings s;
     {
@@ -220,9 +272,9 @@ std::string jsonEscape(const std::string& in) {
 
 } // namespace
 
-extern "C" {
-
 #define EXPORT __attribute__((visibility("default")))
+
+extern "C" {
 
 EXPORT int32_t vesper_init() {
     bool ok = ensureInit();
@@ -265,12 +317,54 @@ EXPORT int32_t vesper_open_camera(const char* id) {
 // Streams the sensor's largest RAW10 mode — on Pixel that is the 2x2-binned
 // readout (e.g. 4080x3072), which is the right choice for video: full field
 // of view, best SNR per output pixel, fastest readout (least rolling shutter).
+} // extern "C"
+
+namespace {
+
+// Picks the RAW10 mode for the crop and frame rate: matching aspect first
+// (the 16:9 binned readout is faster than 4:3 — 60 fps on Pixel 10), then any
+// mode fast enough, then the largest. All Pixel modes cover the full width.
+RawMode pickMode(int cropMode, double fps) {
+    const auto& modes = gCamera->sensorInfo().rawModes; // largest first
+    const double want = cropMode == 1 ? 4.0 / 3.0 : 16.0 / 9.0;
+    const RawMode* best = nullptr;
+    auto score = [&](const RawMode& m) {
+        double aspect = static_cast<double>(m.width) / m.height;
+        bool fast = m.maxFps() + 0.5 >= fps;
+        bool aspectOk = std::fabs(aspect - want) < 0.05 || (cropMode == 0 && aspect < want); // 4:3 can be cropped to 16:9
+        bool fullWidth = m.width >= modes.front().width * 0.9;
+        return (fast ? 8 : 0) + (fullWidth ? 4 : 0) + (std::fabs(aspect - want) < 0.05 ? 2 : 0) + (aspectOk ? 1 : 0);
+    };
+    for (const auto& m : modes) if (!best || score(m) > score(*best)) best = &m;
+    return best ? *best : RawMode{};
+}
+
+// (Re)starts the capture stream if the chosen RAW mode changed.
+int32_t restartStreamIfNeeded(bool force) {
+    int crop;
+    {
+        std::lock_guard<std::mutex> lk(gStateMutex);
+        crop = gSettings.cropMode;
+    }
+    RawMode mode = pickMode(crop, gCamera->frameRate());
+    if (mode.width == 0) return -1;
+    if (!force && gCamera->isStreaming() && gCamera->streamWidth() == mode.width && gCamera->streamHeight() == mode.height) return 0;
+    gLastTimestampNs = 0;
+    bool ok = gCamera->startCapture(mode.width, mode.height, onFrame);
+    __android_log_print(ANDROID_LOG_INFO, "Vesper", "Stream mode %dx%d (max %.1f fps) for crop %d @ %.3f fps: %d",
+                        mode.width, mode.height, mode.maxFps(), crop, gCamera->frameRate(), ok);
+    return ok ? 0 : -1;
+}
+
+} // namespace
+
+extern "C" {
+
 EXPORT int32_t vesper_start_stream() {
     if (!gCamera) return -1;
-    const auto& modes = gCamera->sensorInfo().rawModes;
-    if (modes.empty()) return -1;
-    const RawMode& mode = modes.front();
-    return gCamera->startCapture(mode.width, mode.height, onFrame) ? 0 : -1;
+    int32_t r = restartStreamIfNeeded(true);
+    applyShutter();
+    return r;
 }
 
 EXPORT int32_t vesper_stop_stream() {
@@ -279,20 +373,110 @@ EXPORT int32_t vesper_stop_stream() {
     return 0;
 }
 
+EXPORT void vesper_close_camera() {
+    if (gRecorder) gRecorder->stop("user");
+    if (gCamera) gCamera->closeCamera();
+}
+
 EXPORT void vesper_set_frame_rate(double fps) {
     if (!gCamera) return;
     gCamera->setFrameRate(fps);
+    if (gCamera->isStreaming()) restartStreamIfNeeded(false);
     applyShutter();
 }
 
+// Shutter as an angle: exposure follows the frame rate.
 EXPORT void vesper_set_shutter_angle(double angle, int32_t iso) {
     if (!gCamera) return;
     {
         std::lock_guard<std::mutex> lk(gStateMutex);
-        gSettings.shutterAngle = std::clamp(angle, 1.0, 360.0);
+        gSettings.shutterAngle = std::clamp(angle, 0.1, 360.0);
+        gSettings.fixedExposureNs = 0;
         gSettings.iso = iso;
     }
     applyShutter();
+}
+
+// Shutter as a speed (exposure time in ns), independent of frame rate.
+// The camera clamps it to [sensor minimum, frame duration].
+EXPORT void vesper_set_exposure_time(int64_t exposureNs, int32_t iso) {
+    if (!gCamera) return;
+    {
+        std::lock_guard<std::mutex> lk(gStateMutex);
+        gSettings.fixedExposureNs = std::max<int64_t>(exposureNs, 1);
+        gSettings.iso = iso;
+    }
+    applyShutter();
+}
+
+// {"minExposureNs":..,"maxExposureNs":..,"minIso":..,"maxIso":..,"minFocus":..,"modes":[{"w":..,"h":..,"maxFps":..}]}
+EXPORT int32_t vesper_get_capabilities(char* out, int32_t maxLen) {
+    if (!gCamera) return -1;
+    const SensorInfo& s = gCamera->sensorInfo();
+    char buf[256];
+    std::snprintf(buf, sizeof(buf), "{\"minExposureNs\":%lld,\"maxExposureNs\":%lld,\"minIso\":%d,\"maxIso\":%d,\"minFocus\":%.3f,\"modes\":[",
+                  static_cast<long long>(s.minExposureNs), static_cast<long long>(s.maxExposureNs), s.minIso, s.maxIso, s.minFocusDiopters);
+    std::string json = buf;
+    for (size_t i = 0; i < s.rawModes.size(); ++i) {
+        std::snprintf(buf, sizeof(buf), "%s{\"w\":%d,\"h\":%d,\"maxFps\":%.2f}", i ? "," : "",
+                      s.rawModes[i].width, s.rawModes[i].height, s.rawModes[i].maxFps());
+        json += buf;
+    }
+    json += "]}";
+    return writeString(json, out, maxLen);
+}
+
+// One-shot auto-exposure assist from the latest whole-frame raw statistics.
+// Places the scene's log-average at 18% grey *unless* that would clip more
+// than 0.5% of the frame — highlights win. priority 0 = keep the shutter
+// (move ISO first, cinema-style), 1 = keep ISO (move the shutter first).
+// Writes the new exposure/ISO; returns 0, or -1 if no statistics yet.
+// Call repeatedly for a converging result on very over/under-exposed scenes.
+EXPORT int32_t vesper_auto_expose(int32_t priority, int64_t* outExposureNs, int32_t* outIso) {
+    if (!gCamera) return -1;
+    MeterStats m;
+    float headroom;
+    {
+        std::lock_guard<std::mutex> lk(gStateMutex);
+        m = gMeter;
+        headroom = gSettings.headroomStops;
+    }
+    if (!m.valid || m.exposureNs <= 0 || m.iso <= 0) return -1;
+    const SensorInfo& info = gCamera->sensorInfo();
+
+    const double greyRaw = std::exp2(-headroom);          // raw green level that encodes as 18% grey
+    double scale = greyRaw / std::exp(m.logMeanG);
+    if (m.p995 >= 0.98) scale = std::min(scale, 0.35);    // clipped: true level unknown, step down ~1.5 stops
+    else scale = std::min(scale, 0.92 / std::max(m.p995, 1e-3));
+    scale = std::clamp(scale, 1.0 / 64, 64.0);
+
+    const double frameNs = 1e9 / gCamera->frameRate();
+    const int32_t isoCap = std::min(info.maxIso, 3200);    // beyond this noise dominates
+    double t = static_cast<double>(m.exposureNs), iso = m.iso;
+    const double target = t * iso * scale;
+    auto clampT = [&](double v) { return std::clamp(v, static_cast<double>(info.minExposureNs), std::min(frameNs, static_cast<double>(info.maxExposureNs))); };
+    auto clampIso = [&](double v) { return std::clamp(v, static_cast<double>(info.minIso), static_cast<double>(isoCap)); };
+    if (priority == 0) {
+        iso = clampIso(target / t);
+        t = clampT(target / iso);
+    } else {
+        t = clampT(target / iso);
+        iso = clampIso(target / t);
+    }
+    int64_t ns = static_cast<int64_t>(t);
+    int32_t isoI = static_cast<int32_t>(std::lround(iso));
+    {
+        std::lock_guard<std::mutex> lk(gStateMutex);
+        gSettings.iso = isoI;
+        if (priority != 0 || std::llabs(ns - m.exposureNs) > m.exposureNs / 50) gSettings.fixedExposureNs = ns;
+        gMeter.valid = false; // wait for a frame at the new exposure before metering again
+    }
+    applyShutter();
+    if (outExposureNs) *outExposureNs = ns;
+    if (outIso) *outIso = isoI;
+    __android_log_print(ANDROID_LOG_INFO, "Vesper", "Auto-expose: logMeanG=%.4f p99.5=%.3f x%.3f -> %.3fms ISO %d",
+                        std::exp(m.logMeanG), m.p995, scale, ns / 1e6, isoI);
+    return 0;
 }
 
 EXPORT void vesper_set_kelvin_tint(int32_t kelvin, int32_t tint) {
@@ -321,8 +505,14 @@ EXPORT void vesper_set_focus(float diopters) { if (gCamera) gCamera->setFocusDis
 EXPORT float vesper_get_min_focus() { return gCamera ? gCamera->sensorInfo().minFocusDiopters : 0.0f; }
 
 EXPORT void vesper_set_crop_mode(int32_t mode) {
-    std::lock_guard<std::mutex> lk(gStateMutex);
-    gSettings.cropMode = mode == 1 ? 1 : 0;
+    {
+        std::lock_guard<std::mutex> lk(gStateMutex);
+        gSettings.cropMode = mode == 1 ? 1 : 0;
+    }
+    if (gCamera && gCamera->isStreaming()) {
+        restartStreamIfNeeded(false);
+        applyShutter();
+    }
 }
 
 EXPORT void vesper_set_resolution(int32_t resolution) {
@@ -385,7 +575,8 @@ EXPORT int32_t vesper_get_status(char* out, int32_t maxLen) {
     RecorderStatus r = gRecorder ? gRecorder->status() : RecorderStatus{};
     int ow, oh, rw, rh;
     double kelvin, tint, fps;
-    long long drops;
+    long long drops, expNs;
+    int iso;
     {
         std::lock_guard<std::mutex> lk(gStateMutex);
         outputSize(gSettings, ow, oh);
@@ -395,16 +586,19 @@ EXPORT int32_t vesper_get_status(char* out, int32_t maxLen) {
         rh = gRawH;
         fps = gMeasuredFps;
         drops = gCameraDrops;
+        expNs = gMeter.exposureNs;
+        iso = gMeter.iso;
     }
-    char buf[640];
+    char buf[768];
     std::snprintf(buf, sizeof(buf),
                   "{\"streaming\":%s,\"fps\":%.2f,\"raw\":[%d,%d],\"output\":[%d,%d],\"cameraDrops\":%lld,"
                   "\"kelvin\":%.0f,\"tint\":%.1f,\"recording\":%s,\"durationMs\":%lld,\"framesEncoded\":%lld,"
-                  "\"framesDropped\":%lld,\"thermal\":%d,\"audio\":%s,\"codec\":\"%s\",\"stopReason\":\"%s\"}",
+                  "\"framesDropped\":%lld,\"thermal\":%d,\"audio\":%s,\"codec\":\"%s\",\"stopReason\":\"%s\","
+                  "\"exposureNs\":%lld,\"iso\":%d}",
                   gCamera && gCamera->isStreaming() ? "true" : "false", fps, rw, rh, ow, oh, drops, kelvin, tint,
                   r.recording ? "true" : "false", static_cast<long long>(r.durationUs / 1000),
                   static_cast<long long>(r.framesEncoded), static_cast<long long>(r.framesDropped), r.thermalStatus,
-                  r.audio ? "true" : "false", jsonEscape(r.codecName).c_str(), jsonEscape(r.stopReason).c_str());
+                  r.audio ? "true" : "false", jsonEscape(r.codecName).c_str(), jsonEscape(r.stopReason).c_str(), expNs, iso);
     return writeString(buf, out, maxLen);
 }
 

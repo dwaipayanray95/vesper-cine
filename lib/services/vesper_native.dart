@@ -14,12 +14,12 @@ class DetectedCamera {
   final double maxFps;
 
   DetectedCamera.fromJson(Map<String, dynamic> json)
-      : id = json['id'] as String,
-        facing = json['facing'] as int,
-        supportsRaw10 = json['supportsRaw10'] as bool,
-        rawWidth = json['rawWidth'] as int,
-        rawHeight = json['rawHeight'] as int,
-        maxFps = (json['maxFps'] as num).toDouble();
+    : id = json['id'] as String,
+      facing = json['facing'] as int,
+      supportsRaw10 = json['supportsRaw10'] as bool,
+      rawWidth = json['rawWidth'] as int,
+      rawHeight = json['rawHeight'] as int,
+      maxFps = (json['maxFps'] as num).toDouble();
 }
 
 /// Snapshot of the native pipeline, polled by the UI.
@@ -37,21 +37,62 @@ class EngineStatus {
   final bool audio;
   final String codec;
   final String stopReason;
+  final int exposureNs; // actual sensor exposure of the latest frame
+  final int iso; // actual sensor sensitivity of the latest frame
 
   EngineStatus.fromJson(Map<String, dynamic> j)
-      : streaming = j['streaming'] as bool,
-        fps = (j['fps'] as num).toDouble(),
-        cameraDrops = j['cameraDrops'] as int,
-        kelvin = (j['kelvin'] as num).toDouble(),
-        tint = (j['tint'] as num).toDouble(),
-        recording = j['recording'] as bool,
-        durationMs = j['durationMs'] as int,
-        framesEncoded = j['framesEncoded'] as int,
-        framesDropped = j['framesDropped'] as int,
-        thermal = j['thermal'] as int,
-        audio = j['audio'] as bool,
-        codec = j['codec'] as String,
-        stopReason = j['stopReason'] as String;
+    : streaming = j['streaming'] as bool,
+      fps = (j['fps'] as num).toDouble(),
+      cameraDrops = j['cameraDrops'] as int,
+      kelvin = (j['kelvin'] as num).toDouble(),
+      tint = (j['tint'] as num).toDouble(),
+      recording = j['recording'] as bool,
+      durationMs = j['durationMs'] as int,
+      framesEncoded = j['framesEncoded'] as int,
+      framesDropped = j['framesDropped'] as int,
+      thermal = j['thermal'] as int,
+      audio = j['audio'] as bool,
+      codec = j['codec'] as String,
+      stopReason = j['stopReason'] as String,
+      exposureNs = j['exposureNs'] as int,
+      iso = j['iso'] as int;
+}
+
+class RawMode {
+  final int width, height;
+  final double maxFps;
+  RawMode(this.width, this.height, this.maxFps);
+  double get aspect => width / height;
+}
+
+/// Hardware limits of the open camera.
+class CameraCapabilities {
+  final int minExposureNs, maxExposureNs, minIso, maxIso;
+  final double minFocusDiopters;
+  final List<RawMode> modes;
+
+  CameraCapabilities.fromJson(Map<String, dynamic> j)
+    : minExposureNs = j['minExposureNs'] as int,
+      maxExposureNs = j['maxExposureNs'] as int,
+      minIso = j['minIso'] as int,
+      maxIso = j['maxIso'] as int,
+      minFocusDiopters = (j['minFocus'] as num).toDouble(),
+      modes = (j['modes'] as List)
+          .map((m) => RawMode(m['w'] as int, m['h'] as int, (m['maxFps'] as num).toDouble()))
+          .toList();
+
+  /// Highest frame rate available for the crop (16:9 may use a faster readout).
+  double maxFpsFor(int cropMode) {
+    final want = cropMode == 1 ? 4 / 3 : 16 / 9;
+    final fullWidth = modes.isEmpty ? 0 : modes.map((m) => m.width).reduce((a, b) => a > b ? a : b);
+    double best = 0;
+    for (final m in modes) {
+      if (m.width < fullWidth * 0.9) continue;
+      if (cropMode == 1 && (m.aspect - want).abs() > 0.05) continue;
+      if (m.maxFps > best) best = m.maxFps;
+    }
+    return best == 0 ? 30 : best;
+  }
 }
 
 class RecordingFile {
@@ -77,6 +118,10 @@ class VesperNative {
   late final int Function() _stopStream;
   late final void Function(double) _setFrameRate;
   late final void Function(double, int) _setShutterAngle;
+  late final void Function(int, int) _setExposureTime;
+  late final int Function(Pointer<Utf8>, int) _capabilities;
+  late final int Function(int, Pointer<Int64>, Pointer<Int32>) _autoExpose;
+  late final void Function() _closeCamera;
   late final void Function(int, int) _setKelvinTint;
   late final int Function(Pointer<Double>, Pointer<Double>) _lockWb;
   late final void Function(int) _setOis;
@@ -99,31 +144,54 @@ class VesperNative {
       _lib = DynamicLibrary.open('libvesper_engine.so');
       _init = _lib.lookupFunction<Int32 Function(), int Function()>('vesper_init');
       _enumerate = _lib.lookupFunction<Int32 Function(Pointer<Utf8>, Int32), int Function(Pointer<Utf8>, int)>(
-          'vesper_enumerate_cameras');
+        'vesper_enumerate_cameras',
+      );
       _open = _lib.lookupFunction<Int32 Function(Pointer<Utf8>), int Function(Pointer<Utf8>)>('vesper_open_camera');
       _startStream = _lib.lookupFunction<Int32 Function(), int Function()>('vesper_start_stream');
       _stopStream = _lib.lookupFunction<Int32 Function(), int Function()>('vesper_stop_stream');
       _setFrameRate = _lib.lookupFunction<Void Function(Double), void Function(double)>('vesper_set_frame_rate');
-      _setShutterAngle =
-          _lib.lookupFunction<Void Function(Double, Int32), void Function(double, int)>('vesper_set_shutter_angle');
-      _setKelvinTint = _lib.lookupFunction<Void Function(Int32, Int32), void Function(int, int)>('vesper_set_kelvin_tint');
-      _lockWb = _lib.lookupFunction<Int32 Function(Pointer<Double>, Pointer<Double>),
-          int Function(Pointer<Double>, Pointer<Double>)>('vesper_lock_white_balance');
+      _setShutterAngle = _lib.lookupFunction<Void Function(Double, Int32), void Function(double, int)>(
+        'vesper_set_shutter_angle',
+      );
+      _setExposureTime = _lib.lookupFunction<Void Function(Int64, Int32), void Function(int, int)>(
+        'vesper_set_exposure_time',
+      );
+      _capabilities = _lib.lookupFunction<Int32 Function(Pointer<Utf8>, Int32), int Function(Pointer<Utf8>, int)>(
+        'vesper_get_capabilities',
+      );
+      _autoExpose = _lib
+          .lookupFunction<
+            Int32 Function(Int32, Pointer<Int64>, Pointer<Int32>),
+            int Function(int, Pointer<Int64>, Pointer<Int32>)
+          >('vesper_auto_expose');
+      _closeCamera = _lib.lookupFunction<Void Function(), void Function()>('vesper_close_camera');
+      _setKelvinTint = _lib.lookupFunction<Void Function(Int32, Int32), void Function(int, int)>(
+        'vesper_set_kelvin_tint',
+      );
+      _lockWb = _lib
+          .lookupFunction<
+            Int32 Function(Pointer<Double>, Pointer<Double>),
+            int Function(Pointer<Double>, Pointer<Double>)
+          >('vesper_lock_white_balance');
       _setOis = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_ois');
       _setFocus = _lib.lookupFunction<Void Function(Float), void Function(double)>('vesper_set_focus');
       _minFocus = _lib.lookupFunction<Float Function(), double Function()>('vesper_get_min_focus');
       _setCropMode = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_crop_mode');
       _setResolution = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_resolution');
-      _outputSize = _lib.lookupFunction<Void Function(Pointer<Int32>, Pointer<Int32>),
-          void Function(Pointer<Int32>, Pointer<Int32>)>('vesper_get_output_size');
+      _outputSize = _lib
+          .lookupFunction<Void Function(Pointer<Int32>, Pointer<Int32>), void Function(Pointer<Int32>, Pointer<Int32>)>(
+            'vesper_get_output_size',
+          );
       _setMonitoringMode = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_monitoring_mode');
       _setZebra = _lib.lookupFunction<Void Function(Float), void Function(double)>('vesper_set_zebra_threshold');
       _setHeadroom = _lib.lookupFunction<Void Function(Float), void Function(double)>('vesper_set_highlight_headroom');
       _startRecording = _lib.lookupFunction<Int32 Function(Int32, Int32, Int32), int Function(int, int, int)>(
-          'vesper_start_recording');
+        'vesper_start_recording',
+      );
       _stopRecording = _lib.lookupFunction<Void Function(), void Function()>('vesper_stop_recording');
       _status = _lib.lookupFunction<Int32 Function(Pointer<Utf8>, Int32), int Function(Pointer<Utf8>, int)>(
-          'vesper_get_status');
+        'vesper_get_status',
+      );
       _close = _lib.lookupFunction<Void Function(), void Function()>('vesper_close');
       _loaded = true;
     } catch (_) {
@@ -164,6 +232,31 @@ class VesperNative {
   void stopStream() => _loaded ? _stopStream() : null;
   void setFrameRate(double fps) => _loaded ? _setFrameRate(fps) : null;
   void setShutterAngle(double angle, int iso) => _loaded ? _setShutterAngle(angle, iso) : null;
+
+  /// Shutter as a speed; independent of frame rate (clamped to the frame duration).
+  void setExposureTime(int exposureNs, int iso) => _loaded ? _setExposureTime(exposureNs, iso) : null;
+  void closeCamera() => _loaded ? _closeCamera() : null;
+
+  CameraCapabilities? capabilities() {
+    if (!_loaded) return null;
+    final json = _readJson(_capabilities);
+    return json == null ? null : CameraCapabilities.fromJson(jsonDecode(json) as Map<String, dynamic>);
+  }
+
+  /// One-shot exposure assist. keepShutter: move ISO first (keeps motion blur);
+  /// otherwise move the shutter first. Returns (exposureNs, iso) or null.
+  (int, int)? autoExpose({bool keepShutter = true}) {
+    if (!_loaded) return null;
+    final ns = calloc<Int64>();
+    final iso = calloc<Int32>();
+    try {
+      return _autoExpose(keepShutter ? 0 : 1, ns, iso) == 0 ? (ns.value, iso.value) : null;
+    } finally {
+      calloc.free(ns);
+      calloc.free(iso);
+    }
+  }
+
   void setKelvinTint(int kelvin, int tint) => _loaded ? _setKelvinTint(kelvin, tint) : null;
   void setOis(bool on) => _loaded ? _setOis(on ? 1 : 0) : null;
   void setFocus(double diopters) => _loaded ? _setFocus(diopters) : null;

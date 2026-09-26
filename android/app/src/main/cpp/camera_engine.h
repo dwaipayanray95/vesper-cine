@@ -117,6 +117,8 @@ public:
     void setOpticalStabilization(bool enable);
     void setFocusDistance(float diopters);
     double frameRate() const { return fps_; }
+    int32_t streamWidth() const { return streamW_; }
+    int32_t streamHeight() const { return streamH_; }
 
     // NDK callback trampolines
     void onDeviceError(int error);

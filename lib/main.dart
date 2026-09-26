@@ -17,10 +17,7 @@ class VesperCineApp extends StatelessWidget {
       theme: ThemeData(
         brightness: Brightness.dark,
         scaffoldBackgroundColor: Colors.black,
-        colorScheme: const ColorScheme.dark(
-          primary: Colors.redAccent,
-          surface: Colors.black,
-        ),
+        colorScheme: const ColorScheme.dark(primary: Colors.redAccent, surface: Colors.black),
         useMaterial3: true,
       ),
       home: const CameraScreen(),

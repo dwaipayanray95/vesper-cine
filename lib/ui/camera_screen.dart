@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../services/vesper_native.dart';
+import 'value_picker.dart';
 
 class CameraScreen extends StatefulWidget {
   const CameraScreen({super.key});
@@ -12,25 +14,114 @@ class CameraScreen extends StatefulWidget {
   State<CameraScreen> createState() => _CameraScreenState();
 }
 
-class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderStateMixin {
+class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   final VesperNative _engine = VesperNative.instance;
 
   static const _monitoringLabels = ['APPLE LOG', 'REC.709 LUT', 'FALSE COLOR', 'PEAKING', 'ZEBRAS'];
-  static const _kelvinPresets = [2800, 3200, 4300, 5000, 5600, 6500, 7500];
-  // Focus stops in diopters (1/metres); 0 = infinity.
-  static const _focusStops = [0.0, 0.2, 0.5, 1.0, 2.0, 4.0, 8.0];
+  static const _angles = [360.0, 270.0, 180.0, 172.8, 144.0, 90.0, 45.0, 22.5, 11.25, 5.625, 2.8, 1.4, 0.7];
+  // Shutter-speed denominators in 1/3 stops plus the cinema standards.
+  static const _speedDenominators = [
+    1.0,
+    1.3,
+    1.6,
+    2.0,
+    2.5,
+    3.0,
+    4.0,
+    5.0,
+    6.0,
+    8.0,
+    10.0,
+    13.0,
+    15.0,
+    20.0,
+    24.0,
+    25.0,
+    30.0,
+    40.0,
+    48.0,
+    50.0,
+    60.0,
+    80.0,
+    96.0,
+    100.0,
+    120.0,
+    125.0,
+    160.0,
+    200.0,
+    250.0,
+    320.0,
+    400.0,
+    500.0,
+    640.0,
+    800.0,
+    1000.0,
+    1250.0,
+    1600.0,
+    2000.0,
+    2500.0,
+    3200.0,
+    4000.0,
+    5000.0,
+    6400.0,
+    8000.0,
+    10000.0,
+    12800.0,
+    16000.0,
+    20000.0,
+    25600.0,
+    32000.0,
+    40000.0,
+    51200.0,
+    64000.0,
+    80000.0,
+    100000.0,
+  ];
+  static const _isoStops = [
+    25,
+    32,
+    40,
+    50,
+    64,
+    80,
+    100,
+    125,
+    160,
+    200,
+    250,
+    320,
+    400,
+    500,
+    640,
+    800,
+    1000,
+    1250,
+    1600,
+    2000,
+    2500,
+    3200,
+    4000,
+    5000,
+    6400,
+    8000,
+    10000,
+    12800,
+  ];
+  static const _allFps = [23.976, 24.0, 25.0, 29.97, 30.0, 48.0, 50.0, 60.0];
 
+  CameraCapabilities? _caps;
+  String? _cameraId;
   bool _streaming = false;
   int _monitoringMode = 1;
   int _cropMode = 0; // 0 = 16:9, 1 = 4:3 open gate
+  bool _speedMode = false; // shutter shown/set as 1/x instead of an angle
   double _shutterAngle = 180;
+  int _exposureNs = 20833333; // used in speed mode
   double _fps = 24;
-  List<double> _fpsOptions = const [24, 25, 30];
   int _iso = 100;
   int _kelvin = 5600;
   int _tint = 0;
   double _focus = 0;
-  double _minFocus = 0;
   bool _ois = true;
   int _codec = 0; // 0 HEVC, 1 AV1
 
@@ -50,12 +141,14 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     // The native pipeline assumes Surface.ROTATION_90 (see native_bridge.cpp rotationDegrees()).
     SystemChrome.setPreferredOrientations([DeviceOrientation.landscapeLeft]);
+    WidgetsBinding.instance.addObserver(this);
     _pulse = AnimationController(vsync: this, duration: const Duration(milliseconds: 1000))..repeat(reverse: true);
     _start();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _poll?.cancel();
     _pulse.dispose();
     if (_recording) {
@@ -72,20 +165,26 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       setState(() => _statusMessage = 'NATIVE ENGINE UNAVAILABLE (ANDROID ONLY)');
       return;
     }
-    final cameras = _engine.enumerateCameras();
-    final cam = cameras.where((c) => c.supportsRaw10).firstOrNull;
+    final cam = _engine.enumerateCameras().where((c) => c.supportsRaw10).firstOrNull;
     if (cam == null) {
       setState(() => _statusMessage = 'NO RAW10-CAPABLE CAMERA FOUND');
       return;
     }
-    if (!_engine.openCamera(cam.id)) {
-      setState(() => _statusMessage = 'FAILED TO OPEN CAMERA ${cam.id}');
-      return;
+    _cameraId = cam.id;
+    if (!await _openAndStream(createTexture: true)) return;
+    _poll = Timer.periodic(const Duration(milliseconds: 250), (_) => _onPoll());
+  }
+
+  // Opens the camera, pushes every setting and starts streaming. Also used
+  // when returning from the background (Android revokes camera access there).
+  Future<bool> _openAndStream({bool createTexture = false}) async {
+    if (!_engine.openCamera(_cameraId!)) {
+      setState(() => _statusMessage = 'FAILED TO OPEN CAMERA $_cameraId');
+      return false;
     }
-    _fpsOptions = [24.0, 25.0, 30.0, 60.0].where((f) => f <= cam.maxFps + 0.5).toList();
-    if (_fpsOptions.isEmpty) _fpsOptions = [cam.maxFps.floorToDouble()];
-    if (!_fpsOptions.contains(_fps)) _fps = _fpsOptions.first;
-    _minFocus = _engine.minFocusDiopters;
+    _caps = _engine.capabilities();
+    if (!_fpsOptions.contains(_fps)) _fps = _fpsOptions.last;
+    _iso = _iso.clamp(_caps?.minIso ?? 50, _caps?.maxIso ?? 3200);
 
     _engine.setCropMode(_cropMode);
     _engine.setMonitoringMode(_monitoringMode);
@@ -93,19 +192,63 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     _engine.setOis(_ois);
     _engine.setFocus(_focus);
     _engine.setFrameRate(_fps);
-    _engine.setShutterAngle(_shutterAngle, _iso);
+    _applyShutter();
 
-    final (w, h) = _engine.outputSize();
-    final textureId = await _engine.createViewfinderTexture(w, h);
+    if (createTexture) {
+      final (w, h) = _engine.outputSize();
+      _textureId = await _engine.createViewfinderTexture(w, h);
+    }
     final ok = _engine.startStream();
-    if (!mounted) return;
+    if (!mounted) return ok;
     setState(() {
-      _textureId = textureId;
       _streaming = ok;
-      _statusMessage = ok ? 'RAW10 ${cam.rawWidth}x${cam.rawHeight}' : 'FAILED TO START RAW STREAM';
+      _statusMessage = ok ? 'STREAMING' : 'FAILED TO START RAW STREAM';
     });
-    _poll = Timer.periodic(const Duration(milliseconds: 250), (_) => _onPoll());
+    return ok;
   }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (_cameraId == null) return;
+    if (state == AppLifecycleState.paused || state == AppLifecycleState.hidden) {
+      if (_recording && !_stopping) {
+        _stopping = true;
+        _engine.stopRecording();
+        _finishRecording('user');
+      }
+      if (_streaming) {
+        _engine.closeCamera();
+        _streaming = false;
+      }
+    } else if (state == AppLifecycleState.resumed && !_streaming) {
+      _openAndStream();
+    }
+  }
+
+  List<double> get _fpsOptions {
+    final maxFps = _caps?.maxFpsFor(_cropMode) ?? 30;
+    return _allFps.where((f) => f <= maxFps + 0.01).toList();
+  }
+
+  int get _frameNs => (1e9 / _fps).round();
+  int get _angleNs => (_shutterAngle / 360 * _frameNs).round();
+  int get _currentExposureNs => _speedMode ? _exposureNs : _angleNs;
+
+  void _applyShutter() {
+    if (_speedMode) {
+      _engine.setExposureTime(_exposureNs, _iso);
+    } else {
+      _engine.setShutterAngle(_shutterAngle, _iso);
+    }
+  }
+
+  String _speedLabel(int ns) {
+    final d = 1e9 / ns;
+    if (d < 1.0) return '${(ns / 1e9).toStringAsFixed(1)}s';
+    return d >= 10 ? '1/${d.round()}' : '1/${d.toStringAsFixed(1)}';
+  }
+
+  String _angleLabel(double a) => '${a >= 10 ? a.toStringAsFixed(a % 1 == 0 ? 0 : 1) : a.toStringAsFixed(2)}°';
 
   void _onPoll() {
     final s = _engine.status();
@@ -158,8 +301,6 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg), duration: const Duration(seconds: 2)));
   }
 
-  T _next<T>(List<T> list, T current) => list[(list.indexOf(current) + 1) % list.length];
-
   void _cycleMonitoring() {
     setState(() => _monitoringMode = (_monitoringMode + 1) % _monitoringLabels.length);
     _engine.setMonitoringMode(_monitoringMode);
@@ -167,35 +308,15 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
 
   Future<void> _toggleCrop() async {
     if (_recording) return;
-    setState(() => _cropMode = 1 - _cropMode);
+    setState(() {
+      _cropMode = 1 - _cropMode;
+      if (!_fpsOptions.contains(_fps)) _fps = _fpsOptions.last; // e.g. 60 fps is 16:9-only
+    });
     _engine.setCropMode(_cropMode);
+    _engine.setFrameRate(_fps);
+    _applyShutter();
     final (w, h) = _engine.outputSize();
     await _engine.resizeViewfinderTexture(w, h);
-  }
-
-  void _cycleFps() {
-    if (_recording) return;
-    setState(() => _fps = _next(_fpsOptions, _fps));
-    _engine.setFrameRate(_fps);
-  }
-
-  void _cycleShutter() {
-    setState(() => _shutterAngle = _next(const [45.0, 90.0, 172.8, 180.0, 270.0, 360.0], _shutterAngle));
-    _engine.setShutterAngle(_shutterAngle, _iso);
-  }
-
-  void _cycleIso() {
-    setState(() => _iso = _next(const [50, 100, 200, 400, 800, 1600, 3200], _iso));
-    _engine.setShutterAngle(_shutterAngle, _iso);
-  }
-
-  void _cycleKelvin() {
-    final i = _kelvinPresets.indexWhere((k) => k > _kelvin);
-    setState(() {
-      _kelvin = i < 0 ? _kelvinPresets.first : _kelvinPresets[i];
-      _tint = 0;
-    });
-    _engine.setKelvinTint(_kelvin, _tint);
   }
 
   void _lockWhiteBalance() {
@@ -211,13 +332,250 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     _toast('White balance locked: ${_kelvin}K, tint $_tint');
   }
 
-  void _cycleFocus() {
-    final stops = _focusStops.where((d) => d <= _minFocus || d == 0).toList();
-    setState(() => _focus = _next(stops, _focus));
-    _engine.setFocus(_focus);
+  void _pickFps() {
+    if (_recording) return;
+    final opts = _fpsOptions;
+    showWheelPicker<double>(
+      context: context,
+      title: 'FRAME RATE (max ${(_caps?.maxFpsFor(_cropMode) ?? 30).round()} at ${_cropMode == 0 ? '16:9' : '4:3'})',
+      values: opts,
+      label: _fpsLabel,
+      initialIndex: opts.indexOf(_fps),
+      onChanged: (f) {
+        setState(() => _fps = f);
+        _engine.setFrameRate(f);
+        _applyShutter();
+      },
+    );
   }
 
-  String get _focusLabel => _focus == 0 ? '∞' : '${(1 / _focus).toStringAsFixed(_focus >= 1 ? 2 : 1)}m';
+  String _fpsLabel(double f) => f % 1 == 0 ? f.toStringAsFixed(0) : f.toStringAsFixed(f * 1000 % 10 == 0 ? 2 : 3);
+
+  void _pickShutter() {
+    final minNs = _caps?.minExposureNs ?? 10000;
+    final maxNs = [_caps?.maxExposureNs ?? _frameNs, _frameNs].reduce((a, b) => a < b ? a : b);
+    final speeds = _speedDenominators.map((d) => (1e9 / d).round()).where((ns) => ns >= minNs && ns <= maxNs).toList()
+      ..add(maxNs)
+      ..add(minNs);
+    final speedList = speeds.toSet().toList()..sort((a, b) => b.compareTo(a));
+    final angleList = _angles.where((a) => a / 360 * _frameNs >= minNs).toList();
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xEE101215),
+      barrierColor: Colors.transparent,
+      builder: (_) => StatefulBuilder(
+        builder: (ctx, setSheet) {
+          int nearest(List<int> l, int v) {
+            var best = 0;
+            for (var i = 0; i < l.length; i++) {
+              if ((l[i] - v).abs() < (l[best] - v).abs()) best = i;
+            }
+            return best;
+          }
+
+          return SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    'SHUTTER  (sensor ${_speedLabel(maxNs)} … ${_speedLabel(minNs)})',
+                    style: const TextStyle(
+                      color: Colors.white54,
+                      fontSize: 11,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 1.5,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Segmented(
+                    options: const ['ANGLE', 'SPEED'],
+                    selected: _speedMode ? 1 : 0,
+                    onSelected: (i) {
+                      setState(() {
+                        if (i == 1 && !_speedMode) _exposureNs = _angleNs;
+                        if (i == 0 && _speedMode) {
+                          _shutterAngle =
+                              angleList[nearest(
+                                angleList.map((a) => (a / 360 * _frameNs).round()).toList(),
+                                _exposureNs,
+                              )];
+                        }
+                        _speedMode = i == 1;
+                      });
+                      setSheet(() {});
+                      _applyShutter();
+                    },
+                  ),
+                  const SizedBox(height: 6),
+                  if (_speedMode)
+                    WheelSelector<int>(
+                      key: const ValueKey('speed'),
+                      values: speedList,
+                      label: _speedLabel,
+                      initialIndex: nearest(speedList, _exposureNs),
+                      onChanged: (ns) {
+                        setState(() => _exposureNs = ns);
+                        _applyShutter();
+                      },
+                    )
+                  else
+                    WheelSelector<double>(
+                      key: const ValueKey('angle'),
+                      values: angleList,
+                      label: _angleLabel,
+                      initialIndex: angleList.indexOf(_shutterAngle).clamp(0, angleList.length - 1),
+                      onChanged: (a) {
+                        setState(() => _shutterAngle = a);
+                        _applyShutter();
+                      },
+                    ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  void _pickIso() {
+    final minIso = _caps?.minIso ?? 50, maxIso = _caps?.maxIso ?? 3200;
+    final isos = {minIso, ..._isoStops.where((i) => i > minIso && i < maxIso), maxIso}.toList()..sort();
+    var initial = 0;
+    for (var i = 0; i < isos.length; i++) {
+      if ((isos[i] - _iso).abs() < (isos[initial] - _iso).abs()) initial = i;
+    }
+    showWheelPicker<int>(
+      context: context,
+      title: 'ISO  (native range $minIso–$maxIso)',
+      values: isos,
+      label: (i) => '$i',
+      initialIndex: initial,
+      onChanged: (i) {
+        setState(() => _iso = i);
+        _applyShutter();
+      },
+    );
+  }
+
+  void _pickWhiteBalance() {
+    final kelvins = [for (var k = 2000; k <= 10000; k += 100) k];
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xEE101215),
+      barrierColor: Colors.transparent,
+      builder: (_) => StatefulBuilder(
+        builder: (ctx, setSheet) => SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'WHITE BALANCE',
+                  style: TextStyle(
+                    color: Colors.white54,
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 1.5,
+                  ),
+                ),
+                WheelSelector<int>(
+                  values: kelvins,
+                  label: (k) => '${k}K',
+                  initialIndex: kelvins.indexOf((_kelvin / 100).round() * 100).clamp(0, kelvins.length - 1),
+                  onChanged: (k) {
+                    setState(() => _kelvin = k);
+                    _engine.setKelvinTint(_kelvin, _tint);
+                  },
+                ),
+                Row(
+                  children: [
+                    const Text(
+                      'G',
+                      style: TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold),
+                    ),
+                    Expanded(
+                      child: Slider(
+                        value: _tint.toDouble().clamp(-50, 50),
+                        min: -50,
+                        max: 50,
+                        divisions: 100,
+                        activeColor: Colors.amber,
+                        label: 'TINT $_tint',
+                        onChanged: (t) {
+                          setState(() => _tint = t.round());
+                          setSheet(() {});
+                          _engine.setKelvinTint(_kelvin, _tint);
+                        },
+                      ),
+                    ),
+                    const Text(
+                      'M',
+                      style: TextStyle(color: Colors.pinkAccent, fontWeight: FontWeight.bold),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _pickFocus() {
+    final maxD = _caps?.minFocusDiopters ?? 0;
+    if (maxD <= 0) return;
+    // Slider runs on sqrt(diopters) so the far range isn't crammed into a sliver.
+    showSliderSheet(
+      context: context,
+      title: 'FOCUS',
+      min: 0,
+      max: 1,
+      value: math.sqrt((_focus / maxD).clamp(0.0, 1.0)),
+      label: (v) => _distanceLabel(v * v * maxD),
+      onChanged: (v) {
+        setState(() => _focus = v * v * maxD);
+        _engine.setFocus(_focus);
+      },
+    );
+  }
+
+  String _distanceLabel(double d) => d < 0.01
+      ? '∞'
+      : d > 1
+      ? '${(100 / d).round()}cm'
+      : '${(1 / d).toStringAsFixed(1)}m';
+  String get _focusLabel => _distanceLabel(_focus);
+
+  // One-shot auto exposure: two metering passes (the second one refines very
+  // over/under-exposed starts). Tap keeps the shutter, long-press keeps ISO.
+  Future<void> _autoExpose({required bool keepShutter}) async {
+    (int, int)? r;
+    for (var pass = 0; pass < 3; pass++) {
+      final next = _engine.autoExpose(keepShutter: keepShutter);
+      if (next != null) r = next;
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+    }
+    if (!mounted) return;
+    if (r == null) {
+      _toast('Auto-exposure: no metering data yet');
+      return;
+    }
+    final (ns, iso) = r;
+    setState(() {
+      _iso = iso;
+      if ((ns - _angleNs).abs() > _angleNs / 50) {
+        _speedMode = true;
+        _exposureNs = ns;
+      }
+    });
+    _toast('Exposure set: ${_speedLabel(ns)}, ISO $iso${keepShutter ? '' : ' (ISO priority)'}');
+  }
 
   String _timecode(int ms) {
     final totalFrames = (ms * _fps / 1000).floor();
@@ -263,56 +621,86 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
               ),
             ),
           ),
-          const Center(child: SizedBox(width: 16, height: 16, child: CustomPaint(painter: CrosshairPainter()))),
+          const Center(
+            child: SizedBox(width: 16, height: 16, child: CustomPaint(painter: CrosshairPainter())),
+          ),
 
-          // Top HUD
-          SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              child: Row(
-                children: [
-                  _badge('APPLE LOG · 2020', Colors.amber),
-                  const SizedBox(width: 8),
-                  _chip(_cropMode == 0 ? '16:9' : 'OPEN GATE 4:3', onTap: _toggleCrop),
-                  const SizedBox(width: 8),
-                  _chip(_monitoringLabels[_monitoringMode], onTap: _cycleMonitoring, active: _monitoringMode != 0),
-                  const SizedBox(width: 8),
-                  _chip(_codec == 0 ? 'HEVC 10-BIT' : 'AV1 10-BIT',
-                      onTap: _recording ? null : () => setState(() => _codec = 1 - _codec)),
-                  const Spacer(),
-                  if (hot) ...[
-                    _badge(s!.thermal >= 3 ? 'THERMAL LIMIT' : 'PHONE WARM', Colors.orangeAccent),
-                    const SizedBox(width: 8),
-                  ],
-                  if (s != null)
-                    Text(
-                      '${s.fps.toStringAsFixed(1)} FPS'
-                      '${s.cameraDrops + s.framesDropped > 0 ? ' · ${s.cameraDrops + s.framesDropped} DROP' : ''}',
-                      style: TextStyle(
-                        color: s.cameraDrops + s.framesDropped > 0 ? Colors.orangeAccent : Colors.white54,
-                        fontSize: 10,
-                        fontFamily: 'monospace',
+          // Top HUD (dark backing so it stays readable over bright frames)
+          Positioned(
+            left: 0,
+            right: 0,
+            top: 0,
+            child: Container(
+              decoration: const BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [Color(0xCC000000), Color(0x00000000)],
+                ),
+              ),
+              child: SafeArea(
+                bottom: false,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  child: Row(
+                    children: [
+                      _badge('APPLE LOG · 2020', Colors.amber),
+                      const SizedBox(width: 8),
+                      _chip(_cropMode == 0 ? '16:9' : 'OPEN GATE 4:3', onTap: _toggleCrop),
+                      const SizedBox(width: 8),
+                      _chip(_monitoringLabels[_monitoringMode], onTap: _cycleMonitoring, active: _monitoringMode != 0),
+                      const SizedBox(width: 8),
+                      _chip(
+                        _codec == 0 ? 'HEVC 10-BIT' : 'AV1 10-BIT',
+                        onTap: _recording ? null : () => setState(() => _codec = 1 - _codec),
                       ),
-                    ),
-                  const SizedBox(width: 12),
-                  if (_recording)
-                    FadeTransition(
-                      opacity: _pulse,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                        decoration: BoxDecoration(color: Colors.red.shade900, borderRadius: BorderRadius.circular(4)),
-                        child: Text(
-                          _timecode(s?.durationMs ?? 0),
-                          style: const TextStyle(color: Colors.white, fontFamily: 'monospace', fontWeight: FontWeight.bold, fontSize: 13),
+                      const Spacer(),
+                      if (hot) ...[
+                        _badge(s!.thermal >= 3 ? 'THERMAL LIMIT' : 'PHONE WARM', Colors.orangeAccent),
+                        const SizedBox(width: 8),
+                      ],
+                      if (s != null)
+                        Text(
+                          '${s.fps.toStringAsFixed(1)} FPS'
+                          '${s.cameraDrops + s.framesDropped > 0 ? ' · ${s.cameraDrops + s.framesDropped} DROP' : ''}',
+                          style: TextStyle(
+                            color: s.cameraDrops + s.framesDropped > 0 ? Colors.orangeAccent : Colors.white54,
+                            fontSize: 10,
+                            fontFamily: 'monospace',
+                          ),
                         ),
-                      ),
-                    ),
-                  if (_recording) ...[
-                    const SizedBox(width: 8),
-                    Icon(s?.audio == true ? Icons.mic : Icons.mic_off,
-                        color: s?.audio == true ? Colors.greenAccent : Colors.white38, size: 16),
-                  ],
-                ],
+                      const SizedBox(width: 12),
+                      if (_recording)
+                        FadeTransition(
+                          opacity: _pulse,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: Colors.red.shade900,
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: Text(
+                              _timecode(s?.durationMs ?? 0),
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontFamily: 'monospace',
+                                fontWeight: FontWeight.bold,
+                                fontSize: 13,
+                              ),
+                            ),
+                          ),
+                        ),
+                      if (_recording) ...[
+                        const SizedBox(width: 8),
+                        Icon(
+                          s?.audio == true ? Icons.mic : Icons.mic_off,
+                          color: s?.audio == true ? Colors.greenAccent : Colors.white38,
+                          size: 16,
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
               ),
             ),
           ),
@@ -328,17 +716,26 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  _pill('FPS', _fps.toStringAsFixed(_fps % 1 == 0 ? 0 : 3), onTap: _cycleFps),
-                  _pill('SHUTTER', '${_shutterAngle.toStringAsFixed(_shutterAngle % 1 == 0 ? 0 : 1)}°',
-                      subtitle: '1/${(_fps * 360 / _shutterAngle).round()}s', onTap: _cycleShutter),
-                  _pill('ISO', '$_iso', onTap: _cycleIso),
-                  _pill('WB', '${_kelvin}K', subtitle: 'TINT ${_tint > 0 ? '+' : ''}$_tint', onTap: _cycleKelvin),
+                  _pill('FPS', _fpsLabel(_fps), onTap: _recording ? null : _pickFps),
+                  _pill(
+                    'SHUTTER',
+                    _speedMode ? _speedLabel(_exposureNs) : _angleLabel(_shutterAngle),
+                    subtitle: _speedMode ? _angleLabel(_exposureNs / _frameNs * 360) : _speedLabel(_currentExposureNs),
+                    onTap: _pickShutter,
+                  ),
+                  _pill('ISO', '$_iso', onTap: _pickIso),
+                  _pill('WB', '${_kelvin}K', subtitle: 'TINT ${_tint > 0 ? '+' : ''}$_tint', onTap: _pickWhiteBalance),
+                  GestureDetector(
+                    onTap: _streaming ? () => _autoExpose(keepShutter: true) : null,
+                    onLongPress: _streaming ? () => _autoExpose(keepShutter: false) : null,
+                    child: _pill('AUTO', 'AE', subtitle: 'hold: ISO', onTap: null, enabled: _streaming),
+                  ),
                   IconButton(
                     icon: const Icon(Icons.colorize_rounded, color: Colors.white70, size: 20),
                     tooltip: 'Meter white balance from centre',
                     onPressed: _streaming ? _lockWhiteBalance : null,
                   ),
-                  _pill('FOCUS', _focusLabel, onTap: _minFocus > 0 ? _cycleFocus : null),
+                  _pill('FOCUS', _focusLabel, onTap: (_caps?.minFocusDiopters ?? 0) > 0 ? _pickFocus : null),
                   _toggle('OIS', _ois, Colors.greenAccent, () {
                     setState(() => _ois = !_ois);
                     _engine.setOis(_ois);
@@ -348,7 +745,10 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                     child: Container(
                       width: 54,
                       height: 54,
-                      decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: Colors.white, width: 3)),
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        border: Border.all(color: Colors.white, width: 3),
+                      ),
                       child: Center(
                         child: AnimatedContainer(
                           duration: const Duration(milliseconds: 200),
@@ -372,75 +772,87 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   }
 
   Widget _badge(String text, Color color) => Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-        decoration: BoxDecoration(
-          color: color.withValues(alpha: 0.15),
-          borderRadius: BorderRadius.circular(4),
-          border: Border.all(color: color),
-        ),
-        child: Text(text, style: TextStyle(color: color, fontWeight: FontWeight.bold, fontSize: 11)),
-      );
+    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+    decoration: BoxDecoration(
+      color: color.withValues(alpha: 0.15),
+      borderRadius: BorderRadius.circular(4),
+      border: Border.all(color: color),
+    ),
+    child: Text(
+      text,
+      style: TextStyle(color: color, fontWeight: FontWeight.bold, fontSize: 11),
+    ),
+  );
 
   Widget _chip(String text, {VoidCallback? onTap, bool active = false}) => GestureDetector(
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-          decoration: BoxDecoration(
-            color: active ? Colors.cyan.withValues(alpha: 0.2) : Colors.white10,
-            borderRadius: BorderRadius.circular(4),
-            border: Border.all(color: active ? Colors.cyan : Colors.white24),
+    onTap: onTap,
+    child: Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: active ? Colors.cyan.withValues(alpha: 0.2) : Colors.white10,
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: active ? Colors.cyan : Colors.white24),
+      ),
+      child: Text(
+        text,
+        style: TextStyle(
+          color: onTap == null ? Colors.white38 : (active ? Colors.cyanAccent : Colors.white),
+          fontSize: 11,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+    ),
+  );
+
+  Widget _toggle(String label, bool on, Color color, VoidCallback onTap) => GestureDetector(
+    onTap: onTap,
+    child: Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: on ? color.withValues(alpha: 0.2) : Colors.white10,
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: on ? color : Colors.white24),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(color: on ? color : Colors.white54, fontWeight: FontWeight.bold, fontSize: 11),
+      ),
+    ),
+  );
+
+  Widget _pill(String label, String value, {String? subtitle, VoidCallback? onTap, bool? enabled}) => GestureDetector(
+    onTap: onTap,
+    child: Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: Colors.white12),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            label,
+            style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontSize: 9, fontWeight: FontWeight.bold),
           ),
-          child: Text(
-            text,
+          const SizedBox(height: 2),
+          Text(
+            value,
             style: TextStyle(
-              color: onTap == null ? Colors.white38 : (active ? Colors.cyanAccent : Colors.white),
-              fontSize: 11,
+              color: (enabled ?? onTap != null) ? Colors.white : Colors.white38,
+              fontSize: 13,
               fontWeight: FontWeight.bold,
             ),
           ),
-        ),
-      );
-
-  Widget _toggle(String label, bool on, Color color, VoidCallback onTap) => GestureDetector(
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-          decoration: BoxDecoration(
-            color: on ? color.withValues(alpha: 0.2) : Colors.white10,
-            borderRadius: BorderRadius.circular(4),
-            border: Border.all(color: on ? color : Colors.white24),
-          ),
-          child: Text(label,
-              style: TextStyle(color: on ? color : Colors.white54, fontWeight: FontWeight.bold, fontSize: 11)),
-        ),
-      );
-
-  Widget _pill(String label, String value, {String? subtitle, VoidCallback? onTap}) => GestureDetector(
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-          decoration: BoxDecoration(
-            color: Colors.white.withValues(alpha: 0.08),
-            borderRadius: BorderRadius.circular(6),
-            border: Border.all(color: Colors.white12),
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(label,
-                  style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontSize: 9, fontWeight: FontWeight.bold)),
-              const SizedBox(height: 2),
-              Text(value,
-                  style: TextStyle(
-                      color: onTap == null ? Colors.white38 : Colors.white, fontSize: 13, fontWeight: FontWeight.bold)),
-              if (subtitle != null) ...[
-                const SizedBox(height: 1),
-                Text(subtitle, style: TextStyle(color: Colors.white.withValues(alpha: 0.4), fontSize: 8)),
-              ],
-            ],
-          ),
-        ),
-      );
+          if (subtitle != null) ...[
+            const SizedBox(height: 1),
+            Text(subtitle, style: TextStyle(color: Colors.white.withValues(alpha: 0.4), fontSize: 8)),
+          ],
+        ],
+      ),
+    ),
+  );
 }
 
 class CrosshairPainter extends CustomPainter {
