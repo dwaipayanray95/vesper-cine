@@ -387,6 +387,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
 
     showModalBottomSheet(
       context: context,
+      isScrollControlled: true,
       backgroundColor: const Color(0xEE101215),
       barrierColor: Colors.transparent,
       builder: (_) => StatefulBuilder(
@@ -399,7 +400,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
             return best;
           }
 
-          return SafeArea(
+          return SheetBody(
             child: Padding(
               padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
               child: Column(
@@ -490,10 +491,11 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     final kelvins = [for (var k = 2000; k <= 10000; k += 100) k];
     showModalBottomSheet(
       context: context,
+      isScrollControlled: true,
       backgroundColor: const Color(0xEE101215),
       barrierColor: Colors.transparent,
       builder: (_) => StatefulBuilder(
-        builder: (ctx, setSheet) => SafeArea(
+        builder: (ctx, setSheet) => SheetBody(
           child: Padding(
             padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
             child: Column(
@@ -579,10 +581,11 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     if (maxD <= 0) return;
     showModalBottomSheet(
       context: context,
+      isScrollControlled: true,
       backgroundColor: const Color(0xEE101215),
       barrierColor: Colors.transparent,
       builder: (_) => StatefulBuilder(
-        builder: (ctx, setSheet) => SafeArea(
+        builder: (ctx, setSheet) => SheetBody(
           child: Padding(
             padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
             child: Column(
@@ -666,6 +669,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     const chromaLevels = [0.0, 0.5, 1.0];
     showModalBottomSheet(
       context: context,
+      isScrollControlled: true,
       backgroundColor: const Color(0xEE101215),
       barrierColor: Colors.transparent,
       builder: (_) => StatefulBuilder(
@@ -675,7 +679,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
             setSheet(() {});
           }
 
-          return SafeArea(
+          return SheetBody(
             child: Padding(
               padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
               child: Column(

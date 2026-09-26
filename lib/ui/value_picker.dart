@@ -13,6 +13,7 @@ Future<void> showWheelPicker<T>({
 }) {
   return showModalBottomSheet(
     context: context,
+    isScrollControlled: true,
     backgroundColor: const Color(0xEE101215),
     barrierColor: Colors.transparent,
     builder: (_) => _SheetFrame(
@@ -30,7 +31,7 @@ class _SheetFrame extends StatelessWidget {
   const _SheetFrame({required this.title, required this.child, this.header});
 
   @override
-  Widget build(BuildContext context) => SafeArea(
+  Widget build(BuildContext context) => SheetBody(
     child: Padding(
       padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
       child: Column(
@@ -201,6 +202,7 @@ Future<void> showSliderSheet({
 }) {
   return showModalBottomSheet(
     context: context,
+    isScrollControlled: true,
     backgroundColor: const Color(0xEE101215),
     barrierColor: Colors.transparent,
     builder: (_) {
@@ -222,5 +224,20 @@ Future<void> showSliderSheet({
         ),
       );
     },
+  );
+}
+
+/// Body of every picker sheet: safe-area padded, capped at 85% of the screen
+/// height and scrollable, so tall sheets never overflow in landscape.
+class SheetBody extends StatelessWidget {
+  final Widget child;
+  const SheetBody({super.key, required this.child});
+
+  @override
+  Widget build(BuildContext context) => SafeArea(
+    child: ConstrainedBox(
+      constraints: BoxConstraints(maxHeight: MediaQuery.sizeOf(context).height * 0.85),
+      child: SingleChildScrollView(child: child),
+    ),
   );
 }
