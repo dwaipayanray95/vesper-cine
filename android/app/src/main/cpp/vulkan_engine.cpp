@@ -114,6 +114,11 @@ bool VulkanEngine::createInstanceAndDevice() {
     if (chosen < 0) return false;
     queueFamily_ = static_cast<uint32_t>(chosen);
     queueHasGraphics_ = (fams[queueFamily_].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0;
+    if (fams[queueFamily_].timestampValidBits > 0) {
+        VkPhysicalDeviceProperties props;
+        vkGetPhysicalDeviceProperties(physical_, &props);
+        timestampPeriodNs_ = props.limits.timestampPeriod;
+    }
 
     vkEnumerateDeviceExtensionProperties(physical_, nullptr, &n, nullptr);
     std::vector<VkExtensionProperties> devExts(n);
@@ -134,6 +139,13 @@ bool VulkanEngine::createInstanceAndDevice() {
     dci.ppEnabledExtensionNames = devEnabled.data();
     if (vkCreateDevice(physical_, &dci, nullptr, &device_) != VK_SUCCESS) return false;
     vkGetDeviceQueue(device_, queueFamily_, 0, &queue_);
+
+    if (timestampPeriodNs_ > 0) {
+        VkQueryPoolCreateInfo qpi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+        qpi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        qpi.queryCount = kStamps * kRingSize;
+        if (vkCreateQueryPool(device_, &qpi, nullptr, &queryPool_) != VK_SUCCESS) queryPool_ = VK_NULL_HANDLE;
+    }
 
     VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -282,6 +294,8 @@ void VulkanEngine::release() {
     if (renderLayout_) vkDestroyDescriptorSetLayout(device_, renderLayout_, nullptr);
     if (descPool_) vkDestroyDescriptorPool(device_, descPool_, nullptr);
     if (cmdPool_) vkDestroyCommandPool(device_, cmdPool_, nullptr);
+    if (queryPool_) vkDestroyQueryPool(device_, queryPool_, nullptr);
+    queryPool_ = VK_NULL_HANDLE;
     vkDestroyDevice(device_, nullptr);
     vkDestroyInstance(instance_, nullptr);
     sampler_ = VK_NULL_HANDLE;
@@ -408,6 +422,8 @@ void VulkanEngine::destroyResources() {
     destroyImage(motionImage_);
     destroyImage(vfImage_);
     historyValid_ = false;
+    alignThrottled_ = false;
+    overBudgetFrames_ = 0;
     geom_ = {};
 }
 
@@ -726,6 +742,7 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
         return false;
     }
     auto tWait = Clock::now();
+    readTimestamps(idx);
     presentCpuFallback(s);
 
     std::memcpy(s.raw.mapped, in.raw, in.rawSize);
@@ -737,7 +754,7 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
     if (!g.shadingFloats) { params.quadInfo[2] = 0; params.quadInfo[3] = 0; }
     const bool temporal = params.cleanFlags[1] != 0;
     params.cleanFlags[2] = temporal && historyValid_ ? 1 : 0;
-    const bool align = params.cleanFlags[2] != 0 && params.cleanFlags[3] != 0;
+    const bool align = params.cleanFlags[2] != 0 && params.cleanFlags[3] != 0 && !alignThrottled_;
     if (!align) params.cleanFlags[3] = 0;
     std::memcpy(s.params.mapped, &params, sizeof(params));
     auto tCopy = Clock::now();
@@ -769,6 +786,11 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
 
+    const uint32_t q0 = static_cast<uint32_t>(idx) * kStamps;
+    if (queryPool_) {
+        vkCmdResetQueryPool(cb, queryPool_, q0, kStamps);
+        vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queryPool_, q0);
+    }
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, unpackPipe_);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, unpackPipeLayout_, 0, 1, &s.unpackSet, 0, nullptr);
     uint32_t groups = static_cast<uint32_t>((g.rawW + 3) / 4);
@@ -779,6 +801,7 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
                          0, nullptr, 0, nullptr, 1, &quadReady);
 
+    if (queryPool_) vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool_, q0 + 1);
     if (align) {
         // Motion field: 1/4-res luma of current + history, then a per-tile search.
         const uint32_t qw = static_cast<uint32_t>(g.rawW / 2), qh = static_cast<uint32_t>(g.rawH / 2);
@@ -794,11 +817,12 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
                              1, &lowReady, 0, nullptr, 0, nullptr);
         mode = 1;
         vkCmdPushConstants(cb, alignPipeLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(mode), &mode);
-        vkCmdDispatch(cb, ((qw + 31) / 32 + 15) / 16, ((qh + 31) / 32 + 7) / 8, 1);
+        vkCmdDispatch(cb, (qw + 31) / 32, (qh + 31) / 32, 1); // one workgroup per tile
         vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
                              1, &lowReady, 0, nullptr, 0, nullptr);
     }
 
+    if (queryPool_) vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool_, q0 + 2);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cleanPipe_);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cleanPipeLayout_, 0, 1, &s.cleanSet, 0, nullptr);
     vkCmdDispatch(cb, static_cast<uint32_t>((g.rawW / 2 + 15) / 16), static_cast<uint32_t>((g.rawH / 2 + 7) / 8), 1);
@@ -823,6 +847,7 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
     }
     historyValid_ = temporal;
 
+    if (queryPool_) vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool_, q0 + 3);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, renderPipe_);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, renderPipeLayout_, 0, 1, &s.renderSet, 0, nullptr);
     vkCmdDispatch(cb, static_cast<uint32_t>((g.outW / 2 + 7) / 8), static_cast<uint32_t>((g.outH / 2 + 7) / 8), 1);
@@ -872,6 +897,8 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
     toHost.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
                          0, 1, &toHost, 0, nullptr, 0, nullptr);
+    if (queryPool_) vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queryPool_, q0 + 4);
+    s.timed = queryPool_ != VK_NULL_HANDLE;
     vkEndCommandBuffer(cb);
 
     vkResetFences(device_, 1, &s.fence);
@@ -916,9 +943,38 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
                 static_cast<unsigned long long>(frameCount_), accWaitMs_ / 120, accCopyMs_ / 120, accSubmitMs_ / 120,
                 static_cast<unsigned long long>(droppedFrames_),
                 swapchain_ ? "swapchain" : (cpuFallback_ ? "cpu-fallback" : "none"));
+        if (timedFrames_ > 0) {
+            VK_LOGI("GPU per frame: unpack %.2fms, align %.2fms, clean %.2fms, render+present %.2fms = %.2fms (budget %.1fms)%s",
+                    passMs_[0] / timedFrames_, passMs_[1] / timedFrames_, passMs_[2] / timedFrames_, passMs_[3] / timedFrames_,
+                    gpuFrameMs_, frameBudgetMs_, alignThrottled_ ? ", alignment throttled" : "");
+            for (double& m : passMs_) m = 0;
+            timedFrames_ = 0;
+        }
         accWaitMs_ = accCopyMs_ = accSubmitMs_ = 0;
     }
     return true;
+}
+
+// Reads the slot's previous-frame timestamps (its fence has signalled) and
+// switches tile alignment off if the GPU can't keep up with the camera.
+void VulkanEngine::readTimestamps(int slot) {
+    Slot& s = slots_[slot];
+    if (!queryPool_ || !s.timed) return;
+    s.timed = false;
+    uint64_t t[kStamps];
+    if (vkGetQueryPoolResults(device_, queryPool_, static_cast<uint32_t>(slot) * kStamps, kStamps, sizeof(t), t,
+                              sizeof(uint64_t), VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) return;
+    for (uint32_t i = 0; i + 1 < kStamps; ++i) passMs_[i] += (t[i + 1] - t[i]) * timestampPeriodNs_ * 1e-6;
+    ++timedFrames_;
+    const double frameMs = (t[kStamps - 1] - t[0]) * timestampPeriodNs_ * 1e-6;
+    gpuFrameMs_ = gpuFrameMs_ == 0 ? frameMs : 0.9 * gpuFrameMs_ + 0.1 * frameMs;
+    // Sustained >85% of the frame interval means we are about to drop frames:
+    // alignment is the optional, most expensive pass, so it goes first.
+    overBudgetFrames_ = gpuFrameMs_ > 0.85 * frameBudgetMs_ ? overBudgetFrames_ + 1 : 0;
+    if (overBudgetFrames_ > 30 && !alignThrottled_) {
+        alignThrottled_ = true;
+        VK_LOGW("GPU %.1fms over %.1fms budget: temporal NR alignment disabled", gpuFrameMs_, frameBudgetMs_);
+    }
 }
 
 const uint8_t* VulkanEngine::waitEncoderFrame(int slot, size_t* size) {

@@ -31,6 +31,14 @@ vec3 channelVar(vec3 c) {
     return g * g * (P.noise.z * max(c, vec3(0.0)) / g + P.noise.w);
 }
 float luma(vec3 c) { return dot(c, vec3(0.25, 0.5, 0.25)); }
+
+// The workgroup's 16x8 block plus a 2-texel apron, staged once in shared
+// memory: the 3x3 and 5x5 neighbourhoods below read from here instead of
+// issuing ~34 image loads per texel.
+const int kApron = 2;
+const int kTileW = 16 + 2 * kApron, kTileH = 8 + 2 * kApron;
+shared vec3 sTile[kTileH][kTileW];
+vec3 nb(ivec2 local, int dx, int dy) { return sTile[local.y + kApron + dy][local.x + kApron + dx]; }
 // The G of a quad is already the mean of two photosites (half the variance).
 float lumaSigma(vec3 c) {
     vec3 v = channelVar(c);
@@ -39,7 +47,14 @@ float lumaSigma(vec3 c) {
 
 void main() {
     ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 local = ivec2(gl_LocalInvocationID.xy);
     ivec2 size = P.quadInfo.xy;
+    ivec2 origin = ivec2(gl_WorkGroupID.xy) * ivec2(16, 8) - kApron;
+    for (uint i = gl_LocalInvocationIndex; i < uint(kTileW * kTileH); i += 128u) {
+        ivec2 t = ivec2(int(i) % kTileW, int(i) / kTileW);
+        sTile[t.y][t.x] = imageLoad(quadIn, clamp(origin + t, ivec2(0), size - 1)).rgb;
+    }
+    barrier();
     if (q.x >= size.x || q.y >= size.y) return;
 
     vec4 c = imageLoad(quadIn, q);
@@ -56,7 +71,7 @@ void main() {
         for (int dy = -1; dy <= 1; ++dy)
             for (int dx = -1; dx <= 1; ++dx) {
                 if (dx == 0 && dy == 0) continue;
-                vec3 n = imageLoad(quadIn, clamp(q + ivec2(dx, dy), ivec2(0), size - 1)).rgb;
+                vec3 n = nb(local, dx, dy);
                 lo = min(lo, n);
                 hi = max(hi, n);
             }
@@ -80,7 +95,7 @@ void main() {
         float wSum = 0.0;
         for (int dy = -2; dy <= 2; ++dy)
             for (int dx = -2; dx <= 2; ++dx) {
-                vec3 n = imageLoad(quadIn, clamp(q + ivec2(dx, dy), ivec2(0), size - 1)).rgb;
+                vec3 n = nb(local, dx, dy);
                 float yn = luma(n);
                 float w = exp(-((yn - y0) * (yn - y0)) / (2.0 * s * s));
                 chromaSum += w * (n - yn);

@@ -3,7 +3,7 @@
 // Tile alignment for temporal NR (HDR+-style, Hasinoff et al. 2016, reduced to
 // two pyramid levels for real-time video):
 //   mode 0: build 1/4-resolution luma of the current quad image and history.
-//   mode 1: per 32x32-quad tile, search +-4 px at 1/4 res (+-16 quad px), then
+//   mode 1: one workgroup per 32x32-quad tile, search +-4 px at 1/4 res (+-16 quad px), then
 //           refine +-2 quad px at full res. The result is the offset d such
 //           that history(q + d) matches current(q), stored per tile.
 // Zero motion wins ties so noise can't make static tiles jitter.
@@ -22,6 +22,14 @@ layout(set = 0, binding = 5, rgba16f) uniform writeonly image2D motion;
 const int kTile = 32;      // quad px per tile
 const int kLowScale = 4;   // quad px per low-res px
 const int kLowTile = kTile / kLowScale;
+
+shared float sCur[64];
+shared float sHistLow[256];
+shared float sSad[81];
+shared ivec2 sCenter;
+shared float sCurF[256];
+shared float sHistF[1156];
+shared float sSadF[25];
 
 float luma(vec3 c) { return dot(c, vec3(0.25, 0.5, 0.25)); }
 // Compare in a compressed domain so bright areas don't dominate the SAD.
@@ -47,45 +55,58 @@ void main() {
         return;
     }
 
-    ivec2 tiles = (size + kTile - 1) / kTile;
-    if (id.x >= tiles.x || id.y >= tiles.y) return;
+    // One 128-thread workgroup per tile: the tile and its search window are
+    // staged in shared memory once, then candidates are scored in parallel.
+    ivec2 tile = ivec2(gl_WorkGroupID.xy);
+    uint li = gl_LocalInvocationIndex;
 
-    // Coarse: +-4 low-res px.
-    ivec2 base = id * kLowTile;
-    ivec2 best = ivec2(0);
-    float bestSad = 1e30, zeroSad = 0.0;
-    for (int dy = -4; dy <= 4; ++dy)
-        for (int dx = -4; dx <= 4; ++dx) {
-            float sad = 0.0;
-            for (int y = 0; y < kLowTile; ++y)
-                for (int x = 0; x < kLowTile; ++x) {
-                    ivec2 p = min(base + ivec2(x, y), lowSize - 1);
-                    ivec2 ph = clamp(p + ivec2(dx, dy), ivec2(0), lowSize - 1);
-                    sad += abs(imageLoad(curLow, p).r - imageLoad(histLow, ph).r);
-                }
-            if (dx == 0 && dy == 0) zeroSad = sad;
-            if (sad < bestSad) { bestSad = sad; best = ivec2(dx, dy); }
-        }
-    if (zeroSad <= bestSad * 1.03) best = ivec2(0);
+    // Coarse level: 8x8 low-res tile vs a 16x16 history window, 81 candidates.
+    ivec2 base = tile * kLowTile;
+    for (uint i = li; i < 64u; i += 128u)
+        sCur[i] = imageLoad(curLow, min(base + ivec2(i % 8u, i / 8u), lowSize - 1)).r;
+    for (uint i = li; i < 256u; i += 128u)
+        sHistLow[i] = imageLoad(histLow, clamp(base - 4 + ivec2(i % 16u, i / 16u), ivec2(0), lowSize - 1)).r;
+    barrier();
+    if (li < 81u) {
+        int dx = int(li % 9u), dy = int(li / 9u); // window offset 0..8 == motion -4..4
+        float sad = 0.0;
+        for (int y = 0; y < kLowTile; ++y)
+            for (int x = 0; x < kLowTile; ++x)
+                sad += abs(sCur[y * kLowTile + x] - sHistLow[(y + dy) * 16 + x + dx]);
+        sSad[li] = sad;
+    }
+    barrier();
+    if (li == 0u) {
+        uint best = 40u; // zero motion
+        for (uint i = 0u; i < 81u; ++i) if (sSad[i] < sSad[best]) best = i;
+        if (sSad[40] <= sSad[best] * 1.03) best = 40u;
+        sCenter = (ivec2(int(best % 9u), int(best / 9u)) - 4) * kLowScale;
+    }
+    barrier();
 
-    // Fine: +-2 quad px around the coarse estimate, on every 2nd quad px.
-    ivec2 qBase = id * kTile;
-    ivec2 center = best * kLowScale;
-    ivec2 fine = center;
-    float fineBest = 1e30, fineZero = 1e30;
-    for (int dy = -2; dy <= 2; ++dy)
-        for (int dx = -2; dx <= 2; ++dx) {
-            ivec2 d = center + ivec2(dx, dy);
-            float sad = 0.0;
-            for (int y = 0; y < kTile; y += 2)
-                for (int x = 0; x < kTile; x += 2) {
-                    ivec2 q = min(qBase + ivec2(x, y), size - 1);
-                    ivec2 qh = clamp(q + d, ivec2(0), size - 1);
-                    sad += abs(enc(luma(imageLoad(quadIn, q).rgb)) - enc(luma(imageLoad(history, qh).rgb)));
-                }
-            if (d == ivec2(0)) fineZero = sad;
-            if (sad < fineBest) { fineBest = sad; fine = d; }
-        }
-    if (fineZero <= fineBest * 1.03) fine = ivec2(0);
-    imageStore(motion, id, vec4(vec2(fine), 0.0, 0.0));
+    // Fine level: 16x16 samples (every 2nd quad px of the 32x32 tile) vs a
+    // 34x34 history window around the coarse estimate, 25 candidates.
+    ivec2 center = sCenter;
+    ivec2 qBase = tile * kTile;
+    for (uint i = li; i < 256u; i += 128u)
+        sCurF[i] = enc(luma(imageLoad(quadIn, min(qBase + ivec2(i % 16u, i / 16u) * 2, size - 1)).rgb));
+    for (uint i = li; i < 1156u; i += 128u)
+        sHistF[i] = enc(luma(imageLoad(history, clamp(qBase + center - 2 + ivec2(i % 34u, i / 34u), ivec2(0), size - 1)).rgb));
+    barrier();
+    if (li < 25u) {
+        int ex = int(li % 5u), ey = int(li / 5u); // 0..4 == refinement -2..2
+        float sad = 0.0;
+        for (int y = 0; y < 16; ++y)
+            for (int x = 0; x < 16; ++x)
+                sad += abs(sCurF[y * 16 + x] - sHistF[(2 * y + ey) * 34 + 2 * x + ex]);
+        sSadF[li] = sad;
+    }
+    barrier();
+    if (li == 0u) {
+        uint best = 12u;
+        for (uint i = 0u; i < 25u; ++i) if (sSadF[i] < sSadF[best]) best = i;
+        if (center == ivec2(0) && sSadF[12] <= sSadF[best] * 1.03) best = 12u;
+        ivec2 d = center + ivec2(int(best % 5u), int(best / 5u)) - 2;
+        imageStore(motion, tile, vec4(vec2(d), 0.0, 0.0));
+    }
 }

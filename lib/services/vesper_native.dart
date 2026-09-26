@@ -43,6 +43,8 @@ class EngineStatus {
   final int afState; // CONTROL_AF_STATE (2 = passive focused, 4 = focus locked)
   final double focusDiopters;
   final List<double> face; // largest face: x, y, w, h (output-normalised); w == 0 if none
+  final double gpuMs; // measured GPU time per frame
+  final bool alignThrottled; // NR alignment auto-disabled: GPU over budget
 
   EngineStatus.fromJson(Map<String, dynamic> j)
     : streaming = j['streaming'] as bool,
@@ -63,7 +65,9 @@ class EngineStatus {
       awbAuto = j['awbAuto'] as bool,
       afState = j['afState'] as int,
       focusDiopters = (j['focusDiopters'] as num).toDouble(),
-      face = (j['face'] as List).map((e) => (e as num).toDouble()).toList();
+      face = (j['face'] as List).map((e) => (e as num).toDouble()).toList(),
+      gpuMs = (j['gpuMs'] as num).toDouble(),
+      alignThrottled = j['alignThrottled'] as bool;
 }
 
 class RawMode {

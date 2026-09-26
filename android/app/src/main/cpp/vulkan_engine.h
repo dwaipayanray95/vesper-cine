@@ -72,6 +72,13 @@ public:
     // Returns false if the frame was dropped (GPU or encoder too far behind).
     bool processFrame(const FrameInput& in, int* encoderSlot);
 
+    // Camera frame interval; used to keep optional GPU passes within budget.
+    void setFrameBudgetMs(double ms) { frameBudgetMs_ = ms; }
+    // Averaged GPU time per frame (ms) from timestamp queries; 0 if unsupported.
+    double gpuFrameMs() const { return gpuFrameMs_; }
+    // True once alignment was switched off automatically because the GPU ran over budget.
+    bool alignmentThrottled() const { return alignThrottled_; }
+
     // Blocks until the slot's GPU work is done, then returns its P010 bytes
     // (Y plane of outW*outH uint16, then interleaved CbCr of outW*outH/2 uint16).
     const uint8_t* waitEncoderFrame(int slot, size_t* size);
@@ -101,6 +108,7 @@ private:
         VkDescriptorSet renderSet = VK_NULL_HANDLE;
         bool vfReadbackPending = false;
         bool encoderHold = false; // guarded by encoderMutex_
+        bool timed = false;       // timestamp queries were written for this slot's last frame
     };
     struct Geometry {
         int rawW = 0, rawH = 0, stride = 0, outW = 0, outH = 0, shadingFloats = 0;
@@ -149,6 +157,18 @@ private:
     Image quadImage_, cleanImage_, historyImage_, vfImage_;
     Image curLowImage_, histLowImage_, motionImage_; // tile alignment (align.comp)
     bool historyValid_ = false;
+
+    // GPU timing: kStamps timestamps per slot (start, unpack, align, clean, end).
+    static constexpr uint32_t kStamps = 5;
+    VkQueryPool queryPool_ = VK_NULL_HANDLE;
+    double timestampPeriodNs_ = 0;
+    double passMs_[kStamps - 1] = {};
+    int timedFrames_ = 0;
+    double gpuFrameMs_ = 0;
+    double frameBudgetMs_ = 41.7;
+    int overBudgetFrames_ = 0;
+    bool alignThrottled_ = false;
+    void readTimestamps(int slot);
     Geometry geom_;
     int nextSlot_ = 0;
 

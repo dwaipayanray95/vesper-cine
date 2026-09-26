@@ -913,6 +913,8 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                       if (s != null)
                         Text(
                           '${s.fps.toStringAsFixed(1)} FPS'
+                          '${s.gpuMs > 0 ? ' · GPU ${s.gpuMs.toStringAsFixed(1)}ms' : ''}'
+                          '${s.alignThrottled ? ' · ALIGN OFF' : ''}'
                           '${s.cameraDrops + s.framesDropped > 0 ? ' · ${s.cameraDrops + s.framesDropped} DROP' : ''}',
                           style: TextStyle(
                             color: s.cameraDrops + s.framesDropped > 0 ? Colors.orangeAccent : Colors.white54,
