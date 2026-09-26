@@ -20,6 +20,9 @@ on:
         required: false
         default: ""
 
+permissions:
+  contents: write # needed to publish the GitHub Release below
+
 jobs:
   build:
     name: Build arm64-v8a ${{ inputs.build_mode }} APK
@@ -91,19 +94,51 @@ jobs:
             --${{ inputs.build_mode }} \
             --target-platform android-arm64
 
-      - name: Report APK size
+      # pubspec.yaml's version line (e.g. "version: 0.2.20+22") is the single
+      # source of truth for both versionName and versionCode that Flutter
+      # itself feeds into the built APK, so the release/asset name is
+      # derived from the same line rather than duplicated anywhere.
+      - name: Read app version
+        id: version
         run: |
-          APK_DIR="build/app/outputs/flutter-apk"
-          ls -lh "$APK_DIR"
-          echo "### APK size" >> "$GITHUB_STEP_SUMMARY"
-          for f in "$APK_DIR"/*.apk; do
-            printf -- '- `%s`: %s\n' "$(basename "$f")" "$(du -h "$f" | cut -f1)" >> "$GITHUB_STEP_SUMMARY"
-          done
+          RAW=$(grep '^version:' pubspec.yaml | sed 's/version: *//')
+          echo "name=${RAW%+*}" >> "$GITHUB_OUTPUT"
+          echo "build=${RAW#*+}" >> "$GITHUB_OUTPUT"
 
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
+      - name: Rename APK
+        id: apk
+        run: |
+          SRC="build/app/outputs/flutter-apk/app-${{ inputs.build_mode }}.apk"
+          NAME="vesper-cine-v${{ steps.version.outputs.name }}-${{ inputs.build_mode }}.apk"
+          DEST="build/app/outputs/flutter-apk/$NAME"
+          mv "$SRC" "$DEST"
+          ls -lh "$DEST"
+          echo "### APK" >> "$GITHUB_STEP_SUMMARY"
+          echo "- \`$NAME\`: $(du -h "$DEST" | cut -f1)" >> "$GITHUB_STEP_SUMMARY"
+          echo "path=$DEST" >> "$GITHUB_OUTPUT"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
+      # Published as a GitHub Release rather than a workflow artifact so the
+      # APK downloads as a plain .apk file with no zip wrapper. release
+      # builds publish as a normal (non-prerelease) release; debug/profile
+      # builds are marked prerelease since they're sideload/test builds, not
+      # something meant to look like a finished build.
+      - name: Determine prerelease flag
+        id: prerelease
+        run: |
+          if [ "${{ inputs.build_mode }}" = "release" ]; then
+            echo "value=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: vesper-cine-arm64-${{ inputs.build_mode }}-${{ github.run_number }}
-          path: build/app/outputs/flutter-apk/app-${{ inputs.build_mode }}.apk
-          if-no-files-found: error
-          retention-days: 30
+          tag_name: v${{ steps.version.outputs.name }}-${{ inputs.build_mode }}-${{ github.run_number }}
+          name: "Vesper Cine v${{ steps.version.outputs.name }} (${{ inputs.build_mode }})"
+          prerelease: ${{ steps.prerelease.outputs.value }}
+          files: ${{ steps.apk.outputs.path }}
+          body: |
+            Manually triggered build from commit ${{ github.sha }}.
+            Build mode: `${{ inputs.build_mode }}` · arm64-v8a only.
