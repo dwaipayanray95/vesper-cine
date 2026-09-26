@@ -324,6 +324,40 @@ int main() {
         }
     }
 
+    // 5c. Negative noise-profile offset (Pixel reports one) must not create
+    //     NaNs in dark areas; they used to stick in the history as black streaks.
+    {
+        struct Dark : Scene { Vec3 at(int, int) const override { return {0.0005f, 0.001f, 0.0008f}; } };
+        FrameParams dp = baseParams(0);
+        dp.noise[2] = 2e-4f; dp.noise[3] = -1e-5f;
+        dp.cleanFlags[1] = 1; dp.cleanFlags[3] = 1; dp.noise[0] = 0.85f; dp.noise[1] = 1.0f;
+        std::vector<uint8_t> dark = makeRaw10(Dark());
+        for (int i = 0; i < 4; ++i) runFrame(gpu, dark, dp, nullptr, f);
+        int y = f.luma(OUT_W / 2, OUT_H / 2);
+        check(y > 100 && y < 400 && f.cb(OUT_W / 2, OUT_H / 2) > 480 && f.cr(OUT_W / 2, OUT_H / 2) > 480,
+              "negative noise offset: dark frame stays finite and neutral (Y)", y, 200);
+    }
+
+    // 5d. Colour ghosting: a red object and a grey wall of similar luma. After
+    //     the object leaves, temporal NR must not leave a red trail.
+    {
+        struct RedThenGrey : Scene {
+            bool red;
+            explicit RedThenGrey(bool r) : red(r) {}
+            Vec3 at(int, int) const override {
+                const float grey = 0.18f / 8.0f;
+                if (red) return {grey * 2.2f / 2.0f, grey * 0.6f, grey * 0.6f / 1.25f};
+                return {grey / 2.0f, grey, grey / 1.25f};
+            }
+        };
+        FrameParams gp = baseParams(0);
+        gp.cleanFlags[1] = 1; gp.noise[0] = 0.85f;
+        for (int i = 0; i < 6; ++i) runFrame(gpu, makeRaw10(RedThenGrey(true)), gp, nullptr, f);
+        runFrame(gpu, makeRaw10(RedThenGrey(false)), gp, nullptr, f);
+        int cr = f.cr(OUT_W / 2, OUT_H / 2);
+        check(std::abs(cr - 512) <= 4, "no red ghost after the red object leaves (Cr)", cr, 512);
+    }
+
     // 6. Lens model with all-zero distortion is an identity.
     {
         FrameParams lp = baseParams(0);

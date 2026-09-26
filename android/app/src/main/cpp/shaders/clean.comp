@@ -26,9 +26,12 @@ layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D quadOut;
 layout(set = 0, binding = 4, rgba16f) uniform readonly image2D motion; // per 32x32 tile, see align.comp
 
 // Per-channel noise variance of a white-balanced quad value.
+// Floored: Pixel reports a slightly negative O, so S*x + O goes negative in
+// deep shadows — sqrt() of that is NaN, and NaN in the temporal history never
+// leaves (it showed up as black streaks dragged along by the motion field).
 vec3 channelVar(vec3 c) {
     vec3 g = P.wbGains.rgb;
-    return g * g * (P.noise.z * max(c, vec3(0.0)) / g + P.noise.w);
+    return g * g * max(P.noise.z * max(c, vec3(0.0)) / g + P.noise.w, vec3(1e-7));
 }
 float luma(vec3 c) { return dot(c, vec3(0.25, 0.5, 0.25)); }
 
@@ -58,6 +61,7 @@ void main() {
     if (q.x >= size.x || q.y >= size.y) return;
 
     vec4 c = imageLoad(quadIn, q);
+    if (any(isnan(c.rgb)) || any(isinf(c.rgb))) c.rgb = vec3(0.0);
     vec3 rgb = c.rgb;
 
     // A stuck photosite usually reads as saturated, so this is not gated on the
@@ -107,6 +111,7 @@ void main() {
 
     if (P.cleanFlags.y != 0 && P.cleanFlags.z != 0) {
         vec3 h;
+        vec2 hpos = vec2(q);
         if (P.cleanFlags.w != 0) {
             ivec2 tiles = (size + 31) / 32;
             vec2 tf = clamp((vec2(q) + 0.5) / 32.0 - 0.5, vec2(0.0), vec2(tiles - 1));
@@ -117,6 +122,7 @@ void main() {
                           mix(imageLoad(motion, ivec2(t0.x, t1.y)).xy, imageLoad(motion, t1).xy, ft.x), ft.y);
             // Bilinear history fetch at the (possibly fractional) warped position.
             vec2 hp = clamp(vec2(q) + mv, vec2(0.0), vec2(size - 1));
+            hpos = hp;
             ivec2 h0 = ivec2(floor(hp));
             ivec2 h1 = min(h0 + 1, size - 1);
             vec2 fh = hp - vec2(h0);
@@ -125,12 +131,27 @@ void main() {
         } else {
             h = imageLoad(history, q).rgb;
         }
-        // Luma change measured in units of expected noise: noise -> blend, motion -> keep current.
-        float d = abs(luma(rgb) - luma(h));
-        float k = d / (3.0 * lumaSigma(rgb) + 1e-6);
+        // Change is measured per channel on 3x3 means (current block from shared
+        // memory vs the warped history), in units of expected noise. Means cut
+        // noise 3x so a real change of 1-2 sigma per pixel still reads as motion;
+        // the worst channel (not luma) catches same-brightness colour changes
+        // (red bag on a grey wall) that luma alone would blend into a ghost.
+        ivec2 hq = clamp(ivec2(floor(hpos + 0.5)), ivec2(1), size - 2);
+        vec3 curMean = vec3(0.0), histMean = vec3(0.0);
+        for (int dy = -1; dy <= 1; ++dy)
+            for (int dx = -1; dx <= 1; ++dx) {
+                curMean += nb(local, dx, dy);
+                histMean += imageLoad(history, hq + ivec2(dx, dy)).rgb;
+            }
+        curMean /= 9.0;
+        histMean /= 9.0;
+        vec3 sig = sqrt(channelVar(curMean) * vec3(1.0, 0.5, 1.0) * 2.0 / 9.0);
+        vec3 z = abs(curMean - histMean) / sig;
+        float k = max(z.r, max(z.g, z.b)) / 3.0;
         float w = P.noise.x * exp(-k * k);
-        rgb = mix(rgb, h, w);
+        if (!any(isnan(h)) && !any(isinf(h))) rgb = mix(rgb, h, w);
     }
+    if (any(isnan(rgb)) || any(isinf(rgb))) rgb = c.rgb; // never let a bad value enter the history
 
     imageStore(quadOut, q, vec4(rgb, c.a));
 }
