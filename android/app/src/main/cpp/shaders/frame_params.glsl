@@ -18,7 +18,7 @@ layout(std140, set = 0, binding = 0) uniform FrameParams {
     vec4  lensP;        // tangential p1, p2; zw unused
     vec4  lensF;        // intrinsics fx, fy, cx, cy (pre-correction px)
     vec4  noise;        // x: temporal NR strength, y: chroma NR strength, z/w: noise profile S, O
-    ivec4 cleanFlags;   // x: hot-pixel fix, y: temporal NR, z: history valid, w: unused
+    ivec4 cleanFlags;   // x: hot-pixel fix, y: temporal NR, z: history valid, w: tile alignment
 } P;
 
 // Raw-stream pixel coordinate <-> pre-correction active array coordinate.

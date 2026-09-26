@@ -19,7 +19,7 @@ Architecture, threading and colour maths are described in [`docs/ARCHITECTURE.md
 | Hardware AF (PDAF + laser via HAL): continuous, tap-to-focus, lock; face detection | Implemented |
 | Google AWB (HAL neutral point, followed live) or manual Kelvin/tint | Implemented |
 | Lens distortion correction (Camera2 lens model), hot/dead pixel repair | Implemented, GPU-tested on host |
-| Temporal NR (motion-adaptive, sensor noise profile) and chroma NR — optional | Implemented, GPU-tested on host |
+| Temporal NR (motion-adaptive, sensor noise profile, HDR+-style tile alignment) and chroma NR — optional | Implemented, GPU-tested on host |
 | Full-range shutter (angle or speed), ISO, fps pickers; one-shot auto-exposure assist | Implemented |
 | OIS toggle | Implemented |
 | True UHD (full-res demosaic pass) | Planned. UHD output currently upsamples the ~2040 px quad image. |

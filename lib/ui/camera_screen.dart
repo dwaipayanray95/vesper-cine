@@ -130,6 +130,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   bool _hotPixelFix = true;
   double _temporalNr = 0; // 0 off, 0.5 low, 0.7 medium, 0.85 high
   double _chromaNr = 0; // 0 off, 0.5 low, 1 high
+  bool _nrAlignment = true;
   Offset? _focusMark; // last tap-to-focus point (normalised), shown briefly
   Timer? _focusMarkTimer;
   int _codec = 0; // 0 HEVC, 1 AV1
@@ -207,6 +208,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     _engine.setHotPixelFix(_hotPixelFix);
     _engine.setTemporalNr(_temporalNr);
     _engine.setChromaNr(_chromaNr);
+    _engine.setNrAlignment(_nrAlignment);
     _engine.setFrameRate(_fps);
     _applyShutter();
 
@@ -718,6 +720,17 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                     ),
                   ),
                   row(
+                    '  ↳ motion alignment',
+                    Segmented(
+                      options: const ['OFF', 'ON'],
+                      selected: _nrAlignment ? 1 : 0,
+                      onSelected: (i) {
+                        update(() => _nrAlignment = i == 1);
+                        _engine.setNrAlignment(_nrAlignment);
+                      },
+                    ),
+                  ),
+                  row(
                     'Chroma noise reduction',
                     Segmented(
                       options: const ['OFF', 'LOW', 'HIGH'],
@@ -958,7 +971,12 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                     onTap: _pickShutter,
                   ),
                   _pill('ISO', '$_iso', onTap: _pickIso),
-                  _pill('WB', '${_kelvin}K', subtitle: _awbAuto ? 'GOOGLE AWB' : 'TINT ${_tint > 0 ? '+' : ''}$_tint', onTap: _pickWhiteBalance),
+                  _pill(
+                    'WB',
+                    '${_kelvin}K',
+                    subtitle: _awbAuto ? 'GOOGLE AWB' : 'TINT ${_tint > 0 ? '+' : ''}$_tint',
+                    onTap: _pickWhiteBalance,
+                  ),
                   GestureDetector(
                     onTap: _streaming ? () => _autoExpose(keepShutter: true) : null,
                     onLongPress: _streaming ? () => _autoExpose(keepShutter: false) : null,

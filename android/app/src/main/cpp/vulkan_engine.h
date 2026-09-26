@@ -37,7 +37,7 @@ struct FrameParams {
     float lensP[4];             // p1, p2
     float lensF[4];             // fx, fy, cx, cy
     float noise[4];             // temporal strength, chroma strength, noise S, noise O
-    int32_t cleanFlags[4];      // hot-pixel fix, temporal NR, history valid (set by the engine)
+    int32_t cleanFlags[4];      // hot-pixel fix, temporal NR, history valid (set by the engine), tile alignment
 };
 static_assert(sizeof(FrameParams) == 304, "FrameParams must match the std140 GLSL block");
 
@@ -97,6 +97,7 @@ private:
         VkSemaphore acquireSem = VK_NULL_HANDLE;
         VkDescriptorSet unpackSet = VK_NULL_HANDLE;
         VkDescriptorSet cleanSet = VK_NULL_HANDLE;
+        VkDescriptorSet alignSet = VK_NULL_HANDLE;
         VkDescriptorSet renderSet = VK_NULL_HANDLE;
         bool vfReadbackPending = false;
         bool encoderHold = false; // guarded by encoderMutex_
@@ -137,12 +138,16 @@ private:
     VkCommandPool cmdPool_ = VK_NULL_HANDLE;
     VkDescriptorPool descPool_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout unpackLayout_ = VK_NULL_HANDLE, cleanLayout_ = VK_NULL_HANDLE, renderLayout_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout alignLayout_ = VK_NULL_HANDLE;
+    VkPipelineLayout alignPipeLayout_ = VK_NULL_HANDLE;
+    VkPipeline alignPipe_ = VK_NULL_HANDLE;
     VkPipelineLayout unpackPipeLayout_ = VK_NULL_HANDLE, cleanPipeLayout_ = VK_NULL_HANDLE, renderPipeLayout_ = VK_NULL_HANDLE;
     VkPipeline unpackPipe_ = VK_NULL_HANDLE, cleanPipe_ = VK_NULL_HANDLE, renderPipe_ = VK_NULL_HANDLE;
     VkSampler sampler_ = VK_NULL_HANDLE;
 
     Slot slots_[kRingSize];
     Image quadImage_, cleanImage_, historyImage_, vfImage_;
+    Image curLowImage_, histLowImage_, motionImage_; // tile alignment (align.comp)
     bool historyValid_ = false;
     Geometry geom_;
     int nextSlot_ = 0;

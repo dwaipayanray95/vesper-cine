@@ -1,0 +1,91 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Tile alignment for temporal NR (HDR+-style, Hasinoff et al. 2016, reduced to
+// two pyramid levels for real-time video):
+//   mode 0: build 1/4-resolution luma of the current quad image and history.
+//   mode 1: per 32x32-quad tile, search +-4 px at 1/4 res (+-16 quad px), then
+//           refine +-2 quad px at full res. The result is the offset d such
+//           that history(q + d) matches current(q), stored per tile.
+// Zero motion wins ties so noise can't make static tiles jitter.
+layout(local_size_x = 16, local_size_y = 8) in;
+
+#include "frame_params.glsl"
+
+layout(push_constant) uniform Push { int mode; } pc;
+
+layout(set = 0, binding = 1, rgba16f) uniform readonly image2D quadIn;
+layout(set = 0, binding = 2, rgba16f) uniform readonly image2D history;
+layout(set = 0, binding = 3, rgba16f) uniform image2D curLow;
+layout(set = 0, binding = 4, rgba16f) uniform image2D histLow;
+layout(set = 0, binding = 5, rgba16f) uniform writeonly image2D motion;
+
+const int kTile = 32;      // quad px per tile
+const int kLowScale = 4;   // quad px per low-res px
+const int kLowTile = kTile / kLowScale;
+
+float luma(vec3 c) { return dot(c, vec3(0.25, 0.5, 0.25)); }
+// Compare in a compressed domain so bright areas don't dominate the SAD.
+float enc(float v) { return sqrt(max(v, 0.0)); }
+
+void main() {
+    ivec2 id = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = P.quadInfo.xy;
+    ivec2 lowSize = (size + kLowScale - 1) / kLowScale;
+
+    if (pc.mode == 0) {
+        if (id.x >= lowSize.x || id.y >= lowSize.y) return;
+        float c = 0.0, h = 0.0;
+        for (int y = 0; y < kLowScale; ++y)
+            for (int x = 0; x < kLowScale; ++x) {
+                ivec2 q = min(id * kLowScale + ivec2(x, y), size - 1);
+                c += luma(imageLoad(quadIn, q).rgb);
+                h += luma(imageLoad(history, q).rgb);
+            }
+        float n = float(kLowScale * kLowScale);
+        imageStore(curLow, id, vec4(enc(c / n)));
+        imageStore(histLow, id, vec4(enc(h / n)));
+        return;
+    }
+
+    ivec2 tiles = (size + kTile - 1) / kTile;
+    if (id.x >= tiles.x || id.y >= tiles.y) return;
+
+    // Coarse: +-4 low-res px.
+    ivec2 base = id * kLowTile;
+    ivec2 best = ivec2(0);
+    float bestSad = 1e30, zeroSad = 0.0;
+    for (int dy = -4; dy <= 4; ++dy)
+        for (int dx = -4; dx <= 4; ++dx) {
+            float sad = 0.0;
+            for (int y = 0; y < kLowTile; ++y)
+                for (int x = 0; x < kLowTile; ++x) {
+                    ivec2 p = min(base + ivec2(x, y), lowSize - 1);
+                    ivec2 ph = clamp(p + ivec2(dx, dy), ivec2(0), lowSize - 1);
+                    sad += abs(imageLoad(curLow, p).r - imageLoad(histLow, ph).r);
+                }
+            if (dx == 0 && dy == 0) zeroSad = sad;
+            if (sad < bestSad) { bestSad = sad; best = ivec2(dx, dy); }
+        }
+    if (zeroSad <= bestSad * 1.03) best = ivec2(0);
+
+    // Fine: +-2 quad px around the coarse estimate, on every 2nd quad px.
+    ivec2 qBase = id * kTile;
+    ivec2 center = best * kLowScale;
+    ivec2 fine = center;
+    float fineBest = 1e30, fineZero = 1e30;
+    for (int dy = -2; dy <= 2; ++dy)
+        for (int dx = -2; dx <= 2; ++dx) {
+            ivec2 d = center + ivec2(dx, dy);
+            float sad = 0.0;
+            for (int y = 0; y < kTile; y += 2)
+                for (int x = 0; x < kTile; x += 2) {
+                    ivec2 q = min(qBase + ivec2(x, y), size - 1);
+                    ivec2 qh = clamp(q + d, ivec2(0), size - 1);
+                    sad += abs(enc(luma(imageLoad(quadIn, q).rgb)) - enc(luma(imageLoad(history, qh).rgb)));
+                }
+            if (d == ivec2(0)) fineZero = sad;
+            if (sad < fineBest) { fineBest = sad; fine = d; }
+        }
+    if (fineZero <= fineBest * 1.03) fine = ivec2(0);
+    imageStore(motion, id, vec4(vec2(fine), 0.0, 0.0));
+}

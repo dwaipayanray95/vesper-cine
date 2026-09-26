@@ -35,6 +35,7 @@ struct Settings {
     bool lensCorrection = true;  // undo lens distortion like the stock camera
     bool hotPixelFix = true;
     float temporalNr = 0.0f;     // 0 = off, else max blend weight toward history (0.5..0.85)
+    bool nrAlignment = true;     // warp history by a per-tile motion field before blending
     float chromaNr = 0.0f;       // 0 = off, 1 = full chroma smoothing
     int32_t iso = 100;
     ColorState color;
@@ -304,6 +305,7 @@ void onFrame(const RawFrame& f) {
     p.noise[3] = meta.noiseO > 0 ? meta.noiseO : 2e-6f;
     p.cleanFlags[0] = s.hotPixelFix ? 1 : 0;
     p.cleanFlags[1] = s.temporalNr > 0 ? 1 : 0;
+    p.cleanFlags[3] = s.nrAlignment ? 1 : 0;
 
     {
         std::lock_guard<std::mutex> lk(gStateMutex);
@@ -679,6 +681,12 @@ EXPORT void vesper_set_hot_pixel_fix(int32_t enable) {
 EXPORT void vesper_set_temporal_nr(float strength) {
     std::lock_guard<std::mutex> lk(gStateMutex);
     gSettings.temporalNr = std::clamp(strength, 0.0f, 0.9f);
+}
+// Tile alignment for temporal NR (HDR+-style motion field): keeps denoising
+// through handheld shake and pans instead of rejecting moving tiles.
+EXPORT void vesper_set_nr_alignment(int32_t enable) {
+    std::lock_guard<std::mutex> lk(gStateMutex);
+    gSettings.nrAlignment = enable != 0;
 }
 // 0 = off .. 1 = full chroma smoothing (luma/detail untouched).
 EXPORT void vesper_set_chroma_nr(float strength) {

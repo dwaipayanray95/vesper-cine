@@ -4,7 +4,7 @@
 # Needs glslangValidator (Vulkan SDK, `apt install glslang-tools`, or the NDK's shader-tools).
 set -euo pipefail
 cd "$(dirname "$0")"
-for name in unpack clean render; do
+for name in unpack align clean render; do
   glslangValidator -V --target-env vulkan1.1 "$name.comp" -o "/tmp/vesper_$name.spv" >/dev/null
   python3 - "$name" "/tmp/vesper_$name.spv" > "${name}_spv.h" <<'PY'
 import struct, sys

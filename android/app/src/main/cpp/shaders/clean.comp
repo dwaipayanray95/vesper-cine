@@ -11,6 +11,9 @@
 //     previous cleaned frame. Where the difference is within the sensor's
 //     noise (SENSOR_NOISE_PROFILE) the pixel is averaged over time; where it
 //     is larger (motion) the current frame wins, so moving subjects never smear.
+//     With alignment on (cleanFlags.w), history is first warped by a per-tile
+//     motion field (align.comp), bilinearly interpolated between tile centres,
+//     so handheld shake and pans are denoised too instead of just rejected.
 // Noise model: raw variance = S * x + O (x normalised raw), then scaled by
 // each channel's white-balance gain. Luma = (R + Gr + Gb + B) / 4.
 layout(local_size_x = 16, local_size_y = 8) in;
@@ -20,6 +23,7 @@ layout(local_size_x = 16, local_size_y = 8) in;
 layout(set = 0, binding = 1, rgba16f) uniform readonly image2D quadIn;
 layout(set = 0, binding = 2, rgba16f) uniform readonly image2D history;
 layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D quadOut;
+layout(set = 0, binding = 4, rgba16f) uniform readonly image2D motion; // per 32x32 tile, see align.comp
 
 // Per-channel noise variance of a white-balanced quad value.
 vec3 channelVar(vec3 c) {
@@ -42,7 +46,11 @@ void main() {
     vec3 rgb = c.rgb;
 
     // A stuck photosite usually reads as saturated, so this is not gated on the
-    // clip flag: genuine highlights have bright neighbours and never trigger it.
+    // clip flag. Real detail (a thin bright line, a specular glint) lifts every
+    // channel of the quad together; a defective photosite lifts or drops ONE
+    // channel against its own neighbours while the others stay in range. Only
+    // that single-channel case is repaired — otherwise fine detail loses R/B and
+    // turns into green specks.
     if (P.cleanFlags.x != 0) {
         vec3 lo = vec3(1e9), hi = vec3(-1e9);
         for (int dy = -1; dy <= 1; ++dy)
@@ -52,8 +60,13 @@ void main() {
                 lo = min(lo, n);
                 hi = max(hi, n);
             }
-        vec3 t = 4.0 * sqrt(channelVar(rgb) * vec3(1.0, 0.5, 1.0) + 1e-12);
-        bvec3 bad = bvec3(vec3(greaterThan(rgb, hi + t)) + vec3(lessThan(rgb, lo - t)));
+        vec3 t = 6.0 * sqrt(channelVar(rgb) * vec3(1.0, 0.5, 1.0) + 1e-12) + 0.25 * (hi - lo);
+        bvec3 hot = greaterThan(rgb, hi + t);
+        bvec3 dead = lessThan(rgb, lo - t);
+        int nHot = int(hot.r) + int(hot.g) + int(hot.b);
+        int nDead = int(dead.r) + int(dead.g) + int(dead.b);
+        bvec3 bad = bvec3(nHot == 1 ? vec3(hot) : vec3(0.0)) ;
+        if (nDead == 1) bad = bvec3(vec3(bad) + vec3(dead));
         if (any(bad)) {
             rgb = mix(rgb, clamp(rgb, lo, hi), vec3(bad));
             c.a = 0.0; // the repaired value is no longer a clipped highlight
@@ -78,7 +91,25 @@ void main() {
     }
 
     if (P.cleanFlags.y != 0 && P.cleanFlags.z != 0) {
-        vec3 h = imageLoad(history, q).rgb;
+        vec3 h;
+        if (P.cleanFlags.w != 0) {
+            ivec2 tiles = (size + 31) / 32;
+            vec2 tf = clamp((vec2(q) + 0.5) / 32.0 - 0.5, vec2(0.0), vec2(tiles - 1));
+            ivec2 t0 = ivec2(floor(tf));
+            ivec2 t1 = min(t0 + 1, tiles - 1);
+            vec2 ft = tf - vec2(t0);
+            vec2 mv = mix(mix(imageLoad(motion, t0).xy, imageLoad(motion, ivec2(t1.x, t0.y)).xy, ft.x),
+                          mix(imageLoad(motion, ivec2(t0.x, t1.y)).xy, imageLoad(motion, t1).xy, ft.x), ft.y);
+            // Bilinear history fetch at the (possibly fractional) warped position.
+            vec2 hp = clamp(vec2(q) + mv, vec2(0.0), vec2(size - 1));
+            ivec2 h0 = ivec2(floor(hp));
+            ivec2 h1 = min(h0 + 1, size - 1);
+            vec2 fh = hp - vec2(h0);
+            h = mix(mix(imageLoad(history, h0).rgb, imageLoad(history, ivec2(h1.x, h0.y)).rgb, fh.x),
+                    mix(imageLoad(history, ivec2(h0.x, h1.y)).rgb, imageLoad(history, h1).rgb, fh.x), fh.y);
+        } else {
+            h = imageLoad(history, q).rgb;
+        }
         // Luma change measured in units of expected noise: noise -> blend, motion -> keep current.
         float d = abs(luma(rgb) - luma(h));
         float k = d / (3.0 * lumaSigma(rgb) + 1e-6);

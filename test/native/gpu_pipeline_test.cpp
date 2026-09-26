@@ -224,6 +224,29 @@ int main() {
         check(fixedPeak <= greyY + 4, "hot pixel removed by the fix", fixedPeak, greyY + 4);
     }
 
+    // 4b. Fine detail must survive the hot-pixel fix. A small white glint on
+    //     green foliage lifts R and B far above their neighbours but G only a
+    //     little; a per-channel defect filter clamps R and B and leaves a green
+    //     speck (seen on device). Invariant: fix on == fix off at the glint.
+    {
+        struct Glint : Scene {
+            Vec3 at(int x, int y) const override {
+                const int gx = W / 2 & ~1, gy = H / 2 & ~1; // one quad-aligned 2x2 raw block
+                if (x >= gx && x < gx + 2 && y >= gy && y < gy + 2) return {0.35f / 2.0f, 0.35f, 0.35f / 1.25f};
+                return {0.04f / 2.0f, 0.30f, 0.04f / 1.25f};
+            }
+        };
+        std::vector<uint8_t> glintRaw = makeRaw10(Glint());
+        const int ox = (W / 2 & ~1) * OUT_W / W, oy = (H / 2 & ~1) * OUT_H / H;
+        FrameParams gp = baseParams(0);
+        runFrame(gpu, glintRaw, gp, nullptr, f);
+        int cbOff = f.cb(ox, oy), crOff = f.cr(ox, oy);
+        gp.cleanFlags[0] = 1;
+        runFrame(gpu, glintRaw, gp, nullptr, f);
+        int delta = std::max(std::abs(f.cb(ox, oy) - cbOff), std::abs(f.cr(ox, oy) - crOff));
+        check(delta <= 4, "hot-pixel fix keeps a white glint on foliage (no green speck)", delta, 4);
+    }
+
     // 5. Temporal NR lowers noise on a static scene.
     {
         FrameParams tp = baseParams(0);
@@ -245,6 +268,60 @@ int main() {
         runFrame(gpu, raw, cp, nullptr, f);
         int cY = f.luma(OUT_W / 2, OUT_H * 3 / 4);
         check(std::abs(cY - greyY) <= 2, "chroma NR leaves luma alone", cY, greyY);
+    }
+
+    // 5b. Tile alignment: a textured scene panning 12 raw px per frame. With
+    //     alignment, temporal NR keeps denoising (history is warped onto the
+    //     current frame); without it every tile is "motion" and NR switches off.
+    {
+        struct Pan : Scene {
+            int shift;
+            explicit Pan(int s) : shift(s) {}
+            Vec3 at(int x, int y) const override {
+                float t = 0.5f + 0.5f * std::sin((x + shift) * 0.09f) * std::cos(y * 0.07f);
+                float v = 0.01f + 0.03f * t;
+                return {v / 2.0f, v, v / 1.25f};
+            }
+        };
+        auto noisyPan = [&](int frame) {
+            struct Noisy : Scene {
+                Pan pan; unsigned seed;
+                Noisy(int sh, unsigned sd) : pan(sh), seed(sd) {}
+                Vec3 at(int x, int y) const override {
+                    Vec3 v = pan.at(x, y);
+                    unsigned h = (x * 73856093u) ^ (y * 19349663u) ^ (seed * 83492791u);
+                    h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
+                    float n = ((h & 0xffff) / 65535.0f - 0.5f) * 0.02f;
+                    return {v[0] + n, v[1] + n, v[2] + n};
+                }
+            };
+            return makeRaw10(Noisy(frame * 12, 100 + frame));
+        };
+        const int last = 10;
+        FrameParams clean0 = baseParams(0);
+        runFrame(gpu, makeRaw10(Pan(last * 12)), clean0, nullptr, f); // noiseless truth of the last frame
+        std::vector<int> truth;
+        for (int y = OUT_H / 3; y < OUT_H * 2 / 3; ++y)
+            for (int x = OUT_W / 3; x < OUT_W * 2 / 3; ++x) truth.push_back(f.luma(x, y));
+        auto errorVsTruth = [&](const P010& fr) {
+            double e = 0; size_t i = 0;
+            for (int y = OUT_H / 3; y < OUT_H * 2 / 3; ++y)
+                for (int x = OUT_W / 3; x < OUT_W * 2 / 3; ++x) { double d = fr.luma(x, y) - truth[i++]; e += d * d; }
+            return std::sqrt(e / static_cast<double>(truth.size()));
+        };
+        FrameParams single = baseParams(0);
+        runFrame(gpu, noisyPan(last), single, nullptr, f);
+        double noNr = errorVsTruth(f);
+        for (int alignOn = 0; alignOn < 2; ++alignOn) {
+            FrameParams tp = baseParams(0);
+            tp.cleanFlags[1] = 1;
+            tp.cleanFlags[3] = alignOn;
+            tp.noise[0] = 0.8f;
+            for (int fr = 0; fr <= last; ++fr) runFrame(gpu, noisyPan(fr), tp, nullptr, f);
+            double err = errorVsTruth(f);
+            if (alignOn) check(err < noNr * 0.75, "aligned temporal NR denoises a pan (RMS error vs truth)", err, noNr * 0.75);
+            else check(err < noNr * 1.3, "unaligned temporal NR does not ghost on a pan", err, noNr * 1.3);
+        }
     }
 
     // 6. Lens model with all-zero distortion is an identity.

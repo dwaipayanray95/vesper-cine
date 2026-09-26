@@ -138,6 +138,7 @@ class VesperNative {
   late final void Function(int) _setHotPixelFix;
   late final void Function(double) _setTemporalNr;
   late final void Function(double) _setChromaNr;
+  late final void Function(int) _setNrAlignment;
   late final void Function(int, int) _setKelvinTint;
   late final int Function(Pointer<Double>, Pointer<Double>) _lockWb;
   late final void Function(int) _setOis;
@@ -190,6 +191,7 @@ class VesperNative {
       _setLensCorrection = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_lens_correction');
       _setHotPixelFix = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_hot_pixel_fix');
       _setTemporalNr = _lib.lookupFunction<Void Function(Float), void Function(double)>('vesper_set_temporal_nr');
+      _setNrAlignment = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_nr_alignment');
       _setChromaNr = _lib.lookupFunction<Void Function(Float), void Function(double)>('vesper_set_chroma_nr');
       _setKelvinTint = _lib.lookupFunction<Void Function(Int32, Int32), void Function(int, int)>(
         'vesper_set_kelvin_tint',
@@ -276,6 +278,9 @@ class VesperNative {
 
   /// 0 = off, else max weight of the previous frame (0.5 low … 0.85 high).
   void setTemporalNr(double strength) => _loaded ? _setTemporalNr(strength) : null;
+
+  /// Motion-aligned temporal NR (tile alignment); keeps denoising while the camera moves.
+  void setNrAlignment(bool on) => _loaded ? _setNrAlignment(on ? 1 : 0) : null;
 
   /// 0 = off … 1 = full chroma smoothing (luma untouched).
   void setChromaNr(double strength) => _loaded ? _setChromaNr(strength) : null;
