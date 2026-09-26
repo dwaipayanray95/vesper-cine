@@ -31,8 +31,15 @@ struct FrameParams {
     float cfaOffsets[4];        // R sample centre (x, y), B sample centre (x, y), raw px within a quad
     float exposure[4];          // clipLinear, zebraThreshold, peakingThreshold, log2(clipLinear/0.18)
     float camToRec2020[12];     // 3 rows, each padded to vec4
+    float sensorMap[4];         // raw px -> pre-correction array px: array = raw * xy + zw
+    float arrayInfo[4];         // pre-correction array width, height
+    float lensK[4];             // k1, k2, k3, enable
+    float lensP[4];             // p1, p2
+    float lensF[4];             // fx, fy, cx, cy
+    float noise[4];             // temporal strength, chroma strength, noise S, noise O
+    int32_t cleanFlags[4];      // hot-pixel fix, temporal NR, history valid (set by the engine)
 };
-static_assert(sizeof(FrameParams) == 192, "FrameParams must match the std140 GLSL block");
+static_assert(sizeof(FrameParams) == 304, "FrameParams must match the std140 GLSL block");
 
 struct FrameInput {
     const uint8_t* raw = nullptr;   // packed RAW10 plane, valid for the duration of processFrame
@@ -89,6 +96,7 @@ private:
         VkFence fence = VK_NULL_HANDLE;
         VkSemaphore acquireSem = VK_NULL_HANDLE;
         VkDescriptorSet unpackSet = VK_NULL_HANDLE;
+        VkDescriptorSet cleanSet = VK_NULL_HANDLE;
         VkDescriptorSet renderSet = VK_NULL_HANDLE;
         bool vfReadbackPending = false;
         bool encoderHold = false; // guarded by encoderMutex_
@@ -128,13 +136,14 @@ private:
 
     VkCommandPool cmdPool_ = VK_NULL_HANDLE;
     VkDescriptorPool descPool_ = VK_NULL_HANDLE;
-    VkDescriptorSetLayout unpackLayout_ = VK_NULL_HANDLE, renderLayout_ = VK_NULL_HANDLE;
-    VkPipelineLayout unpackPipeLayout_ = VK_NULL_HANDLE, renderPipeLayout_ = VK_NULL_HANDLE;
-    VkPipeline unpackPipe_ = VK_NULL_HANDLE, renderPipe_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout unpackLayout_ = VK_NULL_HANDLE, cleanLayout_ = VK_NULL_HANDLE, renderLayout_ = VK_NULL_HANDLE;
+    VkPipelineLayout unpackPipeLayout_ = VK_NULL_HANDLE, cleanPipeLayout_ = VK_NULL_HANDLE, renderPipeLayout_ = VK_NULL_HANDLE;
+    VkPipeline unpackPipe_ = VK_NULL_HANDLE, cleanPipe_ = VK_NULL_HANDLE, renderPipe_ = VK_NULL_HANDLE;
     VkSampler sampler_ = VK_NULL_HANDLE;
 
     Slot slots_[kRingSize];
-    Image quadImage_, vfImage_;
+    Image quadImage_, cleanImage_, historyImage_, vfImage_;
+    bool historyValid_ = false;
     Geometry geom_;
     int nextSlot_ = 0;
 

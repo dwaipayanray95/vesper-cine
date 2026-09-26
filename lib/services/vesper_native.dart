@@ -39,6 +39,10 @@ class EngineStatus {
   final String stopReason;
   final int exposureNs; // actual sensor exposure of the latest frame
   final int iso; // actual sensor sensitivity of the latest frame
+  final bool awbAuto; // white balance currently follows Google's AWB
+  final int afState; // CONTROL_AF_STATE (2 = passive focused, 4 = focus locked)
+  final double focusDiopters;
+  final List<double> face; // largest face: x, y, w, h (output-normalised); w == 0 if none
 
   EngineStatus.fromJson(Map<String, dynamic> j)
     : streaming = j['streaming'] as bool,
@@ -55,7 +59,11 @@ class EngineStatus {
       codec = j['codec'] as String,
       stopReason = j['stopReason'] as String,
       exposureNs = j['exposureNs'] as int,
-      iso = j['iso'] as int;
+      iso = j['iso'] as int,
+      awbAuto = j['awbAuto'] as bool,
+      afState = j['afState'] as int,
+      focusDiopters = (j['focusDiopters'] as num).toDouble(),
+      face = (j['face'] as List).map((e) => (e as num).toDouble()).toList();
 }
 
 class RawMode {
@@ -122,6 +130,14 @@ class VesperNative {
   late final int Function(Pointer<Utf8>, int) _capabilities;
   late final int Function(int, Pointer<Int64>, Pointer<Int32>) _autoExpose;
   late final void Function() _closeCamera;
+  late final void Function(int) _setAutoWb;
+  late final void Function(int) _setFocusMode;
+  late final void Function(double, double) _setFocusPoint;
+  late final void Function(int) _setFaceDetection;
+  late final void Function(int) _setLensCorrection;
+  late final void Function(int) _setHotPixelFix;
+  late final void Function(double) _setTemporalNr;
+  late final void Function(double) _setChromaNr;
   late final void Function(int, int) _setKelvinTint;
   late final int Function(Pointer<Double>, Pointer<Double>) _lockWb;
   late final void Function(int) _setOis;
@@ -165,6 +181,16 @@ class VesperNative {
             int Function(int, Pointer<Int64>, Pointer<Int32>)
           >('vesper_auto_expose');
       _closeCamera = _lib.lookupFunction<Void Function(), void Function()>('vesper_close_camera');
+      _setAutoWb = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_auto_white_balance');
+      _setFocusMode = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_focus_mode');
+      _setFocusPoint = _lib.lookupFunction<Void Function(Float, Float), void Function(double, double)>(
+        'vesper_set_focus_point',
+      );
+      _setFaceDetection = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_face_detection');
+      _setLensCorrection = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_lens_correction');
+      _setHotPixelFix = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_hot_pixel_fix');
+      _setTemporalNr = _lib.lookupFunction<Void Function(Float), void Function(double)>('vesper_set_temporal_nr');
+      _setChromaNr = _lib.lookupFunction<Void Function(Float), void Function(double)>('vesper_set_chroma_nr');
       _setKelvinTint = _lib.lookupFunction<Void Function(Int32, Int32), void Function(int, int)>(
         'vesper_set_kelvin_tint',
       );
@@ -235,6 +261,24 @@ class VesperNative {
 
   /// Shutter as a speed; independent of frame rate (clamped to the frame duration).
   void setExposureTime(int exposureNs, int iso) => _loaded ? _setExposureTime(exposureNs, iso) : null;
+
+  /// true: follow Google's AWB (HAL neutral point); false: manual Kelvin/tint.
+  void setAutoWhiteBalance(bool on) => _loaded ? _setAutoWb(on ? 1 : 0) : null;
+
+  /// Continuous AF (PDAF + laser) or manual. Leaving continuous locks focus where it is.
+  void setContinuousFocus(bool on) => _loaded ? _setFocusMode(on ? 1 : 0) : null;
+
+  /// Tap-to-focus at an upright viewfinder point (0..1); enables continuous AF on that region.
+  void setFocusPoint(double x, double y) => _loaded ? _setFocusPoint(x, y) : null;
+  void setFaceDetection(bool on) => _loaded ? _setFaceDetection(on ? 1 : 0) : null;
+  void setLensCorrection(bool on) => _loaded ? _setLensCorrection(on ? 1 : 0) : null;
+  void setHotPixelFix(bool on) => _loaded ? _setHotPixelFix(on ? 1 : 0) : null;
+
+  /// 0 = off, else max weight of the previous frame (0.5 low … 0.85 high).
+  void setTemporalNr(double strength) => _loaded ? _setTemporalNr(strength) : null;
+
+  /// 0 = off … 1 = full chroma smoothing (luma untouched).
+  void setChromaNr(double strength) => _loaded ? _setChromaNr(strength) : null;
   void closeCamera() => _loaded ? _closeCamera() : null;
 
   CameraCapabilities? capabilities() {

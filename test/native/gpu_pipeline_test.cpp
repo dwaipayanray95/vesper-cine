@@ -91,6 +91,9 @@ static FrameParams baseParams(int rotation) {
     p.exposure[0] = k; p.exposure[1] = 0.95f; p.exposure[2] = 0.06f; p.exposure[3] = std::log2(k / 0.18f);
     // Identity camera->Rec.2020 (x k) so expected values are easy to derive.
     p.camToRec2020[0] = k; p.camToRec2020[5] = k; p.camToRec2020[10] = k;
+    p.sensorMap[0] = 1; p.sensorMap[1] = 1;
+    p.arrayInfo[0] = W; p.arrayInfo[1] = H;
+    p.noise[2] = 0.0f; p.noise[3] = 3.3e-5f; // matches makeNoisyRaw10 (uniform +-1% of clip)
     return p;
 }
 
@@ -101,6 +104,24 @@ struct P010 {
     int cb(int x, int yy) const { return uv[(yy / 2) * OUT_W + (x / 2) * 2] >> 6; }
     int cr(int x, int yy) const { return uv[(yy / 2) * OUT_W + (x / 2) * 2 + 1] >> 6; }
 };
+
+// Deterministic per-pixel noise so temporal NR has something to average.
+static std::vector<uint8_t> makeNoisyRaw10(const Scene& scene, unsigned seed) {
+    struct Noisy : Scene {
+        const Scene& base; unsigned seed;
+        Noisy(const Scene& b, unsigned s) : base(b), seed(s) {}
+        Vec3 at(int x, int y) const override {
+            Vec3 v = base.at(x, y);
+            unsigned h = (x * 73856093u) ^ (y * 19349663u) ^ (seed * 83492791u);
+            h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
+            float n = ((h & 0xffff) / 65535.0f - 0.5f) * 0.02f; // +-1% of clip
+            return {v[0] + n, v[1] + n, v[2] + n};
+        }
+    };
+    return makeRaw10(Noisy(scene, seed));
+}
+
+static double regionStdDevY(const struct P010& f, int x0, int y0, int w, int h);
 
 static int yCode(double logv) { return static_cast<int>(std::lround(64 + 876 * logv)); }
 
@@ -134,6 +155,14 @@ static bool runFrame(VulkanEngine& gpu, const std::vector<uint8_t>& raw, const F
     out.y = reinterpret_cast<const uint16_t*>(copy.data());
     out.uv = out.y + OUT_W * OUT_H;
     return true;
+}
+
+static double regionStdDevY(const P010& f, int x0, int y0, int w, int h) {
+    double sum = 0, sq = 0;
+    for (int y = y0; y < y0 + h; ++y)
+        for (int x = x0; x < x0 + w; ++x) { double v = f.luma(x, y); sum += v; sq += v * v; }
+    double n = static_cast<double>(w) * h, mean = sum / n;
+    return std::sqrt(std::max(0.0, sq / n - mean * mean));
 }
 
 int main() {
@@ -172,7 +201,62 @@ int main() {
     int shadedY = f.luma(OUT_W / 2, OUT_H * 3 / 4);
     check(std::abs(shadedY - yCode(appleLog(0.27))) <= 2, "lens shading gain applied", shadedY, yCode(appleLog(0.27)));
 
-    // 4. Ring: many frames in a row must all complete (fence/slot reuse).
+    // 4. Hot pixel: one stuck green photosite in the grey area.
+    std::vector<uint8_t> hot = raw;
+    {
+        const int hx = W / 2, hy = H * 3 / 4; // even row, even col = G on GRBG
+        int g = hx / 4, i = hx % 4;
+        hot[hy * STRIDE + g * 5 + i] = 0xFF;
+        hot[hy * STRIDE + g * 5 + 4] |= static_cast<uint8_t>(3 << (2 * i));
+        auto peak = [&](const P010& fr) {
+            int m = 0;
+            for (int dy = -2; dy <= 2; ++dy)
+                for (int dx = -2; dx <= 2; ++dx) m = std::max(m, fr.luma(hx * OUT_W / W + dx, hy * OUT_H / H + dy));
+            return m;
+        };
+        FrameParams hp = baseParams(0);
+        runFrame(gpu, hot, hp, nullptr, f);
+        int unfixed = peak(f);
+        hp.cleanFlags[0] = 1;
+        runFrame(gpu, hot, hp, nullptr, f);
+        int fixedPeak = peak(f);
+        check(unfixed > greyY + 40, "hot pixel visible without the fix", unfixed, greyY + 40);
+        check(fixedPeak <= greyY + 4, "hot pixel removed by the fix", fixedPeak, greyY + 4);
+    }
+
+    // 5. Temporal NR lowers noise on a static scene.
+    {
+        FrameParams tp = baseParams(0);
+        runFrame(gpu, makeNoisyRaw10(TestScene(), 1), tp, nullptr, f);
+        double noisy = regionStdDevY(f, OUT_W / 4, OUT_H / 2, 64, 64);
+        tp.cleanFlags[1] = 1;
+        tp.noise[0] = 0.8f;
+        for (unsigned i = 2; i < 14; ++i) runFrame(gpu, makeNoisyRaw10(TestScene(), i), tp, nullptr, f);
+        double denoised = regionStdDevY(f, OUT_W / 4, OUT_H / 2, 64, 64);
+        check(denoised < noisy * 0.6, "temporal NR reduces noise (std dev)", denoised, noisy * 0.6);
+        // Motion: a region that changes (grey -> blown highlight) must not ghost.
+        struct Flash : Scene { Vec3 at(int, int) const override { return {1, 1, 1}; } };
+        runFrame(gpu, makeRaw10(Flash()), tp, nullptr, f);
+        int flashY = f.luma(OUT_W / 2, OUT_H * 3 / 4);
+        check(std::abs(flashY - yCode(appleLog(8.0))) <= 4, "temporal NR does not ghost on change", flashY, yCode(appleLog(8.0)));
+        // Chroma NR keeps luma level.
+        FrameParams cp = baseParams(0);
+        cp.noise[1] = 1.0f;
+        runFrame(gpu, raw, cp, nullptr, f);
+        int cY = f.luma(OUT_W / 2, OUT_H * 3 / 4);
+        check(std::abs(cY - greyY) <= 2, "chroma NR leaves luma alone", cY, greyY);
+    }
+
+    // 6. Lens model with all-zero distortion is an identity.
+    {
+        FrameParams lp = baseParams(0);
+        lp.lensK[3] = 1; lp.lensF[0] = 1000; lp.lensF[1] = 1000; lp.lensF[2] = W / 2.0f; lp.lensF[3] = H / 2.0f;
+        runFrame(gpu, raw, lp, nullptr, f);
+        int lY = f.luma(OUT_W / 16, OUT_H / 16);
+        check(std::abs(lY - yCode(appleLog(8.0))) <= 3, "zero distortion = identity", lY, yCode(appleLog(8.0)));
+    }
+
+    // 7. Ring: many frames in a row must all complete (fence/slot reuse).
     for (int i = 0; i < 12; ++i) {
         if (!runFrame(gpu, raw, baseParams(0), nullptr, f)) { std::puts("FAIL ring reuse"); ++failures; break; }
     }

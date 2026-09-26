@@ -64,6 +64,19 @@ vec2 rawPosFor(ivec2 o) {
     return P.cropRect.xy + u * P.cropRect.zw / ud;
 }
 
+// Undistorted (ideal) raw position -> where that ray actually landed on the
+// sensor, using the Camera2 lens model (ACAMERA_LENS_DISTORTION: Brown-Conrady
+// radial k1..k3 + tangential p1, p2 about the calibrated optical centre).
+vec2 distort(vec2 rawPos) {
+    if (P.lensK.w == 0.0) return rawPos;
+    vec2 p = (rawToArray(rawPos) - P.lensF.zw) / P.lensF.xy;
+    float r2 = dot(p, p);
+    float radial = 1.0 + r2 * (P.lensK.x + r2 * (P.lensK.y + r2 * P.lensK.z));
+    vec2 d = p * radial + vec2(2.0 * P.lensP.x * p.x * p.y + P.lensP.y * (r2 + 2.0 * p.x * p.x),
+                               P.lensP.x * (r2 + 2.0 * p.y * p.y) + 2.0 * P.lensP.y * p.x * p.y);
+    return arrayToRaw(d * P.lensF.xy + P.lensF.zw);
+}
+
 // Quad texel q holds a channel sampled at raw position 2q + offset.
 vec2 quadUv(vec2 rawPos, vec2 offset) {
     return ((rawPos - offset) * 0.5 + 0.5) / vec2(P.quadInfo.xy);
@@ -89,7 +102,7 @@ void main() {
     float yCode[4];
     for (int k = 0; k < 4; ++k) {
         ivec2 o = block * 2 + ivec2(k & 1, k >> 1);
-        vec2 rawPos = rawPosFor(o);
+        vec2 rawPos = distort(rawPosFor(o));
         vec4 cam = sampleCamera(rawPos);
         vec3 lin = toRec2020(cam.rgb);
         vec3 logv = vec3(appleLog(lin.r), appleLog(lin.g), appleLog(lin.b));

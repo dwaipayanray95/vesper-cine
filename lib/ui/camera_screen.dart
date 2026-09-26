@@ -123,6 +123,15 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   int _tint = 0;
   double _focus = 0;
   bool _ois = true;
+  bool _awbAuto = false;
+  bool _afContinuous = false;
+  bool _faceDetect = false;
+  bool _lensCorrection = true;
+  bool _hotPixelFix = true;
+  double _temporalNr = 0; // 0 off, 0.5 low, 0.7 medium, 0.85 high
+  double _chromaNr = 0; // 0 off, 0.5 low, 1 high
+  Offset? _focusMark; // last tap-to-focus point (normalised), shown briefly
+  Timer? _focusMarkTimer;
   int _codec = 0; // 0 HEVC, 1 AV1
 
   int? _textureId;
@@ -189,8 +198,15 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     _engine.setCropMode(_cropMode);
     _engine.setMonitoringMode(_monitoringMode);
     _engine.setKelvinTint(_kelvin, _tint);
+    _engine.setAutoWhiteBalance(_awbAuto);
     _engine.setOis(_ois);
     _engine.setFocus(_focus);
+    _engine.setContinuousFocus(_afContinuous);
+    _engine.setFaceDetection(_faceDetect);
+    _engine.setLensCorrection(_lensCorrection);
+    _engine.setHotPixelFix(_hotPixelFix);
+    _engine.setTemporalNr(_temporalNr);
+    _engine.setChromaNr(_chromaNr);
     _engine.setFrameRate(_fps);
     _applyShutter();
 
@@ -253,7 +269,14 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   void _onPoll() {
     final s = _engine.status();
     if (s == null || !mounted) return;
-    setState(() => _status = s);
+    setState(() {
+      _status = s;
+      if (s.awbAuto) {
+        _kelvin = s.kelvin.round();
+        _tint = s.tint.round();
+      }
+      if (_afContinuous) _focus = s.focusDiopters;
+    });
     // The engine stops on its own on thermal/storage limits.
     if (_recording && !_stopping && !s.recording && s.stopReason.isNotEmpty) {
       _finishRecording(s.stopReason);
@@ -483,42 +506,64 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                     letterSpacing: 1.5,
                   ),
                 ),
-                WheelSelector<int>(
-                  values: kelvins,
-                  label: (k) => '${k}K',
-                  initialIndex: kelvins.indexOf((_kelvin / 100).round() * 100).clamp(0, kelvins.length - 1),
-                  onChanged: (k) {
-                    setState(() => _kelvin = k);
-                    _engine.setKelvinTint(_kelvin, _tint);
+                const SizedBox(height: 8),
+                Segmented(
+                  options: const ['MANUAL', 'AUTO (GOOGLE AWB)'],
+                  selected: _awbAuto ? 1 : 0,
+                  onSelected: (i) {
+                    setState(() => _awbAuto = i == 1);
+                    setSheet(() {});
+                    _engine.setAutoWhiteBalance(_awbAuto);
+                    // Leaving AUTO keeps the last Google estimate as the manual setting.
+                    if (!_awbAuto) _engine.setKelvinTint(_kelvin, _tint);
                   },
                 ),
-                Row(
-                  children: [
-                    const Text(
-                      'G',
-                      style: TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold),
+                if (_awbAuto)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 18),
+                    child: Text(
+                      "Following Google's AWB. It never alters the RAW — switch to MANUAL to lock the current value.",
+                      style: TextStyle(color: Colors.white54, fontSize: 11),
                     ),
-                    Expanded(
-                      child: Slider(
-                        value: _tint.toDouble().clamp(-50, 50),
-                        min: -50,
-                        max: 50,
-                        divisions: 100,
-                        activeColor: Colors.amber,
-                        label: 'TINT $_tint',
-                        onChanged: (t) {
-                          setState(() => _tint = t.round());
-                          setSheet(() {});
-                          _engine.setKelvinTint(_kelvin, _tint);
-                        },
+                  ),
+                if (!_awbAuto)
+                  WheelSelector<int>(
+                    values: kelvins,
+                    label: (k) => '${k}K',
+                    initialIndex: kelvins.indexOf((_kelvin / 100).round() * 100).clamp(0, kelvins.length - 1),
+                    onChanged: (k) {
+                      setState(() => _kelvin = k);
+                      _engine.setKelvinTint(_kelvin, _tint);
+                    },
+                  ),
+                if (!_awbAuto)
+                  Row(
+                    children: [
+                      const Text(
+                        'G',
+                        style: TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold),
                       ),
-                    ),
-                    const Text(
-                      'M',
-                      style: TextStyle(color: Colors.pinkAccent, fontWeight: FontWeight.bold),
-                    ),
-                  ],
-                ),
+                      Expanded(
+                        child: Slider(
+                          value: _tint.toDouble().clamp(-50, 50),
+                          min: -50,
+                          max: 50,
+                          divisions: 100,
+                          activeColor: Colors.amber,
+                          label: 'TINT $_tint',
+                          onChanged: (t) {
+                            setState(() => _tint = t.round());
+                            setSheet(() {});
+                            _engine.setKelvinTint(_kelvin, _tint);
+                          },
+                        ),
+                      ),
+                      const Text(
+                        'M',
+                        style: TextStyle(color: Colors.pinkAccent, fontWeight: FontWeight.bold),
+                      ),
+                    ],
+                  ),
               ],
             ),
           ),
@@ -530,18 +575,165 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   void _pickFocus() {
     final maxD = _caps?.minFocusDiopters ?? 0;
     if (maxD <= 0) return;
-    // Slider runs on sqrt(diopters) so the far range isn't crammed into a sliver.
-    showSliderSheet(
+    showModalBottomSheet(
       context: context,
-      title: 'FOCUS',
-      min: 0,
-      max: 1,
-      value: math.sqrt((_focus / maxD).clamp(0.0, 1.0)),
-      label: (v) => _distanceLabel(v * v * maxD),
-      onChanged: (v) {
-        setState(() => _focus = v * v * maxD);
-        _engine.setFocus(_focus);
-      },
+      backgroundColor: const Color(0xEE101215),
+      barrierColor: Colors.transparent,
+      builder: (_) => StatefulBuilder(
+        builder: (ctx, setSheet) => SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  'FOCUS  ${_distanceLabel(_focus)}   ·   tap the viewfinder to focus there',
+                  style: const TextStyle(color: Colors.white54, fontSize: 11, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Segmented(
+                      options: const ['MANUAL / LOCK', 'CONTINUOUS AF'],
+                      selected: _afContinuous ? 1 : 0,
+                      onSelected: (i) {
+                        setState(() => _afContinuous = i == 1);
+                        setSheet(() {});
+                        _engine.setContinuousFocus(_afContinuous);
+                      },
+                    ),
+                    const SizedBox(width: 12),
+                    Segmented(
+                      options: const ['FACES'],
+                      selected: _faceDetect ? 0 : -1,
+                      onSelected: (_) {
+                        setState(() => _faceDetect = !_faceDetect);
+                        setSheet(() {});
+                        _engine.setFaceDetection(_faceDetect);
+                      },
+                    ),
+                  ],
+                ),
+                if (!_afContinuous)
+                  // Slider runs on sqrt(diopters) so the far range isn't crammed into a sliver.
+                  Slider(
+                    value: math.sqrt((_focus / maxD).clamp(0.0, 1.0)),
+                    activeColor: Colors.amber,
+                    onChanged: (v) {
+                      setState(() => _focus = v * v * maxD);
+                      setSheet(() {});
+                      _engine.setFocus(_focus);
+                    },
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _tapToFocus(Offset normalised) {
+    if (!_streaming) return;
+    _engine.setFocusPoint(normalised.dx, normalised.dy);
+    _focusMarkTimer?.cancel();
+    setState(() {
+      _afContinuous = true;
+      _focusMark = normalised;
+    });
+    _focusMarkTimer = Timer(const Duration(milliseconds: 1500), () {
+      if (mounted) setState(() => _focusMark = null);
+    });
+  }
+
+  void _pickProcessing() {
+    Widget row(String label, Widget control) => Padding(
+      padding: const EdgeInsets.symmetric(vertical: 5),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 170,
+            child: Text(label, style: const TextStyle(color: Colors.white70, fontSize: 12)),
+          ),
+          control,
+        ],
+      ),
+    );
+    const nrLevels = [0.0, 0.5, 0.7, 0.85];
+    const chromaLevels = [0.0, 0.5, 1.0];
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xEE101215),
+      barrierColor: Colors.transparent,
+      builder: (_) => StatefulBuilder(
+        builder: (ctx, setSheet) {
+          void update(VoidCallback f) {
+            setState(f);
+            setSheet(() {});
+          }
+
+          return SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text(
+                    'PROCESSING (applied to recording and viewfinder)',
+                    style: TextStyle(color: Colors.white54, fontSize: 11, fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 8),
+                  row(
+                    'Lens distortion correction',
+                    Segmented(
+                      options: const ['OFF', 'ON'],
+                      selected: _lensCorrection ? 1 : 0,
+                      onSelected: (i) {
+                        update(() => _lensCorrection = i == 1);
+                        _engine.setLensCorrection(_lensCorrection);
+                      },
+                    ),
+                  ),
+                  row(
+                    'Hot / dead pixel repair',
+                    Segmented(
+                      options: const ['OFF', 'ON'],
+                      selected: _hotPixelFix ? 1 : 0,
+                      onSelected: (i) {
+                        update(() => _hotPixelFix = i == 1);
+                        _engine.setHotPixelFix(_hotPixelFix);
+                      },
+                    ),
+                  ),
+                  row(
+                    'Temporal noise reduction',
+                    Segmented(
+                      options: const ['OFF', 'LOW', 'MED', 'HIGH'],
+                      selected: nrLevels.indexOf(_temporalNr),
+                      onSelected: (i) {
+                        update(() => _temporalNr = nrLevels[i]);
+                        _engine.setTemporalNr(_temporalNr);
+                      },
+                    ),
+                  ),
+                  row(
+                    'Chroma noise reduction',
+                    Segmented(
+                      options: const ['OFF', 'LOW', 'HIGH'],
+                      selected: chromaLevels.indexOf(_chromaNr),
+                      onSelected: (i) {
+                        update(() => _chromaNr = chromaLevels[i]);
+                        _engine.setChromaNr(_chromaNr);
+                      },
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
     );
   }
 
@@ -550,7 +742,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       : d > 1
       ? '${(100 / d).round()}cm'
       : '${(1 / d).toStringAsFixed(1)}m';
-  String get _focusLabel => _distanceLabel(_focus);
+  String get _focusLabel => _afContinuous ? 'AF-C' : _distanceLabel(_focus);
 
   // One-shot auto exposure: two metering passes (the second one refines very
   // over/under-exposed starts). Tap keeps the shutter, long-press keeps ISO.
@@ -606,7 +798,47 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                   ),
                 ),
                 child: _textureId != null
-                    ? ClipRect(child: Texture(textureId: _textureId!))
+                    ? LayoutBuilder(
+                        builder: (ctx, box) => GestureDetector(
+                          onTapUp: (d) => _tapToFocus(
+                            Offset(d.localPosition.dx / box.maxWidth, d.localPosition.dy / box.maxHeight),
+                          ),
+                          child: Stack(
+                            children: [
+                              Positioned.fill(
+                                child: ClipRect(child: Texture(textureId: _textureId!)),
+                              ),
+                              if (_faceDetect && (s?.face[2] ?? 0) > 0)
+                                Positioned(
+                                  left: s!.face[0] * box.maxWidth,
+                                  top: s.face[1] * box.maxHeight,
+                                  width: s.face[2] * box.maxWidth,
+                                  height: s.face[3] * box.maxHeight,
+                                  child: Container(
+                                    decoration: BoxDecoration(border: Border.all(color: Colors.amber, width: 1.5)),
+                                  ),
+                                ),
+                              if (_focusMark != null)
+                                Positioned(
+                                  left: _focusMark!.dx * box.maxWidth - 30,
+                                  top: _focusMark!.dy * box.maxHeight - 30,
+                                  child: Container(
+                                    width: 60,
+                                    height: 60,
+                                    decoration: BoxDecoration(
+                                      border: Border.all(
+                                        color: (s?.afState ?? 0) == 2 || (s?.afState ?? 0) == 4
+                                            ? Colors.greenAccent
+                                            : Colors.white,
+                                        width: 1.5,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                      )
                     : Center(
                         child: Text(
                           _statusMessage,
@@ -649,6 +881,8 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                       _chip(_cropMode == 0 ? '16:9' : 'OPEN GATE 4:3', onTap: _toggleCrop),
                       const SizedBox(width: 8),
                       _chip(_monitoringLabels[_monitoringMode], onTap: _cycleMonitoring, active: _monitoringMode != 0),
+                      const SizedBox(width: 8),
+                      _chip('PROCESSING', onTap: _pickProcessing),
                       const SizedBox(width: 8),
                       _chip(
                         _codec == 0 ? 'HEVC 10-BIT' : 'AV1 10-BIT',
@@ -724,7 +958,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                     onTap: _pickShutter,
                   ),
                   _pill('ISO', '$_iso', onTap: _pickIso),
-                  _pill('WB', '${_kelvin}K', subtitle: 'TINT ${_tint > 0 ? '+' : ''}$_tint', onTap: _pickWhiteBalance),
+                  _pill('WB', '${_kelvin}K', subtitle: _awbAuto ? 'GOOGLE AWB' : 'TINT ${_tint > 0 ? '+' : ''}$_tint', onTap: _pickWhiteBalance),
                   GestureDetector(
                     onTap: _streaming ? () => _autoExpose(keepShutter: true) : null,
                     onLongPress: _streaming ? () => _autoExpose(keepShutter: false) : null,

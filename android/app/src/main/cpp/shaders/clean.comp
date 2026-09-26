@@ -1,0 +1,90 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Pass 1b: quad image cleanup, all optional (see FrameParams.cleanFlags/noise).
+//
+//  1. Hot/dead pixel repair: a channel that sits outside the range of its 8
+//     same-colour neighbours (quad texels are 2 raw px apart, i.e. the same
+//     CFA colour) by more than 4 sigma is clamped back into that range.
+//  2. Chroma noise reduction: luma is untouched; chroma is replaced by a
+//     luma-guided (cross-bilateral) 5x5 average, so edges keep their colour.
+//  3. Temporal noise reduction: motion-adaptive recursive filter against the
+//     previous cleaned frame. Where the difference is within the sensor's
+//     noise (SENSOR_NOISE_PROFILE) the pixel is averaged over time; where it
+//     is larger (motion) the current frame wins, so moving subjects never smear.
+// Noise model: raw variance = S * x + O (x normalised raw), then scaled by
+// each channel's white-balance gain. Luma = (R + Gr + Gb + B) / 4.
+layout(local_size_x = 16, local_size_y = 8) in;
+
+#include "frame_params.glsl"
+
+layout(set = 0, binding = 1, rgba16f) uniform readonly image2D quadIn;
+layout(set = 0, binding = 2, rgba16f) uniform readonly image2D history;
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D quadOut;
+
+// Per-channel noise variance of a white-balanced quad value.
+vec3 channelVar(vec3 c) {
+    vec3 g = P.wbGains.rgb;
+    return g * g * (P.noise.z * max(c, vec3(0.0)) / g + P.noise.w);
+}
+float luma(vec3 c) { return dot(c, vec3(0.25, 0.5, 0.25)); }
+// The G of a quad is already the mean of two photosites (half the variance).
+float lumaSigma(vec3 c) {
+    vec3 v = channelVar(c);
+    return sqrt(0.0625 * v.r + 0.125 * v.g + 0.0625 * v.b + 1e-12);
+}
+
+void main() {
+    ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = P.quadInfo.xy;
+    if (q.x >= size.x || q.y >= size.y) return;
+
+    vec4 c = imageLoad(quadIn, q);
+    vec3 rgb = c.rgb;
+
+    // A stuck photosite usually reads as saturated, so this is not gated on the
+    // clip flag: genuine highlights have bright neighbours and never trigger it.
+    if (P.cleanFlags.x != 0) {
+        vec3 lo = vec3(1e9), hi = vec3(-1e9);
+        for (int dy = -1; dy <= 1; ++dy)
+            for (int dx = -1; dx <= 1; ++dx) {
+                if (dx == 0 && dy == 0) continue;
+                vec3 n = imageLoad(quadIn, clamp(q + ivec2(dx, dy), ivec2(0), size - 1)).rgb;
+                lo = min(lo, n);
+                hi = max(hi, n);
+            }
+        vec3 t = 4.0 * sqrt(channelVar(rgb) * vec3(1.0, 0.5, 1.0) + 1e-12);
+        bvec3 bad = bvec3(vec3(greaterThan(rgb, hi + t)) + vec3(lessThan(rgb, lo - t)));
+        if (any(bad)) {
+            rgb = mix(rgb, clamp(rgb, lo, hi), vec3(bad));
+            c.a = 0.0; // the repaired value is no longer a clipped highlight
+        }
+    }
+
+    if (P.noise.y > 0.0) {
+        float y0 = luma(rgb);
+        float s = 2.0 * lumaSigma(rgb) + 1e-4;
+        vec3 chromaSum = vec3(0.0);
+        float wSum = 0.0;
+        for (int dy = -2; dy <= 2; ++dy)
+            for (int dx = -2; dx <= 2; ++dx) {
+                vec3 n = imageLoad(quadIn, clamp(q + ivec2(dx, dy), ivec2(0), size - 1)).rgb;
+                float yn = luma(n);
+                float w = exp(-((yn - y0) * (yn - y0)) / (2.0 * s * s));
+                chromaSum += w * (n - yn);
+                wSum += w;
+            }
+        vec3 chroma = mix(rgb - y0, chromaSum / wSum, P.noise.y);
+        rgb = y0 + chroma;
+    }
+
+    if (P.cleanFlags.y != 0 && P.cleanFlags.z != 0) {
+        vec3 h = imageLoad(history, q).rgb;
+        // Luma change measured in units of expected noise: noise -> blend, motion -> keep current.
+        float d = abs(luma(rgb) - luma(h));
+        float k = d / (3.0 * lumaSigma(rgb) + 1e-6);
+        float w = P.noise.x * exp(-k * k);
+        rgb = mix(rgb, h, w);
+    }
+
+    imageStore(quadOut, q, vec4(rgb, c.a));
+}

@@ -16,7 +16,12 @@ Architecture, threading and colour maths are described in [`docs/ARCHITECTURE.md
 | Swapchain viewfinder (no CPU readback), 3-slot GPU ring | Implemented |
 | Recording: HEVC Main10 / AV1 Main10 (P010 input) + AAC, MP4 in `Movies/Vesper Cine` | Implemented |
 | Thermal stop (`SEVERE`), low-storage stop, dropped-frame counter | Implemented |
-| Manual focus stops, OIS toggle | Implemented |
+| Hardware AF (PDAF + laser via HAL): continuous, tap-to-focus, lock; face detection | Implemented |
+| Google AWB (HAL neutral point, followed live) or manual Kelvin/tint | Implemented |
+| Lens distortion correction (Camera2 lens model), hot/dead pixel repair | Implemented, GPU-tested on host |
+| Temporal NR (motion-adaptive, sensor noise profile) and chroma NR — optional | Implemented, GPU-tested on host |
+| Full-range shutter (angle or speed), ISO, fps pickers; one-shot auto-exposure assist | Implemented |
+| OIS toggle | Implemented |
 | True UHD (full-res demosaic pass) | Planned. UHD output currently upsamples the ~2040 px quad image. |
 | Gyroflow IMU log, external SSD | Planned |
 

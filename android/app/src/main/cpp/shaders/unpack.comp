@@ -37,7 +37,8 @@ int cfaSite(int px, int py) {
 vec4 shadingAt(vec2 rawPos) {
     int cols = P.quadInfo.z, rows = P.quadInfo.w;
     if (cols < 2 || rows < 2) return vec4(1.0);
-    vec2 g = clamp(rawPos / vec2(P.rawInfo.xy) * vec2(cols - 1, rows - 1), vec2(0.0), vec2(cols - 1, rows - 1));
+    // The map spans the whole pre-correction array; the 16:9 readout is a crop of it.
+    vec2 g = clamp(rawToArray(rawPos) / P.arrayInfo.xy * vec2(cols - 1, rows - 1), vec2(0.0), vec2(cols - 1, rows - 1));
     ivec2 i0 = min(ivec2(g), ivec2(cols - 2, rows - 2));
     vec2 f = g - vec2(i0);
     vec4 s[4];

@@ -31,6 +31,11 @@ struct Settings {
     float headroomStops = 5.5f; // stops of highlight headroom above 18% grey -> clip
     double shutterAngle = 180.0;
     int64_t fixedExposureNs = 0; // > 0: shutter set as a speed, not an angle
+    bool awbAuto = false;        // follow the HAL's (Google) AWB neutral point
+    bool lensCorrection = true;  // undo lens distortion like the stock camera
+    bool hotPixelFix = true;
+    float temporalNr = 0.0f;     // 0 = off, else max blend weight toward history (0.5..0.85)
+    float chromaNr = 0.0f;       // 0 = off, 1 = full chroma smoothing
     int32_t iso = 100;
     ColorState color;
 };
@@ -55,6 +60,44 @@ struct MeterStats {
     bool valid = false;
 };
 MeterStats gMeter;
+
+// Geometry of the last rendered frame, used to map taps and faces (gStateMutex).
+struct FrameGeometry {
+    float crop[4] = {0, 0, 1, 1};   // raw px
+    float sensorMap[4] = {1, 1, 0, 0};
+    int rot = 0;
+    float faceNorm[4] = {0, 0, 0, 0}; // largest face in output-normalised coords (w == 0: none)
+    float focusDiopters = 0;
+    int afState = 0;
+};
+FrameGeometry gGeom;
+Vec3 gAwbNeutral{0, 0, 0};
+
+// Output-normalised (upright) <-> crop-normalised (unrotated raw), mirroring rawPosFor() in render.comp.
+void outputToCrop(int rot, float ox, float oy, float& u, float& v) {
+    if (rot == 90)       { u = oy;     v = 1 - ox; }
+    else if (rot == 180) { u = 1 - ox; v = 1 - oy; }
+    else if (rot == 270) { u = 1 - oy; v = ox; }
+    else                 { u = ox;     v = oy; }
+}
+void cropToOutput(int rot, float u, float v, float& ox, float& oy) {
+    if (rot == 90)       { ox = 1 - v; oy = u; }
+    else if (rot == 180) { ox = 1 - u; oy = 1 - v; }
+    else if (rot == 270) { ox = v;     oy = 1 - u; }
+    else                 { ox = u;     oy = v; }
+}
+
+// Same lens model as distort() in render.comp, in raw px.
+void distortRaw(const SensorInfo& s, const float map[4], float& x, float& y) {
+    float ax = x * map[0] + map[2], ay = y * map[1] + map[3];
+    float px = (ax - s.intrinsics[2]) / s.intrinsics[0], py = (ay - s.intrinsics[3]) / s.intrinsics[1];
+    float r2 = px * px + py * py;
+    float radial = 1 + r2 * (s.distortion[0] + r2 * (s.distortion[1] + r2 * s.distortion[2]));
+    float dx = px * radial + 2 * s.distortion[3] * px * py + s.distortion[4] * (r2 + 2 * px * px);
+    float dy = py * radial + s.distortion[3] * (r2 + 2 * py * py) + 2 * s.distortion[4] * px * py;
+    x = (dx * s.intrinsics[0] + s.intrinsics[2] - map[2]) / map[0];
+    y = (dy * s.intrinsics[1] + s.intrinsics[3] - map[3]) / map[1];
+}
 bool gHaveCentreSample = false;
 
 // Frame statistics, camera thread only (published under gStateMutex).
@@ -213,10 +256,87 @@ void onFrame(const RawFrame& f) {
     double aspect = (rot == 90 || rot == 270) ? static_cast<double>(outH) / outW : static_cast<double>(outW) / outH;
     double cw = f.width, ch = f.width / aspect;
     if (ch > f.height) { ch = f.height; cw = f.height * aspect; }
-    p.cropRect[0] = static_cast<float>(std::floor((f.width - cw) / 4) * 2);
-    p.cropRect[1] = static_cast<float>(std::floor((f.height - ch) / 4) * 2);
+    // Raw stream -> pre-correction array: binned readouts scale uniformly;
+    // the 16:9 readout is additionally a centred vertical crop of the array.
+    const float arrayW = info.preWidth > 0 ? static_cast<float>(info.preWidth) : static_cast<float>(f.width);
+    const float arrayH = info.preHeight > 0 ? static_cast<float>(info.preHeight) : static_cast<float>(f.height);
+    const float sx = arrayW / f.width;
+    p.sensorMap[0] = sx;
+    p.sensorMap[1] = sx;
+    p.sensorMap[2] = 0.0f;
+    p.sensorMap[3] = std::max(0.0f, (arrayH - f.height * sx) * 0.5f);
+    p.arrayInfo[0] = arrayW;
+    p.arrayInfo[1] = arrayH;
+
+    // Lens distortion: pull the crop in just enough that the corrected frame
+    // never samples outside the sensor (barrel correction pushes corners out).
+    double shrink = 1.0;
+    if (s.lensCorrection && info.hasDistortion) {
+        for (; shrink < 1.25; shrink += 0.005) {
+            bool inside = true;
+            double hw = cw / (2 * shrink), hh = ch / (2 * shrink), cx = f.width * 0.5, cy = f.height * 0.5;
+            for (int i = 0; i < 8 && inside; ++i) {
+                static const float px[8] = {-1, 0, 1, 1, 1, 0, -1, -1}, py[8] = {-1, -1, -1, 0, 1, 1, 1, 0};
+                float x = static_cast<float>(cx + px[i] * hw), y = static_cast<float>(cy + py[i] * hh);
+                distortRaw(info, p.sensorMap, x, y);
+                inside = x >= 1 && y >= 1 && x <= f.width - 1 && y <= f.height - 1;
+            }
+            if (inside) break;
+        }
+        p.lensK[0] = info.distortion[0];
+        p.lensK[1] = info.distortion[1];
+        p.lensK[2] = info.distortion[2];
+        p.lensK[3] = 1.0f;
+        p.lensP[0] = info.distortion[3];
+        p.lensP[1] = info.distortion[4];
+        for (int i = 0; i < 4; ++i) p.lensF[i] = info.intrinsics[i];
+    }
+    cw /= shrink;
+    ch /= shrink;
+    p.cropRect[0] = static_cast<float>((f.width - cw) * 0.5);
+    p.cropRect[1] = static_cast<float>((f.height - ch) * 0.5);
     p.cropRect[2] = static_cast<float>(cw);
     p.cropRect[3] = static_cast<float>(ch);
+
+    p.noise[0] = s.temporalNr;
+    p.noise[1] = s.chromaNr;
+    p.noise[2] = meta.noiseS > 0 ? meta.noiseS : 2e-4f; // typical phone sensor at base ISO if the HAL omits it
+    p.noise[3] = meta.noiseO > 0 ? meta.noiseO : 2e-6f;
+    p.cleanFlags[0] = s.hotPixelFix ? 1 : 0;
+    p.cleanFlags[1] = s.temporalNr > 0 ? 1 : 0;
+
+    {
+        std::lock_guard<std::mutex> lk(gStateMutex);
+        std::copy(p.cropRect, p.cropRect + 4, gGeom.crop);
+        std::copy(p.sensorMap, p.sensorMap + 4, gGeom.sensorMap);
+        gGeom.rot = rot;
+        gGeom.focusDiopters = meta.focusDiopters;
+        gGeom.afState = meta.afState;
+        gGeom.faceNorm[2] = 0;
+        if (meta.face[2] > meta.face[0]) {
+            float c[4];
+            for (int i = 0; i < 2; ++i) {
+                float rx = (meta.face[i * 2] - info.preLeft - p.sensorMap[2]) / sx;
+                float ry = (meta.face[i * 2 + 1] - info.preTop - p.sensorMap[3]) / sx;
+                cropToOutput(rot, (rx - p.cropRect[0]) / p.cropRect[2], (ry - p.cropRect[1]) / p.cropRect[3], c[i * 2], c[i * 2 + 1]);
+            }
+            gGeom.faceNorm[0] = std::min(c[0], c[2]);
+            gGeom.faceNorm[1] = std::min(c[1], c[3]);
+            gGeom.faceNorm[2] = std::fabs(c[2] - c[0]);
+            gGeom.faceNorm[3] = std::fabs(c[3] - c[1]);
+        }
+        // Google AWB: adopt the HAL's neutral point, smoothed so it glides instead of stepping.
+        if (s.awbAuto && meta.neutral[0] > 0 && meta.neutral[1] > 0 && meta.neutral[2] > 0) {
+            Vec3 n = {meta.neutral[0] / meta.neutral[1], 1.0f, meta.neutral[2] / meta.neutral[1]};
+            if (gAwbNeutral[1] == 0) gAwbNeutral = n;
+            for (int i = 0; i < 3; ++i) gAwbNeutral[i] += 0.15f * (n[i] - gAwbNeutral[i]);
+            if ((frameIndex & 3) == 1) gSettings.color = gColor.fromCameraNeutral(gAwbNeutral);
+            s.color = gSettings.color;
+            p.wbGains[0] = s.color.wbGains[0];
+            p.wbGains[1] = s.color.wbGains[1];
+            p.wbGains[2] = s.color.wbGains[2];
+        }
+    }
 
     p.outInfo[0] = outW;
     p.outInfo[1] = outH;
@@ -481,6 +601,7 @@ EXPORT int32_t vesper_auto_expose(int32_t priority, int64_t* outExposureNs, int3
 
 EXPORT void vesper_set_kelvin_tint(int32_t kelvin, int32_t tint) {
     std::lock_guard<std::mutex> lk(gStateMutex);
+    gSettings.awbAuto = false;
     setColorLocked(gColor.fromKelvinTint(kelvin, tint));
 }
 
@@ -498,6 +619,71 @@ EXPORT int32_t vesper_lock_white_balance(double* outKelvin, double* outTint) {
     __android_log_print(ANDROID_LOG_INFO, "Vesper", "WB lock: raw neutral %.4f %.4f %.4f -> %.0fK tint %.1f, gains R%.3f B%.3f",
                         n[0], n[1], n[2], c.kelvin, c.tint, c.wbGains[0], c.wbGains[2]);
     return 0;
+}
+
+// White balance source: 1 = Google's AWB (HAL neutral point, continuously
+// followed), 0 = manual. Switching to manual keeps the current K/tint.
+EXPORT void vesper_set_auto_white_balance(int32_t enable) {
+    {
+        std::lock_guard<std::mutex> lk(gStateMutex);
+        gSettings.awbAuto = enable != 0;
+        gAwbNeutral = {0, 0, 0};
+    }
+    if (gCamera) gCamera->setAutoWhiteBalance(enable != 0);
+}
+
+// 0 = manual (vesper_set_focus), 1 = continuous AF (PDAF + laser, via the HAL).
+// Switching from continuous to manual locks the lens where AF left it.
+EXPORT void vesper_set_focus_mode(int32_t mode) {
+    if (gCamera) gCamera->setFocusMode(mode == 1 ? FocusMode::Continuous : FocusMode::Manual);
+}
+
+// Tap-to-focus at an output-normalised point (0..1, upright viewfinder).
+// Switches to continuous AF metering that region.
+EXPORT void vesper_set_focus_point(float ox, float oy) {
+    if (!gCamera) return;
+    FrameGeometry g;
+    {
+        std::lock_guard<std::mutex> lk(gStateMutex);
+        g = gGeom;
+    }
+    const SensorInfo& info = gCamera->sensorInfo();
+    float u, v;
+    outputToCrop(g.rot, std::clamp(ox, 0.0f, 1.0f), std::clamp(oy, 0.0f, 1.0f), u, v);
+    float ax = (g.crop[0] + u * g.crop[2]) * g.sensorMap[0] + g.sensorMap[2];
+    float ay = (g.crop[1] + v * g.crop[3]) * g.sensorMap[1] + g.sensorMap[3];
+    float nx = ax / std::max(1, info.preWidth), ny = ay / std::max(1, info.preHeight);
+    constexpr float kHalf = 0.06f;
+    gCamera->setFocusRegion(nx - kHalf, ny - kHalf, 2 * kHalf, 2 * kHalf);
+    gCamera->setFocusMode(FocusMode::Continuous);
+}
+
+EXPORT void vesper_clear_focus_point() {
+    if (gCamera) gCamera->setFocusRegion(0, 0, 0, 0);
+}
+
+EXPORT void vesper_set_face_detection(int32_t enable) {
+    if (gCamera) gCamera->setFaceDetection(enable != 0);
+}
+
+// Image processing toggles (all applied on the GPU, all optional).
+EXPORT void vesper_set_lens_correction(int32_t enable) {
+    std::lock_guard<std::mutex> lk(gStateMutex);
+    gSettings.lensCorrection = enable != 0;
+}
+EXPORT void vesper_set_hot_pixel_fix(int32_t enable) {
+    std::lock_guard<std::mutex> lk(gStateMutex);
+    gSettings.hotPixelFix = enable != 0;
+}
+// 0 = off; typical 0.5 (low) .. 0.85 (high): max weight given to the previous frame.
+EXPORT void vesper_set_temporal_nr(float strength) {
+    std::lock_guard<std::mutex> lk(gStateMutex);
+    gSettings.temporalNr = std::clamp(strength, 0.0f, 0.9f);
+}
+// 0 = off .. 1 = full chroma smoothing (luma/detail untouched).
+EXPORT void vesper_set_chroma_nr(float strength) {
+    std::lock_guard<std::mutex> lk(gStateMutex);
+    gSettings.chromaNr = std::clamp(strength, 0.0f, 1.0f);
 }
 
 EXPORT void vesper_set_ois(int32_t enable) { if (gCamera) gCamera->setOpticalStabilization(enable != 0); }
@@ -576,7 +762,9 @@ EXPORT int32_t vesper_get_status(char* out, int32_t maxLen) {
     int ow, oh, rw, rh;
     double kelvin, tint, fps;
     long long drops, expNs;
-    int iso;
+    int iso, afState;
+    bool awbAuto;
+    float focusD, face[4];
     {
         std::lock_guard<std::mutex> lk(gStateMutex);
         outputSize(gSettings, ow, oh);
@@ -588,17 +776,23 @@ EXPORT int32_t vesper_get_status(char* out, int32_t maxLen) {
         drops = gCameraDrops;
         expNs = gMeter.exposureNs;
         iso = gMeter.iso;
+        awbAuto = gSettings.awbAuto;
+        afState = gGeom.afState;
+        focusD = gGeom.focusDiopters;
+        std::copy(gGeom.faceNorm, gGeom.faceNorm + 4, face);
     }
-    char buf[768];
+    char buf[1024];
     std::snprintf(buf, sizeof(buf),
                   "{\"streaming\":%s,\"fps\":%.2f,\"raw\":[%d,%d],\"output\":[%d,%d],\"cameraDrops\":%lld,"
                   "\"kelvin\":%.0f,\"tint\":%.1f,\"recording\":%s,\"durationMs\":%lld,\"framesEncoded\":%lld,"
                   "\"framesDropped\":%lld,\"thermal\":%d,\"audio\":%s,\"codec\":\"%s\",\"stopReason\":\"%s\","
-                  "\"exposureNs\":%lld,\"iso\":%d}",
+                  "\"exposureNs\":%lld,\"iso\":%d,\"awbAuto\":%s,\"afState\":%d,\"focusDiopters\":%.3f,"
+                  "\"face\":[%.4f,%.4f,%.4f,%.4f]}",
                   gCamera && gCamera->isStreaming() ? "true" : "false", fps, rw, rh, ow, oh, drops, kelvin, tint,
                   r.recording ? "true" : "false", static_cast<long long>(r.durationUs / 1000),
                   static_cast<long long>(r.framesEncoded), static_cast<long long>(r.framesDropped), r.thermalStatus,
-                  r.audio ? "true" : "false", jsonEscape(r.codecName).c_str(), jsonEscape(r.stopReason).c_str(), expNs, iso);
+                  r.audio ? "true" : "false", jsonEscape(r.codecName).c_str(), jsonEscape(r.stopReason).c_str(), expNs, iso,
+                  awbAuto ? "true" : "false", afState, focusD, face[0], face[1], face[2], face[3]);
     return writeString(buf, out, maxLen);
 }
 

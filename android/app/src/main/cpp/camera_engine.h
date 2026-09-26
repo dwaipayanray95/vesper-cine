@@ -55,6 +55,16 @@ struct SensorInfo {
     int32_t cfa = 0;
     int32_t orientation = 90;
     int32_t activeWidth = 0, activeHeight = 0;
+    // Pre-correction active array: the coordinate system of RAW streams,
+    // the lens shading map, lens distortion and AF/face rectangles.
+    int32_t preLeft = 0, preTop = 0, preWidth = 0, preHeight = 0;
+    // ACAMERA_LENS_DISTORTION (k1, k2, k3, p1, p2) and
+    // ACAMERA_LENS_INTRINSIC_CALIBRATION (fx, fy, cx, cy, s), pre-correction pixels.
+    bool hasDistortion = false;
+    float distortion[5] = {0, 0, 0, 0, 0};
+    float intrinsics[5] = {0, 0, 0, 0, 0};
+    int32_t maxAfRegions = 0;
+    int32_t maxFaces = 0;
     int32_t shadingCols = 0, shadingRows = 0;
     bool lensShadingApplied = false;   // raw already shading-corrected by the HAL
     bool timestampRealtime = false;    // SENSOR_INFO_TIMESTAMP_SOURCE == REALTIME (CLOCK_BOOTTIME)
@@ -74,7 +84,13 @@ struct CaptureMetadata {
     Vec3 neutral{0, 0, 0};                  // SENSOR_NEUTRAL_COLOR_POINT (0 if absent)
     int64_t exposureNs = 0;
     int32_t iso = 0;
+    float focusDiopters = 0;                // LENS_FOCUS_DISTANCE actually used
+    uint8_t afState = 0;                    // CONTROL_AF_STATE
+    float noiseS = 0, noiseO = 0;           // SENSOR_NOISE_PROFILE, averaged over channels
+    int32_t face[4] = {0, 0, 0, 0};         // largest face (l, t, r, b), pre-correction px; r == 0 if none
 };
+
+enum class FocusMode { Manual = 0, Continuous = 1 };
 
 struct RawFrame {
     const uint8_t* data = nullptr;
@@ -115,7 +131,12 @@ public:
     void setFrameRate(double fps);
     void setExposure(int64_t exposureNs, int32_t iso);
     void setOpticalStabilization(bool enable);
-    void setFocusDistance(float diopters);
+    void setFocusDistance(float diopters);            // also switches to manual focus
+    void setFocusMode(FocusMode mode);
+    // AF metering region, normalised to the pre-correction array (0..1); w <= 0 clears it.
+    void setFocusRegion(float x, float y, float w, float h);
+    void setAutoWhiteBalance(bool enable);            // HAL AWB; RAW is unaffected, we read its neutral point
+    void setFaceDetection(bool enable);
     double frameRate() const { return fps_; }
     int32_t streamWidth() const { return streamW_; }
     int32_t streamHeight() const { return streamH_; }
@@ -128,6 +149,7 @@ public:
 private:
     void querySensorInfo(const ACameraMetadata* chars);
     bool buildRequestLocked();
+    void applyControlsLocked();
     void submitLocked();
     void stopCaptureLocked();
     void scheduleRecovery();
@@ -161,6 +183,10 @@ private:
     int32_t iso_ = 100;
     bool ois_ = true;
     float focusDiopters_ = 0.0f;
+    FocusMode focusMode_ = FocusMode::Manual;
+    int32_t afRegion_[5] = {0, 0, 0, 0, 0}; // l, t, r, b, weight (weight 0 = none)
+    bool autoWb_ = false;
+    bool faceDetect_ = false;
 
     std::mutex recoveryMutex_; // guards recoveryThread_
     std::atomic<bool> closing_{false};

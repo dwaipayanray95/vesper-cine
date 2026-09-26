@@ -133,6 +133,23 @@ void CameraEngine::querySensorInfo(const ACameraMetadata* m) {
         s.maxIso = e.data.i32[1];
     }
     if (ACameraMetadata_getConstEntry(m, ACAMERA_LENS_INFO_MINIMUM_FOCUS_DISTANCE, &e) == ACAMERA_OK) s.minFocusDiopters = e.data.f[0];
+    s.preWidth = s.activeWidth;
+    s.preHeight = s.activeHeight;
+    if (ACameraMetadata_getConstEntry(m, ACAMERA_SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE, &e) == ACAMERA_OK && e.count >= 4) {
+        s.preLeft = e.data.i32[0];
+        s.preTop = e.data.i32[1];
+        s.preWidth = e.data.i32[2];
+        s.preHeight = e.data.i32[3];
+    }
+    ACameraMetadata_const_entry d, k;
+    if (ACameraMetadata_getConstEntry(m, ACAMERA_LENS_DISTORTION, &d) == ACAMERA_OK && d.count >= 5 &&
+        ACameraMetadata_getConstEntry(m, ACAMERA_LENS_INTRINSIC_CALIBRATION, &k) == ACAMERA_OK && k.count >= 5 &&
+        k.data.f[0] > 0 && k.data.f[1] > 0) {
+        for (int i = 0; i < 5; ++i) { s.distortion[i] = d.data.f[i]; s.intrinsics[i] = k.data.f[i]; }
+        s.hasDistortion = true;
+    }
+    if (ACameraMetadata_getConstEntry(m, ACAMERA_CONTROL_MAX_REGIONS, &e) == ACAMERA_OK && e.count >= 3) s.maxAfRegions = e.data.i32[2];
+    if (ACameraMetadata_getConstEntry(m, ACAMERA_STATISTICS_INFO_MAX_FACE_COUNT, &e) == ACAMERA_OK) s.maxFaces = e.data.i32[0];
 
     // RAW10 sizes + their minimum frame durations (bounds the achievable fps).
     if (ACameraMetadata_getConstEntry(m, ACAMERA_SCALER_AVAILABLE_STREAM_CONFIGURATIONS, &e) == ACAMERA_OK) {
@@ -171,6 +188,10 @@ void CameraEngine::querySensorInfo(const ACameraMetadata* m) {
          s.whiteLevel, s.blackLevel[0], s.blackLevel[1], s.blackLevel[2], s.blackLevel[3], s.cfa, s.orientation,
          s.activeWidth, s.activeHeight, s.shadingCols, s.shadingRows, s.lensShadingApplied, s.timestampRealtime,
          s.minIso, s.maxIso, s.minFocusDiopters);
+    LOGI("Lens: distortion=%d [k1 %.4f k2 %.4f k3 %.4f p1 %.5f p2 %.5f] f=%.1f/%.1f c=%.1f/%.1f pre=%d,%d %dx%d afRegions=%d faces=%d",
+         s.hasDistortion, s.distortion[0], s.distortion[1], s.distortion[2], s.distortion[3], s.distortion[4],
+         s.intrinsics[0], s.intrinsics[1], s.intrinsics[2], s.intrinsics[3], s.preLeft, s.preTop, s.preWidth, s.preHeight,
+         s.maxAfRegions, s.maxFaces);
     LOGI("Calibration: illuminants %.0fK/%.0fK, CM2=%d FM1=%d FM2=%d", cal.illuminant1Kelvin, cal.illuminant2Kelvin,
          cal.haveColorMatrix2, cal.haveForwardMatrix1, cal.haveForwardMatrix2);
     for (const auto& mode : s.rawModes) LOGI("RAW10 mode %dx%d max %.1f fps", mode.width, mode.height, mode.maxFps());
@@ -293,10 +314,11 @@ bool CameraEngine::buildRequestLocked() {
     // Full manual: no 3A. (NR/edge/shading/tonemap modes never touch the RAW
     // stream itself — shading is set to FAST only so the HAL reports a real
     // lens shading map instead of unity gains.)
-    u8(ACAMERA_CONTROL_MODE, ACAMERA_CONTROL_MODE_OFF);
+    // CONTROL_MODE AUTO keeps the HAL's AF (PDAF + laser) and AWB engines
+    // running; AE stays off so exposure is fully manual. None of this touches
+    // the RAW pixels — AWB only reports a neutral point that we may adopt.
+    u8(ACAMERA_CONTROL_MODE, ACAMERA_CONTROL_MODE_AUTO);
     u8(ACAMERA_CONTROL_AE_MODE, ACAMERA_CONTROL_AE_MODE_OFF);
-    u8(ACAMERA_CONTROL_AWB_MODE, ACAMERA_CONTROL_AWB_MODE_OFF);
-    u8(ACAMERA_CONTROL_AF_MODE, ACAMERA_CONTROL_AF_MODE_OFF);
     u8(ACAMERA_CONTROL_VIDEO_STABILIZATION_MODE, ACAMERA_CONTROL_VIDEO_STABILIZATION_MODE_OFF);
     u8(ACAMERA_NOISE_REDUCTION_MODE, ACAMERA_NOISE_REDUCTION_MODE_OFF);
     u8(ACAMERA_EDGE_MODE, ACAMERA_EDGE_MODE_OFF);
@@ -304,8 +326,29 @@ bool CameraEngine::buildRequestLocked() {
     u8(ACAMERA_STATISTICS_LENS_SHADING_MAP_MODE, ACAMERA_STATISTICS_LENS_SHADING_MAP_MODE_ON);
     u8(ACAMERA_LENS_OPTICAL_STABILIZATION_MODE,
        ois_ ? ACAMERA_LENS_OPTICAL_STABILIZATION_MODE_ON : ACAMERA_LENS_OPTICAL_STABILIZATION_MODE_OFF);
-    ACaptureRequest_setEntry_float(request_, ACAMERA_LENS_FOCUS_DISTANCE, 1, &focusDiopters_);
+    applyControlsLocked();
     return true;
+}
+
+// AF / AWB / face-detect entries; call submitLocked() afterwards.
+void CameraEngine::applyControlsLocked() {
+    if (!request_) return;
+    auto u8 = [&](uint32_t tag, uint8_t v) { ACaptureRequest_setEntry_u8(request_, tag, 1, &v); };
+    u8(ACAMERA_CONTROL_AWB_MODE, autoWb_ ? ACAMERA_CONTROL_AWB_MODE_AUTO : ACAMERA_CONTROL_AWB_MODE_OFF);
+    u8(ACAMERA_STATISTICS_FACE_DETECT_MODE,
+       faceDetect_ && info_.maxFaces > 0 ? ACAMERA_STATISTICS_FACE_DETECT_MODE_SIMPLE : ACAMERA_STATISTICS_FACE_DETECT_MODE_OFF);
+    if (focusMode_ == FocusMode::Continuous && info_.minFocusDiopters > 0) {
+        u8(ACAMERA_CONTROL_AF_MODE, ACAMERA_CONTROL_AF_MODE_CONTINUOUS_VIDEO);
+        if (afRegion_[4] > 0 && info_.maxAfRegions > 0) {
+            ACaptureRequest_setEntry_i32(request_, ACAMERA_CONTROL_AF_REGIONS, 5, afRegion_);
+        } else {
+            int32_t none[5] = {0, 0, 0, 0, 0};
+            ACaptureRequest_setEntry_i32(request_, ACAMERA_CONTROL_AF_REGIONS, 5, none);
+        }
+    } else {
+        u8(ACAMERA_CONTROL_AF_MODE, ACAMERA_CONTROL_AF_MODE_OFF);
+        ACaptureRequest_setEntry_float(request_, ACAMERA_LENS_FOCUS_DISTANCE, 1, &focusDiopters_);
+    }
 }
 
 // Writes the current fps/exposure/ISO into the request and (re)submits it.
@@ -360,8 +403,51 @@ void CameraEngine::setOpticalStabilization(bool enable) {
 void CameraEngine::setFocusDistance(float diopters) {
     std::lock_guard<std::mutex> lock(mutex_);
     focusDiopters_ = std::clamp(diopters, 0.0f, std::max(info_.minFocusDiopters, 0.0f));
-    if (!request_) return;
-    ACaptureRequest_setEntry_float(request_, ACAMERA_LENS_FOCUS_DISTANCE, 1, &focusDiopters_);
+    focusMode_ = FocusMode::Manual;
+    applyControlsLocked();
+    submitLocked();
+}
+
+void CameraEngine::setFocusMode(FocusMode mode) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (mode == FocusMode::Manual && focusMode_ == FocusMode::Continuous) {
+        // Lock: freeze the lens where AF last put it.
+        std::lock_guard<std::mutex> ml(metaMutex_);
+        const auto& last = metaRing_[(metaNext_ + metaRing_.size() - 1) % metaRing_.size()];
+        if (last.timestampNs) focusDiopters_ = last.focusDiopters;
+    }
+    focusMode_ = mode;
+    applyControlsLocked();
+    submitLocked();
+}
+
+void CameraEngine::setFocusRegion(float x, float y, float w, float h) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (w <= 0 || h <= 0) {
+        afRegion_[4] = 0;
+    } else {
+        auto px = [&](float v, int32_t size, int32_t off) { return off + static_cast<int32_t>(std::clamp(v, 0.0f, 1.0f) * size); };
+        afRegion_[0] = px(x, info_.preWidth, info_.preLeft);
+        afRegion_[1] = px(y, info_.preHeight, info_.preTop);
+        afRegion_[2] = px(x + w, info_.preWidth, info_.preLeft);
+        afRegion_[3] = px(y + h, info_.preHeight, info_.preTop);
+        afRegion_[4] = 1000;
+    }
+    applyControlsLocked();
+    submitLocked();
+}
+
+void CameraEngine::setAutoWhiteBalance(bool enable) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    autoWb_ = enable;
+    applyControlsLocked();
+    submitLocked();
+}
+
+void CameraEngine::setFaceDetection(bool enable) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    faceDetect_ = enable;
+    applyControlsLocked();
     submitLocked();
 }
 
@@ -390,6 +476,25 @@ void CameraEngine::onCaptureCompleted(const ACameraMetadata* r) {
     }
     if (ACameraMetadata_getConstEntry(r, ACAMERA_SENSOR_EXPOSURE_TIME, &e) == ACAMERA_OK) m.exposureNs = e.data.i64[0];
     if (ACameraMetadata_getConstEntry(r, ACAMERA_SENSOR_SENSITIVITY, &e) == ACAMERA_OK) m.iso = e.data.i32[0];
+    if (ACameraMetadata_getConstEntry(r, ACAMERA_LENS_FOCUS_DISTANCE, &e) == ACAMERA_OK) m.focusDiopters = e.data.f[0];
+    if (ACameraMetadata_getConstEntry(r, ACAMERA_CONTROL_AF_STATE, &e) == ACAMERA_OK) m.afState = e.data.u8[0];
+    if (ACameraMetadata_getConstEntry(r, ACAMERA_SENSOR_NOISE_PROFILE, &e) == ACAMERA_OK && e.count >= 2) {
+        double s = 0, o = 0;
+        uint32_t n = e.count / 2;
+        for (uint32_t i = 0; i < n; ++i) { s += e.data.d[2 * i]; o += e.data.d[2 * i + 1]; }
+        m.noiseS = static_cast<float>(s / n);
+        m.noiseO = static_cast<float>(o / n);
+    }
+    if (faceDetect_ && ACameraMetadata_getConstEntry(r, ACAMERA_STATISTICS_FACE_RECTANGLES, &e) == ACAMERA_OK) {
+        int64_t bestArea = 0;
+        for (uint32_t i = 0; i + 3 < e.count; i += 4) {
+            int64_t area = static_cast<int64_t>(e.data.i32[i + 2] - e.data.i32[i]) * (e.data.i32[i + 3] - e.data.i32[i + 1]);
+            if (area > bestArea) {
+                bestArea = area;
+                std::copy(e.data.i32 + i, e.data.i32 + i + 4, m.face);
+            }
+        }
+    }
 
     std::lock_guard<std::mutex> lock(metaMutex_);
     // Keep the last good shading map if this result didn't carry one.
