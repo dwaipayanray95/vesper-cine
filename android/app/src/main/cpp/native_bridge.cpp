@@ -796,13 +796,14 @@ EXPORT int32_t vesper_get_status(char* out, int32_t maxLen) {
                   "\"kelvin\":%.0f,\"tint\":%.1f,\"recording\":%s,\"durationMs\":%lld,\"framesEncoded\":%lld,"
                   "\"framesDropped\":%lld,\"thermal\":%d,\"audio\":%s,\"codec\":\"%s\",\"stopReason\":\"%s\","
                   "\"exposureNs\":%lld,\"iso\":%d,\"awbAuto\":%s,\"afState\":%d,\"focusDiopters\":%.3f,"
-                  "\"face\":[%.4f,%.4f,%.4f,%.4f],\"gpuMs\":%.2f,\"alignThrottled\":%s}",
+                  "\"face\":[%.4f,%.4f,%.4f,%.4f],\"gpuMs\":%.2f,\"alignThrottled\":%s,\"nrThrottled\":%s}",
                   gCamera && gCamera->isStreaming() ? "true" : "false", fps, rw, rh, ow, oh, drops, kelvin, tint,
                   r.recording ? "true" : "false", static_cast<long long>(r.durationUs / 1000),
                   static_cast<long long>(r.framesEncoded), static_cast<long long>(r.framesDropped), r.thermalStatus,
                   r.audio ? "true" : "false", jsonEscape(r.codecName).c_str(), jsonEscape(r.stopReason).c_str(), expNs, iso,
                   awbAuto ? "true" : "false", afState, focusD, face[0], face[1], face[2], face[3],
-                  gGpu ? gGpu->gpuFrameMs() : 0.0, gGpu && gGpu->alignmentThrottled() ? "true" : "false");
+                  gGpu ? gGpu->gpuFrameMs() : 0.0, gGpu && gGpu->alignmentThrottled() ? "true" : "false",
+                  gGpu && gGpu->noiseReductionThrottled() ? "true" : "false");
     return writeString(buf, out, maxLen);
 }
 

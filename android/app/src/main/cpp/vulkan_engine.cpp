@@ -423,6 +423,7 @@ void VulkanEngine::destroyResources() {
     destroyImage(vfImage_);
     historyValid_ = false;
     alignThrottled_ = false;
+    nrThrottled_ = false;
     overBudgetFrames_ = 0;
     geom_ = {};
 }
@@ -752,6 +753,10 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
     params.flags[1] = swapRB_ && swapchain_ ? 1 : 0;
     params.flags[2] = window_ ? 1 : 0;
     if (!g.shadingFloats) { params.quadInfo[2] = 0; params.quadInfo[3] = 0; }
+    if (nrThrottled_) {
+        params.cleanFlags[1] = 0;
+        params.noise[1] = 0.0f;
+    }
     const bool temporal = params.cleanFlags[1] != 0;
     params.cleanFlags[2] = temporal && historyValid_ ? 1 : 0;
     const bool align = params.cleanFlags[2] != 0 && params.cleanFlags[3] != 0 && !alignThrottled_;
@@ -946,7 +951,8 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
         if (timedFrames_ > 0) {
             VK_LOGI("GPU per frame: unpack %.2fms, align %.2fms, clean %.2fms, render+present %.2fms = %.2fms (budget %.1fms)%s",
                     passMs_[0] / timedFrames_, passMs_[1] / timedFrames_, passMs_[2] / timedFrames_, passMs_[3] / timedFrames_,
-                    gpuFrameMs_, frameBudgetMs_, alignThrottled_ ? ", alignment throttled" : "");
+                    gpuFrameMs_, frameBudgetMs_,
+                    nrThrottled_ ? ", NR throttled" : (alignThrottled_ ? ", alignment throttled" : ""));
             for (double& m : passMs_) m = 0;
             timedFrames_ = 0;
         }
@@ -973,7 +979,11 @@ void VulkanEngine::readTimestamps(int slot) {
     overBudgetFrames_ = gpuFrameMs_ > 0.85 * frameBudgetMs_ ? overBudgetFrames_ + 1 : 0;
     if (overBudgetFrames_ > 30 && !alignThrottled_) {
         alignThrottled_ = true;
+        overBudgetFrames_ = 0;
         VK_LOGW("GPU %.1fms over %.1fms budget: temporal NR alignment disabled", gpuFrameMs_, frameBudgetMs_);
+    } else if (overBudgetFrames_ > 30 && !nrThrottled_) {
+        nrThrottled_ = true;
+        VK_LOGW("GPU %.1fms still over %.1fms budget: temporal and chroma NR paused", gpuFrameMs_, frameBudgetMs_);
     }
 }
 

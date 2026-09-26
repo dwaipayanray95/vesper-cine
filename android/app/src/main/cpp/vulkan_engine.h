@@ -78,6 +78,8 @@ public:
     double gpuFrameMs() const { return gpuFrameMs_; }
     // True once alignment was switched off automatically because the GPU ran over budget.
     bool alignmentThrottled() const { return alignThrottled_; }
+    // Second stage: temporal + chroma NR paused too because alignment alone wasn't enough.
+    bool noiseReductionThrottled() const { return nrThrottled_; }
 
     // Blocks until the slot's GPU work is done, then returns its P010 bytes
     // (Y plane of outW*outH uint16, then interleaved CbCr of outW*outH/2 uint16).
@@ -168,6 +170,7 @@ private:
     double frameBudgetMs_ = 41.7;
     int overBudgetFrames_ = 0;
     bool alignThrottled_ = false;
+    bool nrThrottled_ = false;
     void readTimestamps(int slot);
     Geometry geom_;
     int nextSlot_ = 0;

@@ -45,6 +45,7 @@ class EngineStatus {
   final List<double> face; // largest face: x, y, w, h (output-normalised); w == 0 if none
   final double gpuMs; // measured GPU time per frame
   final bool alignThrottled; // NR alignment auto-disabled: GPU over budget
+  final bool nrThrottled; // temporal/chroma NR also paused: GPU still over budget
 
   EngineStatus.fromJson(Map<String, dynamic> j)
     : streaming = j['streaming'] as bool,
@@ -67,7 +68,8 @@ class EngineStatus {
       focusDiopters = (j['focusDiopters'] as num).toDouble(),
       face = (j['face'] as List).map((e) => (e as num).toDouble()).toList(),
       gpuMs = (j['gpuMs'] as num).toDouble(),
-      alignThrottled = j['alignThrottled'] as bool;
+      alignThrottled = j['alignThrottled'] as bool,
+      nrThrottled = j['nrThrottled'] as bool;
 }
 
 class RawMode {
