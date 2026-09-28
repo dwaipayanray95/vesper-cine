@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <thread>
@@ -245,6 +246,8 @@ void meterCentre(const RawFrame& f) {
     gHaveCentreSample = true;
 }
 
+std::atomic<bool> gExposureRamping{false}; // auto-exposure glide in progress
+
 // Whole-frame metering on a sparse grid of 2x2 quads (~12k samples), from
 // raw data before white balance: log-average green for mid-tones and the
 // 99.5th percentile of each quad's brightest channel for highlight clipping.
@@ -330,6 +333,7 @@ void meterFrame(const RawFrame& f) {
     if (n == 0 || wSum <= 0) return;
     int target = static_cast<int>(n * 0.995), acc = 0, bin = kBins - 1;
     for (int b = 0; b < kBins; ++b) { acc += hist[b]; if (acc >= target) { bin = b; break; } }
+    if (gExposureRamping) return; // mid-transition frames would mislead the next AE pass
     std::lock_guard<std::mutex> lk(gStateMutex);
     gMeter = {logSum / wSum, static_cast<double>(bin) / (kBins - 1), m.exposureNs, m.iso, true};
     gMeter.spot = mode == 1;
@@ -349,6 +353,10 @@ FocusController gFocus;
 bool gFocusHasSample = false;
 FocusSample gFocusSample;
 bool gFocusLocked = false;         // lens held (AF-L)
+ExposureRamp gExpRamp;             // smooth auto-exposure transition (gFocusMutex)
+int64_t gExpRampFinalNs = 0;       // what to store in settings when it ends
+int32_t gExpRampFinalIso = 0;
+bool gExpRampFixed = false;        // final exposure is a fixed time (not the shutter angle)
 std::thread gFocusThread;
 bool gFocusQuit = false;
 
@@ -369,6 +377,27 @@ void focusThreadMain() {
         if (gFocusQuit) break;
         FocusSample s = gFocusSample;
         gFocusHasSample = false;
+        if (gExpRamp.active()) {
+            double t, iso;
+            bool more = gExpRamp.update(s.dt, t, iso);
+            int64_t finalNs = gExpRampFinalNs;
+            int32_t finalIso = gExpRampFinalIso;
+            bool fixed = gExpRampFixed;
+            lk.unlock();
+            if (more) {
+                if (gCamera) gCamera->setExposure(static_cast<int64_t>(t), static_cast<int32_t>(std::lround(iso)));
+            } else {
+                {
+                    std::lock_guard<std::mutex> sl(gStateMutex);
+                    gSettings.iso = finalIso;
+                    if (fixed) gSettings.fixedExposureNs = finalNs;
+                    gMeter.valid = false; // meter again only at the settled exposure
+                }
+                if (gCamera) applyShutter();
+                gExposureRamping = false;
+            }
+            lk.lock();
+        }
         if (!gFocus.active()) continue;
         double cmd = gFocus.update(s.dt);
         lk.unlock();
@@ -382,7 +411,7 @@ void feedFocus(double frameSeconds) {
     bool active;
     {
         std::lock_guard<std::mutex> lk(gFocusMutex);
-        active = gFocus.active();
+        active = gFocus.active() || gExpRamp.active();
     }
     if (!active) return;
     FocusSample s;
@@ -393,6 +422,12 @@ void feedFocus(double frameSeconds) {
         gFocusHasSample = true;
     }
     gFocusCv.notify_one();
+}
+
+void cancelExposureRamp() {
+    std::lock_guard<std::mutex> lk(gFocusMutex);
+    gExpRamp.cancel();
+    gExposureRamping = false;
 }
 
 void ensureFocusThread() {
@@ -721,6 +756,7 @@ EXPORT void vesper_set_frame_rate(double fps) {
 // Shutter as an angle: exposure follows the frame rate.
 EXPORT void vesper_set_shutter_angle(double angle, int32_t iso) {
     if (!gCamera) return;
+    cancelExposureRamp(); // a manual setting wins over a running AE glide
     {
         std::lock_guard<std::mutex> lk(gStateMutex);
         gSettings.shutterAngle = std::clamp(angle, 0.1, 360.0);
@@ -734,6 +770,7 @@ EXPORT void vesper_set_shutter_angle(double angle, int32_t iso) {
 // The camera clamps it to [sensor minimum, frame duration].
 EXPORT void vesper_set_exposure_time(int64_t exposureNs, int32_t iso) {
     if (!gCamera) return;
+    cancelExposureRamp(); // a manual setting wins over a running AE glide
     {
         std::lock_guard<std::mutex> lk(gStateMutex);
         gSettings.fixedExposureNs = std::max<int64_t>(exposureNs, 1);
@@ -811,11 +848,26 @@ EXPORT int32_t vesper_auto_expose(int32_t priority, int64_t* outExposureNs, int3
     int32_t isoI = static_cast<int32_t>(std::lround(iso));
     {
         std::lock_guard<std::mutex> lk(gStateMutex);
-        gSettings.iso = isoI;
-        if (priority != 0 || std::llabs(ns - m.exposureNs) > m.exposureNs / 50) gSettings.fixedExposureNs = ns;
         gMeter.valid = false; // wait for a frame at the new exposure before metering again
     }
-    applyShutter();
+    // Refinement passes that land within ~1/6 stop leave the exposure alone
+    // (no visible nudges) and report the exposure actually in use.
+    const double stops = std::log2(static_cast<double>(ns) * isoI / (static_cast<double>(m.exposureNs) * m.iso));
+    if (std::fabs(stops) < 0.17) {
+        if (outExposureNs) *outExposureNs = m.exposureNs;
+        if (outIso) *outIso = m.iso;
+        return 0;
+    }
+    // Glide from the current exposure to the new one (see ExposureRamp).
+    ensureFocusThread();
+    {
+        std::lock_guard<std::mutex> lk(gFocusMutex);
+        gExpRampFinalNs = ns;
+        gExpRampFinalIso = isoI;
+        gExpRampFixed = priority != 0 || std::llabs(ns - m.exposureNs) > m.exposureNs / 50;
+        gExpRamp.start(static_cast<double>(m.exposureNs), m.iso, static_cast<double>(ns), isoI);
+        gExposureRamping = true;
+    }
     if (outExposureNs) *outExposureNs = ns;
     if (outIso) *outIso = isoI;
     __android_log_print(ANDROID_LOG_INFO, "Vesper", "Auto-expose (%s): meanG=%.4f p99.5=%.3f x%.3f -> %.3fms ISO %d",
@@ -1122,7 +1174,7 @@ EXPORT int32_t vesper_get_status(char* out, int32_t maxLen) {
                   "\"framesDropped\":%lld,\"thermal\":%d,\"audio\":%s,\"codec\":\"%s\",\"stopReason\":\"%s\","
                   "\"exposureNs\":%lld,\"iso\":%d,\"awbAuto\":%s,\"afState\":%d,\"focusDiopters\":%.3f,"
                   "\"face\":[%.4f,%.4f,%.4f,%.4f],\"gpuMs\":%.2f,\"alignThrottled\":%s,\"nrThrottled\":%s,\"calibrationSaved\":\"%s\",\"profileActive\":%s,"
-                  "\"focusPulling\":%s,\"focusLocked\":%s}",
+                  "\"focusPulling\":%s,\"exposureRamping\":%s,\"focusLocked\":%s}",
                   gCamera && gCamera->isStreaming() ? "true" : "false", fps, rw, rh, ow, oh, drops, kelvin, tint,
                   r.recording ? "true" : "false", static_cast<long long>(r.durationUs / 1000),
                   static_cast<long long>(r.framesEncoded), static_cast<long long>(r.framesDropped), r.thermalStatus,
@@ -1130,7 +1182,7 @@ EXPORT int32_t vesper_get_status(char* out, int32_t maxLen) {
                   awbAuto ? "true" : "false", afState, focusD, face[0], face[1], face[2], face[3],
                   gGpu ? gGpu->gpuFrameMs() : 0.0, gGpu && gGpu->alignmentThrottled() ? "true" : "false",
                   gGpu && gGpu->noiseReductionThrottled() ? "true" : "false", jsonEscape(calSaved).c_str(),
-                  profileActive ? "true" : "false", focusSearching ? "true" : "false", focusLocked ? "true" : "false");
+                  profileActive ? "true" : "false", focusSearching ? "true" : "false", gExposureRamping ? "true" : "false", focusLocked ? "true" : "false");
     return writeString(buf, out, maxLen);
 }
 

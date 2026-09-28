@@ -33,4 +33,23 @@ double FocusController::update(double dt) {
     return cmd_;
 }
 
+void ExposureRamp::start(double t0, double iso0, double t1, double iso1) {
+    lt0_ = std::log2(t0); li0_ = std::log2(iso0);
+    lt1_ = std::log2(t1); li1_ = std::log2(iso1);
+    const double stops = std::fabs((lt1_ + li1_) - (lt0_ + li0_));
+    dur_ = std::clamp(stops * 0.5, 0.3, 1.5);
+    elapsed_ = 0;
+    active_ = true;
+}
+
+bool ExposureRamp::update(double dt, double& t, double& iso) {
+    elapsed_ += dt;
+    double x = std::clamp(elapsed_ / dur_, 0.0, 1.0);
+    double k = x * x * (3 - 2 * x); // smoothstep
+    t = std::exp2(lt0_ + (lt1_ - lt0_) * k);
+    iso = std::exp2(li0_ + (li1_ - li0_) * k);
+    if (x >= 1) active_ = false;
+    return active_;
+}
+
 } // namespace vesper

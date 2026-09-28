@@ -134,6 +134,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   bool _nrAlignment = true;
   Offset? _focusMark; // last tap-to-focus point (normalised), shown briefly
   int _codec = 0; // 0 HEVC, 1 AV1
+  int _aeGen = 0; // bumps per AE request so an older run stops refining
   bool _tapLocks = false; // tap: AF then hold (AF-L) instead of tracking (AF-C)
   bool _tapSetsExposure = true; // tap also spot-meters exposure at that point
   bool _profileAvailable = false; // a chart calibration exists for this device/camera
@@ -892,11 +893,24 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   // One-shot auto exposure: two metering passes (the second one refines very
   // over/under-exposed starts). Tap keeps the shutter, long-press keeps ISO.
   Future<void> _autoExpose({required bool keepShutter, bool quiet = false}) async {
+    // Each pass glides to the new exposure (native ExposureRamp); wait for the
+    // glide to finish and a settled frame to be metered before refining.
+    final gen = ++_aeGen;
     (int, int)? r;
     for (var pass = 0; pass < 3; pass++) {
-      final next = _engine.autoExpose(keepShutter: keepShutter);
-      if (next != null) r = next;
-      await Future<void>.delayed(const Duration(milliseconds: 350));
+      (int, int)? next;
+      for (var i = 0; i < 10 && next == null; i++) {
+        next = _engine.autoExpose(keepShutter: keepShutter);
+        if (next == null) await Future<void>.delayed(const Duration(milliseconds: 100));
+      }
+      if (gen != _aeGen) return; // superseded by a newer tap
+      if (next == null) break;
+      r = next;
+      for (var i = 0; i < 25 && (_engine.status()?.exposureRamping ?? false); i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+      if (gen != _aeGen) return;
     }
     if (!mounted) return;
     if (r == null) {

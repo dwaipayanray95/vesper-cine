@@ -37,6 +37,24 @@ int main() {
     fc.pullTo(0.0, 0.2); // current ignored while moving
     double b = fc.update(1.0 / 24);
     check(b >= a - 1e-9, "retarget decelerates instead of jumping back", b - a);
+    // Exposure ramp: 2 stops over 1 s, monotonic, no step bigger than ~1/8 stop at 24 fps.
+    ExposureRamp er;
+    er.start(10e6, 100, 20e6, 200);
+    check(std::fabs(er.duration() - 1.0) < 1e-9, "2-stop glide takes 1 s", er.duration());
+    double t = 10e6, iso = 100, prevEv = std::log2(t * iso), maxStepEv = 0;
+    int frames = 0;
+    bool monotonic = true;
+    while (er.active() && frames < 100) {
+        er.update(1.0 / 24, t, iso);
+        double ev = std::log2(t * iso);
+        monotonic = monotonic && ev >= prevEv - 1e-12;
+        maxStepEv = std::fmax(maxStepEv, ev - prevEv);
+        prevEv = ev;
+        ++frames;
+    }
+    check(std::fabs(t - 20e6) < 1 && std::fabs(iso - 200) < 1e-6, "glide lands on the target", t);
+    check(monotonic, "glide never overshoots or reverses", 0);
+    check(maxStepEv < 0.14, "glide has no visible jumps", maxStepEv);
     std::printf(failures ? "%d FOCUS FAILURES\n" : "all focus controller tests passed\n", failures);
     return failures ? 1 : 0;
 }

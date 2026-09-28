@@ -31,4 +31,21 @@ private:
     double cmd_ = 0, target_ = 0, velocity_ = 0;
 };
 
+// Smooth exposure transition (shutter + ISO) in log space with ease-in/out,
+// so auto-exposure glides instead of jumping. Duration scales with the size of
+// the change: ~0.5 s per stop, 0.3-1.5 s.
+class ExposureRamp {
+public:
+    void start(double t0, double iso0, double t1, double iso1);
+    // Returns false once finished (t/iso then hold the target).
+    bool update(double dt, double& t, double& iso);
+    bool active() const { return active_; }
+    void cancel() { active_ = false; }
+    double duration() const { return dur_; }
+
+private:
+    bool active_ = false;
+    double lt0_ = 0, li0_ = 0, lt1_ = 0, li1_ = 0, elapsed_ = 0, dur_ = 0;
+};
+
 } // namespace vesper

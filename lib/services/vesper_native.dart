@@ -49,6 +49,7 @@ class EngineStatus {
   final String calibrationSaved; // base path of the last calibration frame written
   final bool profileActive; // per-device chart calibration in use
   final bool focusPulling; // smooth manual focus pull running
+  final bool exposureRamping; // auto-exposure glide in progress
   final bool focusLocked; // focus held (AF-L)
 
   EngineStatus.fromJson(Map<String, dynamic> j)
@@ -77,6 +78,7 @@ class EngineStatus {
       calibrationSaved = (j['calibrationSaved'] as String?) ?? '',
       profileActive = (j['profileActive'] as bool?) ?? false,
       focusPulling = (j['focusPulling'] as bool?) ?? false,
+      exposureRamping = (j['exposureRamping'] as bool?) ?? false,
       focusLocked = (j['focusLocked'] as bool?) ?? false;
 }
 
