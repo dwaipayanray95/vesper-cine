@@ -90,7 +90,10 @@ struct CaptureMetadata {
     int32_t face[4] = {0, 0, 0, 0};         // largest face (l, t, r, b), pre-correction px; r == 0 if none
 };
 
-enum class FocusMode { Manual = 0, Continuous = 1 };
+// Manual: lens at a set distance. Continuous: HAL PDAF/laser tracking
+// (CONTINUOUS_PICTURE, the fast one). Single: one PDAF scan on the region,
+// then the HAL holds focus (AF_MODE_AUTO + AF_TRIGGER, FOCUSED_LOCKED).
+enum class FocusMode { Manual = 0, Continuous = 1, Single = 2 };
 
 struct RawFrame {
     const uint8_t* data = nullptr;
@@ -133,6 +136,8 @@ public:
     void setOpticalStabilization(bool enable);
     void setFocusDistance(float diopters);            // also switches to manual focus
     void setFocusMode(FocusMode mode);
+    // Starts AF on the current region now: Single = scan + lock, Continuous = restart scan.
+    void triggerAutofocus();
     // AF metering region, normalised to the pre-correction array (0..1); w <= 0 clears it.
     void setFocusRegion(float x, float y, float w, float h);
     void setAutoWhiteBalance(bool enable);            // HAL AWB; RAW is unaffected, we read its neutral point
@@ -185,6 +190,7 @@ private:
     float focusDiopters_ = 0.0f;
     FocusMode focusMode_ = FocusMode::Manual;
     int32_t afRegion_[5] = {0, 0, 0, 0, 0}; // l, t, r, b, weight (weight 0 = none)
+    void sendAfTriggerLocked(uint8_t trigger);
     bool autoWb_ = false;
     bool faceDetect_ = false;
 

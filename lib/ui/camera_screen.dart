@@ -133,10 +133,9 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   double _chromaNr = 0; // 0 off, 0.5 low, 1 high
   bool _nrAlignment = true;
   Offset? _focusMark; // last tap-to-focus point (normalised), shown briefly
-  int _focusGen = 0; // bumps per tap so a stale AF-lock wait gives up
   int _codec = 0; // 0 HEVC, 1 AV1
   bool _tapLocks = false; // tap: AF then hold (AF-L) instead of tracking (AF-C)
-  bool _tapSetsExposure = false; // tap also spot-meters exposure at that point
+  bool _tapSetsExposure = true; // tap also spot-meters exposure at that point
   bool _profileAvailable = false; // a chart calibration exists for this device/camera
   bool _useProfile = true;
   String _profileInfo = '';
@@ -686,10 +685,10 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                       },
                     ),
                     Segmented(
-                      options: const ['TAP SETS EXPOSURE'],
-                      selected: _tapSetsExposure ? 0 : -1,
-                      onSelected: (_) {
-                        setState(() => _tapSetsExposure = !_tapSetsExposure);
+                      options: const ['TAP: FOCUS ONLY', 'TAP: FOCUS + EXPOSURE'],
+                      selected: _tapSetsExposure ? 1 : 0,
+                      onSelected: (i) {
+                        setState(() => _tapSetsExposure = i == 1);
                         setSheet(() {});
                       },
                     ),
@@ -722,42 +721,22 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     );
   }
 
-  // Tap: hardware AF (PDAF + laser) on the region, either tracking (AF-C) or
-  // holding once it converges (AF-L). Optionally also spot-meters exposure there.
+  // Tap: hardware AF (PDAF + laser) on the region, either tracking (AF-C) or one
+  // scan that the HAL then holds (AF-L). Optionally also spot-meters exposure there.
   void _tapToFocus(Offset p, {bool lock = false}) {
     if (!_streaming) return;
     lock = lock || _tapLocks;
-    _engine.setFocusPoint(p.dx, p.dy);
-    final gen = ++_focusGen;
-    if (lock) {
-      HapticFeedback.mediumImpact();
-      _lockWhenFocused(gen);
-    }
+    _engine.focusAt(p.dx, p.dy, lock: lock);
+    if (lock) HapticFeedback.mediumImpact();
     if (_tapSetsExposure) {
       _engine.setMetering(1, p.dx, p.dy);
       _autoExpose(keepShutter: true, quiet: true);
     }
     // The box stays on screen (green once AF has landed) until the next tap.
     setState(() {
-      _afContinuous = true;
+      _afContinuous = !lock;
       _focusMark = p;
     });
-  }
-
-  // Waits for the HAL's AF to converge on the new region, then holds it (AF-L).
-  // States: 1/3 scanning, 2 passive focused, 4/5 locked, 6 passive unfocused.
-  Future<void> _lockWhenFocused(int gen) async {
-    var sawScan = false;
-    for (var i = 0; i < 30; i++) {
-      await Future<void>.delayed(const Duration(milliseconds: 100));
-      if (gen != _focusGen || !mounted) return; // superseded by a newer tap
-      final st = _engine.status()?.afState ?? 0;
-      if (st == 1 || st == 3) sawScan = true;
-      if ((sawScan || i >= 5) && (st == 2 || st == 4 || st == 5 || st == 6)) break;
-    }
-    if (gen != _focusGen || !mounted) return;
-    _engine.focusLock();
-    setState(() => _afContinuous = false);
   }
 
   void _pickProcessing() {
@@ -891,20 +870,23 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       : d > 1
       ? '${(100 / d).round()}cm'
       : '${(1 / d).toStringAsFixed(1)}m';
+  // CONTROL_AF_STATE: 0 inactive (manual), 1/3 scanning, 2 passive focused,
+  // 4 focused & locked, 5 locked but not in focus, 6 passive unfocused.
   String get _focusLabel {
     final s = _status;
     final st = s?.afState ?? 0;
-    if (_afContinuous) return st == 1 || st == 3 ? 'AF…' : 'AF-C';
-    if (s?.focusLocked ?? false) return 'AF-L ${_distanceLabel(_focus)}';
+    if (st == 1 || st == 3) return 'AF…';
+    if (_afContinuous) return 'AF-C';
+    if (s?.focusLocked ?? false) return st == 5 ? 'AF-L ✕' : 'AF-L ${_distanceLabel(_focus)}';
     return _distanceLabel(_focus);
   }
 
-  // AF has converged (tracking and focused, or locked after focusing).
+  // AF has converged (tracking and focused, locked in focus, or held manually).
   bool get _afLanded {
     final s = _status;
     if (s == null) return false;
-    if (s.focusLocked && !_afContinuous) return true;
-    return s.afState == 2 || s.afState == 4;
+    if (s.afState == 2 || s.afState == 4) return true;
+    return s.focusLocked && !_afContinuous && s.afState == 0;
   }
 
   // One-shot auto exposure: two metering passes (the second one refines very

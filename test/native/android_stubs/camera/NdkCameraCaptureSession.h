@@ -6,3 +6,4 @@ camera_status_t ACameraCaptureSession_setRepeatingRequest(ACameraCaptureSession*
 camera_status_t ACameraCaptureSession_stopRepeating(ACameraCaptureSession*);
 camera_status_t ACameraCaptureSession_abortCaptures(ACameraCaptureSession*);
 void ACameraCaptureSession_close(ACameraCaptureSession*);
+camera_status_t ACameraCaptureSession_capture(ACameraCaptureSession*, ACameraCaptureSession_captureCallbacks*, int, ACaptureRequest**, int*);

@@ -31,3 +31,4 @@ camera_status_t ACaptureRequest_setEntry_u8(ACaptureRequest*, uint32_t, uint32_t
 camera_status_t ACaptureRequest_setEntry_i32(ACaptureRequest*, uint32_t, uint32_t, const int32_t*);
 camera_status_t ACaptureRequest_setEntry_i64(ACaptureRequest*, uint32_t, uint32_t, const int64_t*);
 camera_status_t ACaptureRequest_setEntry_float(ACaptureRequest*, uint32_t, uint32_t, const float*);
+ACaptureRequest* ACaptureRequest_copy(const ACaptureRequest*);

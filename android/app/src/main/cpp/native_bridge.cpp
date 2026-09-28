@@ -868,30 +868,40 @@ EXPORT void vesper_set_focus_mode(int32_t mode) {
     if (gCamera) gCamera->setFocusMode(mode == 1 ? FocusMode::Continuous : FocusMode::Manual);
 }
 
-// Tap-to-focus at an output-normalised point (0..1, upright viewfinder).
-// Switches to continuous AF metering that region.
-EXPORT void vesper_set_focus_point(float ox, float oy) {
+// Tap-to-focus at an output-normalised point (0..1, upright viewfinder), using
+// the HAL's PDAF + laser AF. lock = 0: track the region (CONTINUOUS_PICTURE,
+// scan restarted now); lock = 1: one PDAF scan, then the HAL holds focus.
+EXPORT void vesper_focus_at(float ox, float oy, int32_t lock) {
     if (!gCamera) return;
     {
         std::lock_guard<std::mutex> lk(gFocusMutex);
         gFocus.cancel();
-        gFocusLocked = false;
+        gFocusLocked = lock != 0;
     }
     FrameGeometry g;
+    bool lensCorrection;
     {
         std::lock_guard<std::mutex> lk(gStateMutex);
         g = gGeom;
+        lensCorrection = gSettings.lensCorrection;
     }
     const SensorInfo& info = gCamera->sensorInfo();
     float u, v;
     outputToCrop(g.rot, std::clamp(ox, 0.0f, 1.0f), std::clamp(oy, 0.0f, 1.0f), u, v);
-    float ax = (g.crop[0] + u * g.crop[2]) * g.sensorMap[0] + g.sensorMap[2];
-    float ay = (g.crop[1] + v * g.crop[3]) * g.sensorMap[1] + g.sensorMap[3];
+    float rx = g.crop[0] + u * g.crop[2], ry = g.crop[1] + v * g.crop[3];
+    // The viewfinder is lens-corrected: find the raw pixel the tapped point came from.
+    if (lensCorrection && info.hasDistortion) distortRaw(info, g.sensorMap, rx, ry);
+    float ax = rx * g.sensorMap[0] + g.sensorMap[2];
+    float ay = ry * g.sensorMap[1] + g.sensorMap[3];
     float nx = ax / std::max(1, info.preWidth), ny = ay / std::max(1, info.preHeight);
-    constexpr float kHalf = 0.06f;
-    gCamera->setFocusRegion(nx - kHalf, ny - kHalf, 2 * kHalf, 2 * kHalf);
-    gCamera->setFocusMode(FocusMode::Continuous);
+    // ~8% of the frame width, square on the sensor.
+    const float hw = 0.04f, hh = 0.04f * info.preWidth / std::max(1, info.preHeight);
+    gCamera->setFocusRegion(nx - hw, ny - hh, 2 * hw, 2 * hh);
+    gCamera->setFocusMode(lock ? FocusMode::Single : FocusMode::Continuous);
+    gCamera->triggerAutofocus();
 }
+
+EXPORT void vesper_set_focus_point(float ox, float oy) { vesper_focus_at(ox, oy, 0); }
 
 EXPORT void vesper_clear_focus_point() {
     if (gCamera) gCamera->setFocusRegion(0, 0, 0, 0);

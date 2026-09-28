@@ -169,6 +169,7 @@ class VesperNative {
   late final int Function(Pointer<Utf8>, int) _status;
   late final void Function() _close;
   late final void Function(double) _focusPullTo;
+  late final void Function(double, double, int) _focusAt;
   late final void Function(double) _setFocusSpeed;
   late final void Function() _focusLock;
   late final void Function(int, double, double) _setMetering;
@@ -242,6 +243,9 @@ class VesperNative {
         'vesper_get_status',
       );
       _close = _lib.lookupFunction<Void Function(), void Function()>('vesper_close');
+      _focusAt = _lib.lookupFunction<Void Function(Float, Float, Int32), void Function(double, double, int)>(
+        'vesper_focus_at',
+      );
       _focusPullTo = _lib.lookupFunction<Void Function(Float), void Function(double)>('vesper_focus_pull_to');
       _setFocusSpeed = _lib.lookupFunction<Void Function(Float), void Function(double)>('vesper_set_focus_speed');
       _focusLock = _lib.lookupFunction<Void Function(), void Function()>('vesper_focus_lock');
@@ -426,6 +430,10 @@ class VesperNative {
     if (!Platform.isAndroid) return;
     await _channel.invokeMethod('destroyTexture');
   }
+
+  /// Hardware PDAF + laser AF at an upright viewfinder point. lock: one scan, then hold (AF-L);
+  /// otherwise keep tracking that region (AF-C).
+  void focusAt(double x, double y, {required bool lock}) => _loaded ? _focusAt(x, y, lock ? 1 : 0) : null;
 
   /// Smooth focus rack to a distance in diopters.
   void focusPullTo(double diopters) => _loaded ? _focusPullTo(diopters) : null;

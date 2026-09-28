@@ -323,6 +323,9 @@ bool CameraEngine::buildRequestLocked() {
     u8(ACAMERA_NOISE_REDUCTION_MODE, ACAMERA_NOISE_REDUCTION_MODE_OFF);
     u8(ACAMERA_EDGE_MODE, ACAMERA_EDGE_MODE_OFF);
     u8(ACAMERA_SHADING_MODE, ACAMERA_SHADING_MODE_FAST);
+    // Keeps AF regions / face rectangles in pre-correction array coordinates,
+    // which is what native_bridge maps taps into (RAW is never corrected anyway).
+    u8(ACAMERA_DISTORTION_CORRECTION_MODE, ACAMERA_DISTORTION_CORRECTION_MODE_OFF);
     u8(ACAMERA_STATISTICS_LENS_SHADING_MAP_MODE, ACAMERA_STATISTICS_LENS_SHADING_MAP_MODE_ON);
     u8(ACAMERA_LENS_OPTICAL_STABILIZATION_MODE,
        ois_ ? ACAMERA_LENS_OPTICAL_STABILIZATION_MODE_ON : ACAMERA_LENS_OPTICAL_STABILIZATION_MODE_OFF);
@@ -337,8 +340,11 @@ void CameraEngine::applyControlsLocked() {
     u8(ACAMERA_CONTROL_AWB_MODE, autoWb_ ? ACAMERA_CONTROL_AWB_MODE_AUTO : ACAMERA_CONTROL_AWB_MODE_OFF);
     u8(ACAMERA_STATISTICS_FACE_DETECT_MODE,
        faceDetect_ && info_.maxFaces > 0 ? ACAMERA_STATISTICS_FACE_DETECT_MODE_SIMPLE : ACAMERA_STATISTICS_FACE_DETECT_MODE_OFF);
-    if (focusMode_ == FocusMode::Continuous && info_.minFocusDiopters > 0) {
-        u8(ACAMERA_CONTROL_AF_MODE, ACAMERA_CONTROL_AF_MODE_CONTINUOUS_VIDEO);
+    const uint8_t idle = ACAMERA_CONTROL_AF_TRIGGER_IDLE;
+    ACaptureRequest_setEntry_u8(request_, ACAMERA_CONTROL_AF_TRIGGER, 1, &idle);
+    if (focusMode_ != FocusMode::Manual && info_.minFocusDiopters > 0) {
+        u8(ACAMERA_CONTROL_AF_MODE, focusMode_ == FocusMode::Single ? ACAMERA_CONTROL_AF_MODE_AUTO
+                                                                    : ACAMERA_CONTROL_AF_MODE_CONTINUOUS_PICTURE);
         if (afRegion_[4] > 0 && info_.maxAfRegions > 0) {
             ACaptureRequest_setEntry_i32(request_, ACAMERA_CONTROL_AF_REGIONS, 5, afRegion_);
         } else {
@@ -349,6 +355,28 @@ void CameraEngine::applyControlsLocked() {
         u8(ACAMERA_CONTROL_AF_MODE, ACAMERA_CONTROL_AF_MODE_OFF);
         ACaptureRequest_setEntry_float(request_, ACAMERA_LENS_FOCUS_DISTANCE, 1, &focusDiopters_);
     }
+}
+
+// One-shot capture carrying an AF trigger; the repeating request stays IDLE.
+void CameraEngine::sendAfTriggerLocked(uint8_t trigger) {
+    if (!session_ || !request_) return;
+    ACaptureRequest* once = ACaptureRequest_copy(request_);
+    if (!once) return;
+    ACaptureRequest_setEntry_u8(once, ACAMERA_CONTROL_AF_TRIGGER, 1, &trigger);
+    static ACameraCaptureSession_captureCallbacks cb;
+    cb.context = this;
+    cb.onCaptureCompleted = sOnCaptureCompleted;
+    if (ACameraCaptureSession_capture(session_, &cb, 1, &once, nullptr) != ACAMERA_OK) LOGW("AF trigger capture failed");
+    ACaptureRequest_free(once);
+}
+
+void CameraEngine::triggerAutofocus() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (focusMode_ == FocusMode::Manual) return;
+    // CANCEL clears any previous lock / restarts continuous scanning on the new
+    // region; START then runs the PDAF scan that ends FOCUSED_LOCKED (Single).
+    sendAfTriggerLocked(ACAMERA_CONTROL_AF_TRIGGER_CANCEL);
+    if (focusMode_ == FocusMode::Single) sendAfTriggerLocked(ACAMERA_CONTROL_AF_TRIGGER_START);
 }
 
 // Writes the current fps/exposure/ISO into the request and (re)submits it.
@@ -410,7 +438,7 @@ void CameraEngine::setFocusDistance(float diopters) {
 
 void CameraEngine::setFocusMode(FocusMode mode) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (mode == FocusMode::Manual && focusMode_ == FocusMode::Continuous) {
+    if (mode == FocusMode::Manual && focusMode_ != FocusMode::Manual) {
         // Lock: freeze the lens where AF last put it.
         std::lock_guard<std::mutex> ml(metaMutex_);
         const auto& last = metaRing_[(metaNext_ + metaRing_.size() - 1) % metaRing_.size()];
