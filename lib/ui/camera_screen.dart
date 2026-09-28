@@ -6,7 +6,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../services/vesper_native.dart';
+import 'audio_and_histogram.dart';
+import 'cine_control_tile.dart';
+import 'settings_sheet.dart';
 import 'value_picker.dart';
+import 'wheel_dial.dart';
+
+enum OpenWheelType { none, shutter, iso, fps, wb }
 
 class CameraScreen extends StatefulWidget {
   const CameraScreen({super.key});
@@ -18,102 +24,26 @@ class CameraScreen extends StatefulWidget {
 class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   final VesperNative _engine = VesperNative.instance;
 
-  static const _monitoringLabels = ['APPLE LOG', 'REC.709 LUT', 'FALSE COLOR', 'PEAKING', 'ZEBRAS'];
   static const _angles = [360.0, 270.0, 180.0, 172.8, 144.0, 90.0, 45.0, 22.5, 11.25, 5.625, 2.8, 1.4, 0.7];
   // Shutter-speed denominators in 1/3 stops plus the cinema standards.
   static const _speedDenominators = [
-    1.0,
-    1.3,
-    1.6,
-    2.0,
-    2.5,
-    3.0,
-    4.0,
-    5.0,
-    6.0,
-    8.0,
-    10.0,
-    13.0,
-    15.0,
-    20.0,
-    24.0,
-    25.0,
-    30.0,
-    40.0,
-    48.0,
-    50.0,
-    60.0,
-    80.0,
-    96.0,
-    100.0,
-    120.0,
-    125.0,
-    160.0,
-    200.0,
-    250.0,
-    320.0,
-    400.0,
-    500.0,
-    640.0,
-    800.0,
-    1000.0,
-    1250.0,
-    1600.0,
-    2000.0,
-    2500.0,
-    3200.0,
-    4000.0,
-    5000.0,
-    6400.0,
-    8000.0,
-    10000.0,
-    12800.0,
-    16000.0,
-    20000.0,
-    25600.0,
-    32000.0,
-    40000.0,
-    51200.0,
-    64000.0,
-    80000.0,
-    100000.0,
+    1.0, 1.3, 1.6, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 13.0, 15.0, 20.0,
+    24.0, 25.0, 30.0, 40.0, 48.0, 50.0, 60.0, 80.0, 96.0, 100.0, 120.0, 125.0,
+    160.0, 200.0, 250.0, 320.0, 400.0, 500.0, 640.0, 800.0, 1000.0, 1250.0,
+    1600.0, 2000.0, 2500.0, 3200.0, 4000.0, 5000.0, 6400.0, 8000.0, 10000.0,
+    12800.0, 16000.0, 20000.0, 25600.0, 32000.0, 40000.0, 51200.0, 64000.0,
+    80000.0, 100000.0,
   ];
   static const _isoStops = [
-    25,
-    32,
-    40,
-    50,
-    64,
-    80,
-    100,
-    125,
-    160,
-    200,
-    250,
-    320,
-    400,
-    500,
-    640,
-    800,
-    1000,
-    1250,
-    1600,
-    2000,
-    2500,
-    3200,
-    4000,
-    5000,
-    6400,
-    8000,
-    10000,
-    12800,
+    25, 32, 40, 50, 64, 80, 100, 125, 160, 200, 250, 320, 400, 500, 640, 800,
+    1000, 1250, 1600, 2000, 2500, 3200, 4000, 5000, 6400, 8000, 10000, 12800,
   ];
   static const _allFps = [23.976, 24.0, 25.0, 29.97, 30.0, 48.0, 50.0, 60.0];
 
   CameraCapabilities? _caps;
   String? _cameraId;
   bool _streaming = false;
-  int _monitoringMode = 1;
+  int _monitoringMode = 1; // 0 = Apple Log, 1 = Rec.709 LUT, 2 = False Color, 3 = Peaking, 4 = Zebras
   int _cropMode = 0; // 0 = 16:9, 1 = 4:3 open gate
   bool _speedMode = false; // shutter shown/set as 1/x instead of an angle
   double _shutterAngle = 180;
@@ -151,6 +81,9 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   bool _stopping = false;
   Timer? _poll;
   late final AnimationController _pulse;
+
+  // Ronin 4D style interactive floating pop-open wheel dial state
+  OpenWheelType _activeWheel = OpenWheelType.none;
 
   bool get _recording => _recordingFile != null;
 
@@ -377,11 +310,6 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg), duration: const Duration(seconds: 2)));
   }
 
-  void _cycleMonitoring() {
-    setState(() => _monitoringMode = (_monitoringMode + 1) % _monitoringLabels.length);
-    _engine.setMonitoringMode(_monitoringMode);
-  }
-
   Future<void> _toggleCrop() async {
     if (_recording) return;
     setState(() {
@@ -408,134 +336,25 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     _toast('White balance locked: ${_kelvin}K, tint $_tint');
   }
 
-  void _pickFps() {
-    if (_recording) return;
-    final opts = _fpsOptions;
-    showWheelPicker<double>(
-      context: context,
-      title: 'FRAME RATE (max ${(_caps?.maxFpsFor(_cropMode) ?? 30).round()} at ${_cropMode == 0 ? '16:9' : '4:3'})',
-      values: opts,
-      label: _fpsLabel,
-      initialIndex: opts.indexOf(_fps),
-      onChanged: (f) {
-        setState(() => _fps = f);
-        _engine.setFrameRate(f);
-        _applyShutter();
-      },
-    );
-  }
-
   String _fpsLabel(double f) => f % 1 == 0 ? f.toStringAsFixed(0) : f.toStringAsFixed(f * 1000 % 10 == 0 ? 2 : 3);
 
-  void _pickShutter() {
+  List<int> _buildSpeedList() {
     final minNs = _caps?.minExposureNs ?? 10000;
     final maxNs = [_caps?.maxExposureNs ?? _frameNs, _frameNs].reduce((a, b) => a < b ? a : b);
     final speeds = _speedDenominators.map((d) => (1e9 / d).round()).where((ns) => ns >= minNs && ns <= maxNs).toList()
       ..add(maxNs)
       ..add(minNs);
-    final speedList = speeds.toSet().toList()..sort((a, b) => b.compareTo(a));
-    final angleList = _angles.where((a) => a / 360 * _frameNs >= minNs).toList();
-
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: const Color(0xEE101215),
-      barrierColor: Colors.transparent,
-      builder: (_) => StatefulBuilder(
-        builder: (ctx, setSheet) {
-          int nearest(List<int> l, int v) {
-            var best = 0;
-            for (var i = 0; i < l.length; i++) {
-              if ((l[i] - v).abs() < (l[best] - v).abs()) best = i;
-            }
-            return best;
-          }
-
-          return SheetBody(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    'SHUTTER  (sensor ${_speedLabel(maxNs)} … ${_speedLabel(minNs)})',
-                    style: const TextStyle(
-                      color: Colors.white54,
-                      fontSize: 11,
-                      fontWeight: FontWeight.bold,
-                      letterSpacing: 1.5,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Segmented(
-                    options: const ['ANGLE', 'SPEED'],
-                    selected: _speedMode ? 1 : 0,
-                    onSelected: (i) {
-                      setState(() {
-                        if (i == 1 && !_speedMode) _exposureNs = _angleNs;
-                        if (i == 0 && _speedMode) {
-                          _shutterAngle =
-                              angleList[nearest(
-                                angleList.map((a) => (a / 360 * _frameNs).round()).toList(),
-                                _exposureNs,
-                              )];
-                        }
-                        _speedMode = i == 1;
-                      });
-                      setSheet(() {});
-                      _applyShutter();
-                    },
-                  ),
-                  const SizedBox(height: 6),
-                  if (_speedMode)
-                    WheelSelector<int>(
-                      key: const ValueKey('speed'),
-                      values: speedList,
-                      label: _speedLabel,
-                      initialIndex: nearest(speedList, _exposureNs),
-                      onChanged: (ns) {
-                        setState(() => _exposureNs = ns);
-                        _applyShutter();
-                      },
-                    )
-                  else
-                    WheelSelector<double>(
-                      key: const ValueKey('angle'),
-                      values: angleList,
-                      label: _angleLabel,
-                      initialIndex: angleList.indexOf(_shutterAngle).clamp(0, angleList.length - 1),
-                      onChanged: (a) {
-                        setState(() => _shutterAngle = a);
-                        _applyShutter();
-                      },
-                    ),
-                ],
-              ),
-            ),
-          );
-        },
-      ),
-    );
+    return speeds.toSet().toList()..sort((a, b) => b.compareTo(a));
   }
 
-  void _pickIso() {
+  List<double> _buildAngleList() {
+    final minNs = _caps?.minExposureNs ?? 10000;
+    return _angles.where((a) => a / 360 * _frameNs >= minNs).toList();
+  }
+
+  List<int> _buildIsoList() {
     final minIso = _caps?.minIso ?? 50, maxIso = _caps?.maxIso ?? 3200;
-    final isos = {minIso, ..._isoStops.where((i) => i > minIso && i < maxIso), maxIso}.toList()..sort();
-    var initial = 0;
-    for (var i = 0; i < isos.length; i++) {
-      if ((isos[i] - _iso).abs() < (isos[initial] - _iso).abs()) initial = i;
-    }
-    showWheelPicker<int>(
-      context: context,
-      title: 'ISO  (native range $minIso–$maxIso)',
-      values: isos,
-      label: (i) => '$i',
-      initialIndex: initial,
-      onChanged: (i) {
-        setState(() => _iso = i);
-        _applyShutter();
-      },
-    );
+    return {minIso, ..._isoStops.where((i) => i > minIso && i < maxIso), maxIso}.toList()..sort();
   }
 
   void _pickWhiteBalance() {
@@ -737,131 +556,89 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     setState(() {
       _afContinuous = !lock;
       _focusMark = p;
+      _activeWheel = OpenWheelType.none;
     });
   }
 
-  void _pickProcessing() {
-    Widget row(String label, Widget control) => Padding(
-      padding: const EdgeInsets.symmetric(vertical: 5),
-      child: Row(
-        children: [
-          SizedBox(
-            width: 170,
-            child: Text(label, style: const TextStyle(color: Colors.white70, fontSize: 12)),
-          ),
-          control,
-        ],
-      ),
-    );
-    const nrLevels = [0.0, 0.5, 0.7, 0.85];
-    const chromaLevels = [0.0, 0.5, 1.0];
+  void _openSettings() {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: const Color(0xEE101215),
-      barrierColor: Colors.transparent,
+      barrierColor: Colors.black54,
       builder: (_) => StatefulBuilder(
-        builder: (ctx, setSheet) {
-          void update(VoidCallback f) {
-            setState(f);
+        builder: (ctx, setSheet) => SettingsSheet(
+          codec: _codec,
+          onCodecChanged: (c) {
+            setState(() => _codec = c);
             setSheet(() {});
-          }
-
-          return SheetBody(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Text(
-                    'PROCESSING (applied to recording and viewfinder)',
-                    style: TextStyle(color: Colors.white54, fontSize: 11, fontWeight: FontWeight.bold),
-                  ),
-                  const SizedBox(height: 8),
-                  row(
-                    'Lens distortion correction',
-                    Segmented(
-                      options: const ['OFF', 'ON'],
-                      selected: _lensCorrection ? 1 : 0,
-                      onSelected: (i) {
-                        update(() => _lensCorrection = i == 1);
-                        _engine.setLensCorrection(_lensCorrection);
-                      },
-                    ),
-                  ),
-                  row(
-                    'Hot / dead pixel repair',
-                    Segmented(
-                      options: const ['OFF', 'ON'],
-                      selected: _hotPixelFix ? 1 : 0,
-                      onSelected: (i) {
-                        update(() => _hotPixelFix = i == 1);
-                        _engine.setHotPixelFix(_hotPixelFix);
-                      },
-                    ),
-                  ),
-                  row(
-                    'Temporal noise reduction',
-                    Segmented(
-                      options: const ['OFF', 'LOW', 'MED', 'HIGH'],
-                      selected: nrLevels.indexOf(_temporalNr),
-                      onSelected: (i) {
-                        update(() => _temporalNr = nrLevels[i]);
-                        _engine.setTemporalNr(_temporalNr);
-                      },
-                    ),
-                  ),
-                  row(
-                    '  ↳ motion alignment',
-                    Segmented(
-                      options: const ['OFF', 'ON'],
-                      selected: _nrAlignment ? 1 : 0,
-                      onSelected: (i) {
-                        update(() => _nrAlignment = i == 1);
-                        _engine.setNrAlignment(_nrAlignment);
-                      },
-                    ),
-                  ),
-                  row(
-                    'Colour calibration',
-                    Segmented(
-                      options: const ['FACTORY', 'CHART PROFILE'],
-                      selected: _profileAvailable && _useProfile ? 1 : 0,
-                      onSelected: (i) {
-                        if (!_profileAvailable) {
-                          _toast('No chart profile for this phone yet (see tools/calibration)');
-                          return;
-                        }
-                        update(() => _useProfile = i == 1);
-                        _engine.useColorProfile(_useProfile);
-                      },
-                    ),
-                  ),
-                  if (_profileAvailable)
-                    Text(_profileInfo, style: const TextStyle(color: Colors.white38, fontSize: 10)),
-                  row(
-                    'Calibration frame (chart)',
-                    TextButton(
-                      onPressed: _streaming && _calibrationDir != null ? _captureCalibration : null,
-                      child: const Text('CAPTURE'),
-                    ),
-                  ),
-                  row(
-                    'Chroma noise reduction',
-                    Segmented(
-                      options: const ['OFF', 'LOW', 'HIGH'],
-                      selected: chromaLevels.indexOf(_chromaNr),
-                      onSelected: (i) {
-                        update(() => _chromaNr = chromaLevels[i]);
-                        _engine.setChromaNr(_chromaNr);
-                      },
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          );
-        },
+          },
+          cropMode: _cropMode,
+          onCropModeChanged: (m) async {
+            await _toggleCrop();
+            setSheet(() {});
+          },
+          isRecording: _recording,
+          lensCorrection: _lensCorrection,
+          onLensCorrectionChanged: (val) {
+            setState(() => _lensCorrection = val);
+            _engine.setLensCorrection(val);
+            setSheet(() {});
+          },
+          hotPixelFix: _hotPixelFix,
+          onHotPixelFixChanged: (val) {
+            setState(() => _hotPixelFix = val);
+            _engine.setHotPixelFix(val);
+            setSheet(() {});
+          },
+          temporalNr: _temporalNr,
+          onTemporalNrChanged: (val) {
+            setState(() => _temporalNr = val);
+            _engine.setTemporalNr(val);
+            setSheet(() {});
+          },
+          nrAlignment: _nrAlignment,
+          onNrAlignmentChanged: (val) {
+            setState(() => _nrAlignment = val);
+            _engine.setNrAlignment(val);
+            setSheet(() {});
+          },
+          chromaNr: _chromaNr,
+          onChromaNrChanged: (val) {
+            setState(() => _chromaNr = val);
+            _engine.setChromaNr(val);
+            setSheet(() {});
+          },
+          profileAvailable: _profileAvailable,
+          useProfile: _useProfile,
+          profileInfo: _profileInfo,
+          onUseProfileChanged: (val) {
+            if (!_profileAvailable) {
+              _toast('No chart profile for this phone yet (see tools/calibration)');
+              return;
+            }
+            setState(() => _useProfile = val);
+            _engine.useColorProfile(val);
+            setSheet(() {});
+          },
+          onCaptureCalibration: _streaming && _calibrationDir != null ? _captureCalibration : null,
+          tapLocks: _tapLocks,
+          onTapLocksChanged: (val) {
+            setState(() => _tapLocks = val);
+            setSheet(() {});
+          },
+          tapSetsExposure: _tapSetsExposure,
+          onTapSetsExposureChanged: (val) {
+            setState(() => _tapSetsExposure = val);
+            setSheet(() {});
+          },
+          faceDetect: _faceDetect,
+          onFaceDetectChanged: (val) {
+            setState(() => _faceDetect = val);
+            _engine.setFaceDetection(val);
+            setSheet(() {});
+          },
+        ),
       ),
     );
   }
@@ -871,6 +648,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       : d > 1
       ? '${(100 / d).round()}cm'
       : '${(1 / d).toStringAsFixed(1)}m';
+
   // CONTROL_AF_STATE: 0 inactive (manual), 1/3 scanning, 2 passive focused,
   // 4 focused & locked, 5 locked but not in focus, 6 passive unfocused.
   String get _focusLabel {
@@ -941,10 +719,17 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   Widget build(BuildContext context) {
     final s = _status;
     final hot = (s?.thermal ?? 0) >= 2;
+    final speedList = _buildSpeedList();
+    final angleList = _buildAngleList();
+    final isoList = _buildIsoList();
+    final fpsList = _fpsOptions;
+
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(
         children: [
+          // 1. Center Viewfinder: exact output aspect (16:9 or 4:3 open gate)
+          // Texture coordinates normalised 0..1 to this rect strictly preserved!
           Center(
             child: AspectRatio(
               aspectRatio: _cropMode == 0 ? 16 / 9 : 4 / 3,
@@ -959,6 +744,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                 child: _textureId != null
                     ? LayoutBuilder(
                         builder: (ctx, box) => GestureDetector(
+                          behavior: HitTestBehavior.opaque,
                           onTapUp: (d) => _tapToFocus(
                             Offset(d.localPosition.dx / box.maxWidth, d.localPosition.dy / box.maxHeight),
                           ),
@@ -1014,11 +800,15 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
               ),
             ),
           ),
+
+          // Central crosshair overlay
           const Center(
             child: SizedBox(width: 16, height: 16, child: CustomPaint(painter: CrosshairPainter())),
           ),
 
-          // Top HUD (dark backing so it stays readable over bright frames)
+          // 2. TOP BAR
+          // Shows: APPLE LOG · 2020 - Resolution selector - Rec.709 LUT toggle - Denoters (False color, Peaking, Zebras)
+          // Recording status & duration, telemetry
           Positioned(
             left: 0,
             right: 0,
@@ -1028,41 +818,78 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                 gradient: LinearGradient(
                   begin: Alignment.topCenter,
                   end: Alignment.bottomCenter,
-                  colors: [Color(0xCC000000), Color(0x00000000)],
+                  colors: [Color(0xDD000000), Color(0x00000000)],
                 ),
               ),
               child: SafeArea(
                 bottom: false,
                 child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
                   child: Row(
                     children: [
+                      // Apple Log badge
                       _badge('APPLE LOG · 2020', Colors.amber),
                       const SizedBox(width: 8),
-                      _chip(_cropMode == 0 ? '16:9' : 'OPEN GATE 4:3', onTap: _toggleCrop),
-                      const SizedBox(width: 8),
-                      _chip(_monitoringLabels[_monitoringMode], onTap: _cycleMonitoring, active: _monitoringMode != 0),
-                      const SizedBox(width: 8),
-                      _chip('PROCESSING', onTap: _pickProcessing),
-                      const SizedBox(width: 8),
+
+                      // Resolution / aspect selector
                       _chip(
-                        _codec == 0 ? 'HEVC 10-BIT' : 'AV1 10-BIT',
-                        onTap: _recording ? null : () => setState(() => _codec = 1 - _codec),
+                        _cropMode == 0 ? '16:9' : '4:3 OPEN GATE',
+                        onTap: _toggleCrop,
+                        active: _cropMode == 1,
                       ),
+                      const SizedBox(width: 8),
+
+                      // Dedicated LUT toggle: APPLE LOG (native RAW/log) vs REC.709 LUT
+                      _chip(
+                        _monitoringMode == 1 ? 'REC.709 LUT' : 'LOG VIEW',
+                        active: _monitoringMode == 1,
+                        onTap: () {
+                          // Toggle between 0 (Apple Log) and 1 (Rec.709 LUT)
+                          setState(() {
+                            _monitoringMode = (_monitoringMode == 1) ? 0 : 1;
+                          });
+                          _engine.setMonitoringMode(_monitoringMode);
+                        },
+                      ),
+                      const SizedBox(width: 10),
+
+                      // Separate exposure/focus assistance denoters:
+                      // FC (False Color = 2), PEAK (Peaking = 3), ZEBRA (Zebras = 4)
+                      _toolDenoter('FC', _monitoringMode == 2, () {
+                        setState(() {
+                          _monitoringMode = (_monitoringMode == 2) ? 1 : 2;
+                        });
+                        _engine.setMonitoringMode(_monitoringMode);
+                      }),
+                      const SizedBox(width: 4),
+                      _toolDenoter('PEAK', _monitoringMode == 3, () {
+                        setState(() {
+                          _monitoringMode = (_monitoringMode == 3) ? 1 : 3;
+                        });
+                        _engine.setMonitoringMode(_monitoringMode);
+                      }),
+                      const SizedBox(width: 4),
+                      _toolDenoter('ZEBRA', _monitoringMode == 4, () {
+                        setState(() {
+                          _monitoringMode = (_monitoringMode == 4) ? 1 : 4;
+                        });
+                        _engine.setMonitoringMode(_monitoringMode);
+                      }),
+
                       const Spacer(),
+
+                      // Hardware / thermal warning
                       if (hot) ...[
                         _badge(s!.thermal >= 3 ? 'THERMAL LIMIT' : 'PHONE WARM', Colors.orangeAccent),
                         const SizedBox(width: 8),
                       ],
+
+                      // Live engine telemetry
                       if (s != null)
                         Text(
                           '${s.fps.toStringAsFixed(1)} FPS'
                           '${s.gpuMs > 0 ? ' · GPU ${s.gpuMs.toStringAsFixed(1)}ms' : ''}'
-                          '${s.nrThrottled
-                              ? ' · NR PAUSED'
-                              : s.alignThrottled
-                              ? ' · ALIGN OFF'
-                              : ''}'
+                          '${s.nrThrottled ? ' · NR PAUSED' : s.alignThrottled ? ' · ALIGN OFF' : ''}'
                           '${s.cameraDrops + s.framesDropped > 0 ? ' · ${s.cameraDrops + s.framesDropped} DROP' : ''}',
                           style: TextStyle(
                             color: s.cameraDrops + s.framesDropped > 0 ? Colors.orangeAccent : Colors.white54,
@@ -1070,8 +897,10 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                             fontFamily: 'monospace',
                           ),
                         ),
-                      const SizedBox(width: 12),
-                      if (_recording)
+                      const SizedBox(width: 10),
+
+                      // Recording status & timecode
+                      if (_recording) ...[
                         FadeTransition(
                           opacity: _pulse,
                           child: Container(
@@ -1079,26 +908,42 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                             decoration: BoxDecoration(
                               color: Colors.red.shade900,
                               borderRadius: BorderRadius.circular(4),
+                              border: Border.all(color: Colors.redAccent),
                             ),
-                            child: Text(
-                              _timecode(s?.durationMs ?? 0),
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontFamily: 'monospace',
-                                fontWeight: FontWeight.bold,
-                                fontSize: 13,
-                              ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Container(
+                                  width: 7,
+                                  height: 7,
+                                  decoration: const BoxDecoration(
+                                    color: Colors.white,
+                                    shape: BoxShape.circle,
+                                  ),
+                                ),
+                                const SizedBox(width: 6),
+                                Text(
+                                  _timecode(s?.durationMs ?? 0),
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontFamily: 'monospace',
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
                         ),
-                      if (_recording) ...[
                         const SizedBox(width: 8),
-                        Icon(
-                          s?.audio == true ? Icons.mic : Icons.mic_off,
-                          color: s?.audio == true ? Colors.greenAccent : Colors.white38,
-                          size: 16,
-                        ),
                       ],
+
+                      // Settings button (pushes full settings sheet)
+                      IconButton(
+                        icon: const Icon(Icons.settings, color: Colors.white70, size: 20),
+                        tooltip: 'Settings',
+                        onPressed: _openSettings,
+                      ),
                     ],
                   ),
                 ),
@@ -1106,35 +951,93 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
             ),
           ),
 
-          // Bottom control rack
+          // 3. LEFT CONTROL RACK (DJI Ronin 4D / Blackmagic layout)
+          // Moves all main controls to the left side without blocking camera feed
           Positioned(
-            left: 0,
-            right: 0,
-            bottom: 0,
-            child: Container(
-              color: Colors.black.withValues(alpha: 0.85),
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            left: 12,
+            top: 50,
+            bottom: 44,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  _pill('FPS', _fpsLabel(_fps), onTap: _recording ? null : _pickFps),
-                  _pill(
-                    'SHUTTER',
-                    _speedMode ? _speedLabel(_exposureNs) : _angleLabel(_shutterAngle),
-                    subtitle: _speedMode ? _angleLabel(_exposureNs / _frameNs * 360) : _speedLabel(_currentExposureNs),
-                    onTap: _pickShutter,
+                  // FPS control
+                  CineControlTile(
+                    label: 'FPS',
+                    value: _fpsLabel(_fps),
+                    active: _activeWheel == OpenWheelType.fps,
+                    enabled: !_recording,
+                    onTap: () {
+                      setState(() {
+                        _activeWheel = _activeWheel == OpenWheelType.fps ? OpenWheelType.none : OpenWheelType.fps;
+                      });
+                    },
                   ),
-                  _pill('ISO', '$_iso', onTap: _pickIso),
-                  _pill(
-                    'WB',
-                    '${_kelvin}K',
-                    subtitle: _awbAuto ? 'GOOGLE AWB' : 'TINT ${_tint > 0 ? '+' : ''}$_tint',
+
+                  // SHUTTER control (tap toggles Ronin 4D wheel dial, long press switches Angle/Speed)
+                  CineControlTile(
+                    label: 'SHUTTER',
+                    value: _speedMode ? _speedLabel(_exposureNs) : _angleLabel(_shutterAngle),
+                    subtitle: _speedMode ? 'SPD' : 'ANG',
+                    active: _activeWheel == OpenWheelType.shutter,
+                    onTap: () {
+                      setState(() {
+                        _activeWheel = _activeWheel == OpenWheelType.shutter ? OpenWheelType.none : OpenWheelType.shutter;
+                      });
+                    },
+                    onLongPress: () {
+                      // Switch between angle and speed mode
+                      setState(() {
+                        if (!_speedMode) {
+                          _speedMode = true;
+                          _exposureNs = _angleNs;
+                        } else {
+                          _speedMode = false;
+                        }
+                      });
+                      _applyShutter();
+                      _toast('Shutter mode: ${_speedMode ? 'Speed (1/s)' : 'Angle (°)'}');
+                    },
+                  ),
+
+                  // ISO control (tap toggles Ronin 4D wheel dial)
+                  CineControlTile(
+                    label: 'ISO',
+                    value: '$_iso',
+                    active: _activeWheel == OpenWheelType.iso,
+                    onTap: () {
+                      setState(() {
+                        _activeWheel = _activeWheel == OpenWheelType.iso ? OpenWheelType.none : OpenWheelType.iso;
+                      });
+                    },
+                  ),
+
+                  // WHITE BALANCE control
+                  CineControlTile(
+                    label: 'WB',
+                    value: '${_kelvin}K',
+                    subtitle: _awbAuto ? 'AUTO' : '${_tint > 0 ? '+' : ''}$_tint',
                     onTap: _pickWhiteBalance,
                   ),
-                  GestureDetector(
+
+                  // FOCUS control
+                  CineControlTile(
+                    label: 'FOCUS',
+                    value: _focusLabel,
+                    subtitle: _afContinuous ? 'AF-C' : 'MAN',
+                    accentColor: _afLanded ? Colors.greenAccent : null,
+                    onTap: (_caps?.minFocusDiopters ?? 0) > 0 ? _pickFocus : null,
+                  ),
+
+                  // AUTO-EXPOSURE (AE) trigger
+                  CineControlTile(
+                    label: 'AUTO',
+                    value: 'AE',
+                    subtitle: 'HOLD:ISO',
+                    enabled: _streaming,
                     onTap: _streaming
                         ? () {
-                            _engine.setMetering(0); // centre-weighted, faces first
+                            _engine.setMetering(0);
                             _autoExpose(keepShutter: true);
                           }
                         : null,
@@ -1144,37 +1047,34 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                             _autoExpose(keepShutter: false);
                           }
                         : null,
-                    child: _pill('AUTO', 'AE', subtitle: 'hold: ISO', onTap: null, enabled: _streaming),
                   ),
-                  IconButton(
-                    icon: const Icon(Icons.colorize_rounded, color: Colors.white70, size: 20),
-                    tooltip: 'Meter white balance from centre',
-                    onPressed: _streaming ? _lockWhiteBalance : null,
+
+                  // OIS toggle
+                  CineControlTile(
+                    label: 'STAB',
+                    value: _ois ? 'OIS ON' : 'OIS OFF',
+                    active: _ois,
+                    accentColor: _ois ? Colors.greenAccent : Colors.white24,
+                    onTap: () {
+                      setState(() => _ois = !_ois);
+                      _engine.setOis(_ois);
+                    },
                   ),
-                  _pill('FOCUS', _focusLabel, onTap: (_caps?.minFocusDiopters ?? 0) > 0 ? _pickFocus : null),
-                  _toggle('OIS', _ois, Colors.greenAccent, () {
-                    setState(() => _ois = !_ois);
-                    _engine.setOis(_ois);
-                  }),
+
+                  // WB Spot Color Picker
                   GestureDetector(
-                    onTap: _streaming ? _toggleRecording : null,
+                    onTap: _streaming ? _lockWhiteBalance : null,
                     child: Container(
-                      width: 54,
-                      height: 54,
+                      width: 74,
+                      margin: const EdgeInsets.symmetric(vertical: 2.5),
+                      padding: const EdgeInsets.symmetric(vertical: 5),
                       decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        border: Border.all(color: Colors.white, width: 3),
+                        color: const Color(0xE0101216),
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(color: Colors.white12),
                       ),
-                      child: Center(
-                        child: AnimatedContainer(
-                          duration: const Duration(milliseconds: 200),
-                          width: _recording ? 20 : 40,
-                          height: _recording ? 20 : 40,
-                          decoration: BoxDecoration(
-                            color: _stopping ? Colors.grey : Colors.redAccent,
-                            borderRadius: BorderRadius.circular(_recording ? 4 : 20),
-                          ),
-                        ),
+                      child: const Center(
+                        child: Icon(Icons.colorize_rounded, color: Colors.white70, size: 16),
                       ),
                     ),
                   ),
@@ -1182,9 +1082,196 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
               ),
             ),
           ),
+
+          // 4. FLOATING RONIN 4D STYLE WHEEL DIAL
+          // Appears immediately next to the left control rack without blocking viewfinder
+          if (_activeWheel != OpenWheelType.none)
+            Positioned(
+              left: 92,
+              top: _activeWheel == OpenWheelType.fps
+                  ? 50
+                  : _activeWheel == OpenWheelType.shutter
+                  ? 85
+                  : 125,
+              child: _buildActiveWheelDial(speedList, angleList, isoList, fpsList),
+            ),
+
+          // 5. RIGHT SIDE RECORD BUTTON (Center-right without overlapping camera feed)
+          Positioned(
+            right: 18,
+            top: 0,
+            bottom: 0,
+            child: Center(
+              child: GestureDetector(
+                onTap: _streaming ? _toggleRecording : null,
+                child: Container(
+                  width: 66,
+                  height: 66,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: const Color(0xCC0D0E12),
+                    border: Border.all(
+                      color: _recording ? Colors.redAccent : Colors.white70,
+                      width: 3.5,
+                    ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: _recording ? Colors.red.withValues(alpha: 0.4) : Colors.black87,
+                        blurRadius: 14,
+                        offset: const Offset(0, 0),
+                      ),
+                    ],
+                  ),
+                  child: Center(
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 200),
+                      width: _recording ? 22 : 46,
+                      height: _recording ? 22 : 46,
+                      decoration: BoxDecoration(
+                        color: _stopping ? Colors.grey : Colors.redAccent,
+                        borderRadius: BorderRadius.circular(_recording ? 5 : 23),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+
+          // 6. BOTTOM BAR (Dark, high-contrast, readable in sunlight, monospace numerals)
+          // Contains Cinema Histogram + Dual-channel Audio Meter
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 0,
+            child: Container(
+              color: const Color(0xEE090B0D),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 5),
+              child: Row(
+                children: [
+                  // Histogram
+                  CinemaHistogram(
+                    exposureNs: _currentExposureNs.toDouble(),
+                    iso: _iso,
+                  ),
+                  const SizedBox(width: 14),
+
+                  // Dual Audio Meter
+                  AudioMeterBar(
+                    active: _recording,
+                    audioTrackPresent: s?.audio ?? true,
+                    level: _recording ? 0.68 : 0.0,
+                  ),
+
+                  const Spacer(),
+
+                  // Quick indicators: Codec & Aspect
+                  Text(
+                    '${_codec == 0 ? 'HEVC 10b' : 'AV1 10b'} · ${_cropMode == 0 ? '16:9' : '4:3'}',
+                    style: const TextStyle(
+                      color: Colors.white54,
+                      fontSize: 10,
+                      fontFamily: 'monospace',
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  if (_useProfile && _profileAvailable)
+                    const Text(
+                      '· CAL',
+                      style: TextStyle(
+                        color: Colors.amber,
+                        fontSize: 10,
+                        fontFamily: 'monospace',
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
         ],
       ),
     );
+  }
+
+  Widget _buildActiveWheelDial(
+    List<int> speedList,
+    List<double> angleList,
+    List<int> isoList,
+    List<double> fpsList,
+  ) {
+    switch (_activeWheel) {
+      case OpenWheelType.shutter:
+        if (_speedMode) {
+          int nearestIndex = 0;
+          for (var i = 0; i < speedList.length; i++) {
+            if ((speedList[i] - _exposureNs).abs() < (speedList[nearestIndex] - _exposureNs).abs()) {
+              nearestIndex = i;
+            }
+          }
+          final selectedVal = speedList[nearestIndex];
+          return CineWheelDial<int>(
+            title: 'SHUTTER SPEED',
+            values: speedList,
+            label: _speedLabel,
+            selectedValue: selectedVal,
+            onChanged: (ns) {
+              setState(() => _exposureNs = ns);
+              _applyShutter();
+            },
+            onClose: () => setState(() => _activeWheel = OpenWheelType.none),
+          );
+        } else {
+          return CineWheelDial<double>(
+            title: 'SHUTTER ANGLE',
+            values: angleList,
+            label: _angleLabel,
+            selectedValue: _shutterAngle,
+            onChanged: (a) {
+              setState(() => _shutterAngle = a);
+              _applyShutter();
+            },
+            onClose: () => setState(() => _activeWheel = OpenWheelType.none),
+          );
+        }
+
+      case OpenWheelType.iso:
+        int nearestIso = 0;
+        for (var i = 0; i < isoList.length; i++) {
+          if ((isoList[i] - _iso).abs() < (isoList[nearestIso] - _iso).abs()) {
+            nearestIso = i;
+          }
+        }
+        return CineWheelDial<int>(
+          title: 'ISO GAIN',
+          values: isoList,
+          label: (i) => '$i',
+          selectedValue: isoList[nearestIso],
+          onChanged: (i) {
+            setState(() => _iso = i);
+            _applyShutter();
+          },
+          onClose: () => setState(() => _activeWheel = OpenWheelType.none),
+        );
+
+      case OpenWheelType.fps:
+        return CineWheelDial<double>(
+          title: 'FRAME RATE',
+          values: fpsList,
+          label: _fpsLabel,
+          selectedValue: _fps,
+          onChanged: (f) {
+            setState(() => _fps = f);
+            _engine.setFrameRate(f);
+            _applyShutter();
+          },
+          onClose: () => setState(() => _activeWheel = OpenWheelType.none),
+        );
+
+      default:
+        return const SizedBox.shrink();
+    }
   }
 
   Widget _badge(String text, Color color) => Container(
@@ -1205,14 +1292,14 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     child: Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
-        color: active ? Colors.cyan.withValues(alpha: 0.2) : Colors.white10,
+        color: active ? Colors.amber.withValues(alpha: 0.2) : Colors.white10,
         borderRadius: BorderRadius.circular(4),
-        border: Border.all(color: active ? Colors.cyan : Colors.white24),
+        border: Border.all(color: active ? Colors.amber : Colors.white24),
       ),
       child: Text(
         text,
         style: TextStyle(
-          color: onTap == null ? Colors.white38 : (active ? Colors.cyanAccent : Colors.white),
+          color: onTap == null ? Colors.white38 : (active ? Colors.amber : Colors.white),
           fontSize: 11,
           fontWeight: FontWeight.bold,
         ),
@@ -1220,52 +1307,23 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     ),
   );
 
-  Widget _toggle(String label, bool on, Color color, VoidCallback onTap) => GestureDetector(
+  Widget _toolDenoter(String text, bool active, VoidCallback onTap) => GestureDetector(
     onTap: onTap,
     child: Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
       decoration: BoxDecoration(
-        color: on ? color.withValues(alpha: 0.2) : Colors.white10,
+        color: active ? Colors.cyanAccent.withValues(alpha: 0.25) : Colors.white10,
         borderRadius: BorderRadius.circular(4),
-        border: Border.all(color: on ? color : Colors.white24),
+        border: Border.all(color: active ? Colors.cyanAccent : Colors.white24),
       ),
       child: Text(
-        label,
-        style: TextStyle(color: on ? color : Colors.white54, fontWeight: FontWeight.bold, fontSize: 11),
-      ),
-    ),
-  );
-
-  Widget _pill(String label, String value, {String? subtitle, VoidCallback? onTap, bool? enabled}) => GestureDetector(
-    onTap: onTap,
-    child: Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.08),
-        borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: Colors.white12),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(
-            label,
-            style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontSize: 9, fontWeight: FontWeight.bold),
-          ),
-          const SizedBox(height: 2),
-          Text(
-            value,
-            style: TextStyle(
-              color: (enabled ?? onTap != null) ? Colors.white : Colors.white38,
-              fontSize: 13,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          if (subtitle != null) ...[
-            const SizedBox(height: 1),
-            Text(subtitle, style: TextStyle(color: Colors.white.withValues(alpha: 0.4), fontSize: 8)),
-          ],
-        ],
+        text,
+        style: TextStyle(
+          color: active ? Colors.cyanAccent : Colors.white54,
+          fontSize: 10,
+          fontWeight: FontWeight.w700,
+          fontFamily: 'monospace',
+        ),
       ),
     ),
   );

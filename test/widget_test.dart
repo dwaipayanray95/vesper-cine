@@ -7,6 +7,26 @@ void main() {
   testWidgets('Vesper Cine boots to the camera HUD', (WidgetTester tester) async {
     await tester.pumpWidget(const VesperCineApp());
     expect(find.text('APPLE LOG · 2020'), findsOneWidget);
+    // Verify top bar and left controls
+    expect(find.text('REC.709 LUT'), findsOneWidget);
+    expect(find.text('FC'), findsOneWidget);
+    expect(find.text('PEAK'), findsOneWidget);
+    expect(find.text('ZEBRA'), findsOneWidget);
+    expect(find.text('SHUTTER'), findsOneWidget);
+    expect(find.text('ISO'), findsOneWidget);
+  });
+
+  testWidgets('Ronin 4D dial opens when shutter or iso tile is tapped', (WidgetTester tester) async {
+    await tester.pumpWidget(const VesperCineApp());
+    // Tap on SHUTTER control
+    await tester.tap(find.text('SHUTTER'));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('SHUTTER ANGLE'), findsOneWidget);
+
+    // Tap on ISO control
+    await tester.tap(find.text('ISO'));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('ISO GAIN'), findsOneWidget);
   });
 
   // Picker sheets must fit a landscape phone (Pixel 10 is ~915x411 logical px).
