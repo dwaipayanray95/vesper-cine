@@ -14,19 +14,37 @@ void main() {
     expect(find.text('ZEBRA'), findsOneWidget);
     expect(find.text('SHUTTER'), findsOneWidget);
     expect(find.text('ISO'), findsOneWidget);
+    expect(find.text('WB'), findsOneWidget);
+    expect(find.text('FOCUS'), findsOneWidget);
   });
 
-  testWidgets('Ronin 4D dial opens when shutter or iso tile is tapped', (WidgetTester tester) async {
+  testWidgets('Ronin 4D dial opens, switches, and closes properly', (WidgetTester tester) async {
     await tester.pumpWidget(const VesperCineApp());
-    // Tap on SHUTTER control
+    // Tap on SHUTTER control opens Shutter dial
     await tester.tap(find.text('SHUTTER'));
     await tester.pump(const Duration(milliseconds: 300));
     expect(find.text('SHUTTER ANGLE'), findsOneWidget);
 
-    // Tap on ISO control
+    // Tapping ISO closes Shutter dial and opens ISO dial (only one visible)
     await tester.tap(find.text('ISO'));
     await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('SHUTTER ANGLE'), findsNothing);
     expect(find.text('ISO GAIN'), findsOneWidget);
+
+    // Tapping ISO again closes the dial
+    await tester.tap(find.text('ISO'));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('ISO GAIN'), findsNothing);
+
+    // Tapping WB opens WB dial
+    await tester.tap(find.text('WB'));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('WHITE BALANCE'), findsOneWidget);
+
+    // Tapping outside on the center closes the dial
+    await tester.tapAt(const Offset(400, 300));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('WHITE BALANCE'), findsNothing);
   });
 
   // Picker sheets must fit a landscape phone (Pixel 10 is ~915x411 logical px).

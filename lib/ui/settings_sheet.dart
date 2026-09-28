@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
 import 'value_picker.dart';
 
-/// Full-featured cinema settings page / bottom sheet.
+/// Full-screen cinema settings page.
 /// Houses recording codec, resolution/crop selection, lens correction,
 /// noise reduction, chart calibration, autofocus options, etc.
-class SettingsSheet extends StatelessWidget {
+class SettingsScreen extends StatelessWidget {
   final int codec; // 0 = HEVC, 1 = AV1
   final ValueChanged<int> onCodecChanged;
   final int cropMode; // 0 = 16:9, 1 = 4:3
@@ -32,7 +32,7 @@ class SettingsSheet extends StatelessWidget {
   final bool faceDetect;
   final ValueChanged<bool> onFaceDetectChanged;
 
-  const SettingsSheet({
+  const SettingsScreen({
     super.key,
     required this.codec,
     required this.onCodecChanged,
@@ -67,43 +67,35 @@ class SettingsSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return SheetBody(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(20, 14, 20, 16),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
+    return Scaffold(
+      backgroundColor: const Color(0xFF0C0E11),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF14171D),
+        elevation: 0,
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back, color: Colors.white),
+          onPressed: () => Navigator.of(context).pop(),
+        ),
+        title: const Row(
           children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                const Row(
-                  children: [
-                    Icon(Icons.tune, color: Colors.amber, size: 16),
-                    SizedBox(width: 8),
-                    Text(
-                      'VESPER CINE · SYSTEM SETTINGS',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 12,
-                        fontWeight: FontWeight.bold,
-                        letterSpacing: 1.5,
-                      ),
-                    ),
-                  ],
-                ),
-                IconButton(
-                  icon: const Icon(Icons.close, color: Colors.white60, size: 18),
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(),
-                  onPressed: () => Navigator.of(context).pop(),
-                ),
-              ],
+            Icon(Icons.tune, color: Colors.amber, size: 18),
+            SizedBox(width: 10),
+            Text(
+              'VESPER CINE · SYSTEM SETTINGS',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 13,
+                fontWeight: FontWeight.bold,
+                letterSpacing: 1.5,
+              ),
             ),
-            const SizedBox(height: 12),
-            const Divider(color: Colors.white12, height: 1),
-            const SizedBox(height: 12),
-
+          ],
+        ),
+      ),
+      body: SafeArea(
+        child: ListView(
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+          children: [
             // Section: RECORDING & FORMAT
             _sectionHeader('RECORDING & FORMAT'),
             _settingRow(
@@ -125,9 +117,9 @@ class SettingsSheet extends StatelessWidget {
               ),
             ),
 
-            const SizedBox(height: 12),
+            const SizedBox(height: 14),
             const Divider(color: Colors.white12, height: 1),
-            const SizedBox(height: 12),
+            const SizedBox(height: 14),
 
             // Section: FOCUS & METERING
             _sectionHeader('FOCUS & INTERACTION'),
@@ -159,9 +151,9 @@ class SettingsSheet extends StatelessWidget {
               ),
             ),
 
-            const SizedBox(height: 12),
+            const SizedBox(height: 14),
             const Divider(color: Colors.white12, height: 1),
-            const SizedBox(height: 12),
+            const SizedBox(height: 14),
 
             // Section: SENSOR & IMAGE PROCESSING
             _sectionHeader('SENSOR & IMAGE PROCESSING'),
@@ -211,9 +203,9 @@ class SettingsSheet extends StatelessWidget {
               ),
             ),
 
-            const SizedBox(height: 12),
+            const SizedBox(height: 14),
             const Divider(color: Colors.white12, height: 1),
-            const SizedBox(height: 12),
+            const SizedBox(height: 14),
 
             // Section: COLOR SCIENCE & CALIBRATION
             _sectionHeader('COLOR SCIENCE & CALIBRATION'),

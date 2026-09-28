@@ -59,9 +59,9 @@ class _CineWheelDialState<T> extends State<CineWheelDial<T>> {
   @override
   Widget build(BuildContext context) {
     return Container(
-      width: 140,
+      width: 148,
       decoration: BoxDecoration(
-        color: const Color(0xF0101216),
+        color: const Color(0xF4101216),
         borderRadius: BorderRadius.circular(10),
         border: Border.all(color: Colors.white24, width: 1),
         boxShadow: const [
@@ -142,30 +142,38 @@ class _CineWheelDialState<T> extends State<CineWheelDial<T>> {
                       final item = widget.values[i];
                       final sub = widget.subLabel?.call(item);
                       return Center(
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Text(
-                              widget.label(item),
-                              style: TextStyle(
-                                color: isSelected ? Colors.amber : Colors.white60,
-                                fontSize: isSelected ? 15 : 12,
-                                fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
-                                fontFamily: 'monospace',
-                              ),
-                            ),
-                            if (sub != null) ...[
-                              const SizedBox(width: 4),
-                              Text(
-                                sub,
-                                style: TextStyle(
-                                  color: isSelected ? Colors.amber.withValues(alpha: 0.7) : Colors.white30,
-                                  fontSize: 9,
-                                  fontFamily: 'monospace',
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 6),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Flexible(
+                                child: Text(
+                                  widget.label(item),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    color: isSelected ? Colors.amber : Colors.white60,
+                                    fontSize: isSelected ? 14 : 11,
+                                    fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
+                                    fontFamily: 'monospace',
+                                  ),
                                 ),
                               ),
+                              if (sub != null) ...[
+                                const SizedBox(width: 4),
+                                Text(
+                                  sub,
+                                  style: TextStyle(
+                                    color: isSelected ? Colors.amber.withValues(alpha: 0.7) : Colors.white30,
+                                    fontSize: 9,
+                                    fontFamily: 'monospace',
+                                  ),
+                                ),
+                              ],
                             ],
-                          ],
+                          ),
                         ),
                       );
                     },
