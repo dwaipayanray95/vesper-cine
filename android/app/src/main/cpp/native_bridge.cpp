@@ -256,22 +256,6 @@ void outputToRawPx(const FrameGeometry& g, float ox, float oy, float& rx, float&
     ry = g.crop[1] + v * g.crop[3];
 }
 
-float rawGreen(const RawFrame& f, int cfa, const CaptureMetadata& m, int x, int y) {
-    // Mean of the two greens of the 2x2 quad containing (x, y).
-    x &= ~1; y &= ~1;
-    float g = 0;
-    for (int k = 0; k < 4; ++k) {
-        int px = x + (k & 1), py = y + (k >> 1);
-        int site = cfaSite(cfa, px, py);
-        if (site != 1 && site != 2) continue;
-        const uint8_t* grp = f.data + static_cast<size_t>(py) * f.rowStride + (px / 4) * 5;
-        int i = px & 3;
-        int dn = (grp[i] << 2) | ((grp[4] >> (2 * i)) & 3);
-        g += 0.5f * (dn - m.blackLevel[site]) / (m.whiteLevel - m.blackLevel[site]);
-    }
-    return g;
-}
-
 // Whole-frame metering on a sparse grid of 2x2 quads (~12k samples), from raw
 // data before white balance:
 //  * centre-weighted log-average of green (the frame centre counts ~4x the corners);
@@ -358,15 +342,13 @@ void meterFrame(const RawFrame& f) {
 // worker feeds it one sample per camera frame and commands the lens. The lens
 // is driven from its own thread, never from the camera frame thread, which
 // holds camera locks the lens command also needs.
-struct FocusSample { double p = 0, sharpness = 0, dt = 0; };
+struct FocusSample { double dt = 0; };
 std::mutex gFocusMutex;
 std::condition_variable gFocusCv;
 FocusController gFocus;
 bool gFocusHasSample = false;
 FocusSample gFocusSample;
-bool gFocusSearchActive = false;   // contrast AF running (gFocusMutex)
-bool gFocusLocked = false;         // lens held where the last search/lock left it
-float gFocusRegion[2] = {0.5f, 0.5f};
+bool gFocusLocked = false;         // lens held (AF-L)
 std::thread gFocusThread;
 bool gFocusQuit = false;
 
@@ -388,12 +370,7 @@ void focusThreadMain() {
         FocusSample s = gFocusSample;
         gFocusHasSample = false;
         if (!gFocus.active()) continue;
-        double cmd = gFocus.update(s.dt, s.p, s.sharpness);
-        bool finished = !gFocus.active();
-        if (finished && gFocusSearchActive) {
-            gFocusSearchActive = false;
-            gFocusLocked = true;
-        }
+        double cmd = gFocus.update(s.dt);
         lk.unlock();
         if (std::fabs(cmd - lastCmd) > 1e-4 && gCamera) gCamera->setFocusDistance(static_cast<float>(pToDiopter(cmd)));
         lastCmd = cmd;
@@ -401,46 +378,14 @@ void focusThreadMain() {
     }
 }
 
-// Normalised contrast (gradient energy / mean) of the green channel in a
-// square around the AF point, ~10% of the frame wide.
-double regionSharpness(const RawFrame& f, float ox, float oy) {
-    FrameGeometry geo;
-    {
-        std::lock_guard<std::mutex> lk(gStateMutex);
-        geo = gGeom;
-    }
-    float rx, ry;
-    outputToRawPx(geo, ox, oy, rx, ry);
-    const int half = std::max(16, static_cast<int>(geo.crop[2] * 0.05f)) & ~1;
-    const int x0 = std::clamp(static_cast<int>(rx) - half, 2, f.width - 4) & ~1;
-    const int y0 = std::clamp(static_cast<int>(ry) - half, 2, f.height - 4) & ~1;
-    const int x1 = std::min(f.width - 4, x0 + 2 * half), y1 = std::min(f.height - 4, y0 + 2 * half);
-    const int step = std::max(2, ((x1 - x0) / 96) & ~1); // ~96x96 quads max
-    const int cfa = gCamera->sensorInfo().cfa;
-    double grad = 0, sum = 0;
-    for (int y = y0; y < y1; y += step)
-        for (int x = x0; x < x1; x += step) {
-            float g = rawGreen(f, cfa, *f.meta, x, y);
-            grad += std::fabs(rawGreen(f, cfa, *f.meta, x + 2, y) - g) + std::fabs(rawGreen(f, cfa, *f.meta, x, y + 2) - g);
-            sum += g;
-        }
-    return sum > 0 ? grad / sum : 0;
-}
-
-void feedFocus(const RawFrame& f, double frameSeconds) {
-    bool active, searching;
-    float ox, oy;
+void feedFocus(double frameSeconds) {
+    bool active;
     {
         std::lock_guard<std::mutex> lk(gFocusMutex);
         active = gFocus.active();
-        searching = gFocusSearchActive;
-        ox = gFocusRegion[0];
-        oy = gFocusRegion[1];
     }
     if (!active) return;
     FocusSample s;
-    s.p = diopterToP(f.meta->focusDiopters);
-    s.sharpness = searching ? regionSharpness(f, ox, oy) : 0;
     s.dt = frameSeconds;
     {
         std::lock_guard<std::mutex> lk(gFocusMutex);
@@ -470,7 +415,7 @@ void onFrame(const RawFrame& f) {
         gMeasuredFps = 0.9 * gMeasuredFps + 0.1 * (1e9 / std::max(gap, 1.0));
     }
     gLastTimestampNs = f.timestampNs;
-    feedFocus(f, frameNs * 1e-9);
+    feedFocus(frameNs * 1e-9);
     if ((++frameIndex & 3) == 0) meterCentre(f);
     if ((frameIndex & 3) == 2) meterFrame(f);
 
@@ -918,7 +863,6 @@ EXPORT void vesper_set_focus_mode(int32_t mode) {
     {
         std::lock_guard<std::mutex> lk(gFocusMutex);
         gFocus.cancel();
-        gFocusSearchActive = false;
         gFocusLocked = mode != 1;
     }
     if (gCamera) gCamera->setFocusMode(mode == 1 ? FocusMode::Continuous : FocusMode::Manual);
@@ -931,7 +875,6 @@ EXPORT void vesper_set_focus_point(float ox, float oy) {
     {
         std::lock_guard<std::mutex> lk(gFocusMutex);
         gFocus.cancel();
-        gFocusSearchActive = false;
         gFocusLocked = false;
     }
     FrameGeometry g;
@@ -954,24 +897,6 @@ EXPORT void vesper_clear_focus_point() {
     if (gCamera) gCamera->setFocusRegion(0, 0, 0, 0);
 }
 
-// Cinema focus: contrast-detect AF at an output-normalised point, driven
-// smoothly (never snapping), ending locked on the sharpest position.
-EXPORT void vesper_focus_search_at(float ox, float oy) {
-    if (!gCamera || gCamera->sensorInfo().minFocusDiopters <= 0) return;
-    ensureFocusThread();
-    double current = 0;
-    {
-        std::lock_guard<std::mutex> lk(gStateMutex);
-        current = diopterToP(gGeom.focusDiopters);
-    }
-    std::lock_guard<std::mutex> lk(gFocusMutex);
-    gFocusRegion[0] = std::clamp(ox, 0.0f, 1.0f);
-    gFocusRegion[1] = std::clamp(oy, 0.0f, 1.0f);
-    gFocusSearchActive = true;
-    gFocusLocked = false;
-    gFocus.startSearch(current);
-}
-
 // Smooth rack to a manual focus distance (diopters).
 EXPORT void vesper_focus_pull_to(float diopters) {
     if (!gCamera) return;
@@ -982,7 +907,6 @@ EXPORT void vesper_focus_pull_to(float diopters) {
         current = diopterToP(gGeom.focusDiopters);
     }
     std::lock_guard<std::mutex> lk(gFocusMutex);
-    gFocusSearchActive = false;
     gFocusLocked = false;
     gFocus.pullTo(current, diopterToP(diopters));
 }
@@ -993,13 +917,12 @@ EXPORT void vesper_set_focus_speed(float fullRangeSeconds) {
     gFocus.setSpeed(fullRangeSeconds);
 }
 
-// Stops any smooth focus move / search and holds the lens where it is.
-// Also used after hardware AF to lock ("AF-L").
+// Stops any smooth pull and holds the lens where it is; used after hardware
+// AF converges to lock it ("AF-L").
 EXPORT void vesper_focus_lock() {
     {
         std::lock_guard<std::mutex> lk(gFocusMutex);
         gFocus.cancel();
-        gFocusSearchActive = false;
         gFocusLocked = true;
     }
     if (gCamera) gCamera->setFocusMode(FocusMode::Manual);
@@ -1161,7 +1084,7 @@ EXPORT int32_t vesper_get_status(char* out, int32_t maxLen) {
     bool focusSearching, focusLocked;
     {
         std::lock_guard<std::mutex> lk(gFocusMutex);
-        focusSearching = gFocusSearchActive;
+        focusSearching = gFocus.active();
         focusLocked = gFocusLocked;
     }
     {
@@ -1189,7 +1112,7 @@ EXPORT int32_t vesper_get_status(char* out, int32_t maxLen) {
                   "\"framesDropped\":%lld,\"thermal\":%d,\"audio\":%s,\"codec\":\"%s\",\"stopReason\":\"%s\","
                   "\"exposureNs\":%lld,\"iso\":%d,\"awbAuto\":%s,\"afState\":%d,\"focusDiopters\":%.3f,"
                   "\"face\":[%.4f,%.4f,%.4f,%.4f],\"gpuMs\":%.2f,\"alignThrottled\":%s,\"nrThrottled\":%s,\"calibrationSaved\":\"%s\",\"profileActive\":%s,"
-                  "\"focusSearching\":%s,\"focusLocked\":%s}",
+                  "\"focusPulling\":%s,\"focusLocked\":%s}",
                   gCamera && gCamera->isStreaming() ? "true" : "false", fps, rw, rh, ow, oh, drops, kelvin, tint,
                   r.recording ? "true" : "false", static_cast<long long>(r.durationUs / 1000),
                   static_cast<long long>(r.framesEncoded), static_cast<long long>(r.framesDropped), r.thermalStatus,

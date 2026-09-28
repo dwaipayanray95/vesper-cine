@@ -112,9 +112,11 @@ The previous pipeline had several defects that directly caused the reported issu
 
 ## Focus, metering, calibration
 
-- **Tap to focus** has two modes (FOCUS sheet):
-  - **CINE** (the default) runs a contrast-detect search on the raw green channel. It racks the lens smoothly, velocity- and acceleration-limited at 0.8, 1.5 or 3 s per full range, and ends locked (AF-L).
-  - **FAST** uses the phone's PDAF/laser AF-C.
+- **Tap to focus** uses the phone's PDAF + laser AF on the tapped region, in one of two modes (FOCUS sheet):
+  - **TRACK** keeps following (AF-C).
+  - **FOCUS & LOCK** holds once converged (AF-L).
+  - The box stays on screen and turns green when AF has landed.
+  - Camera2 exposes no PDAF or laser distance before the lens moves, so the HAL's AF drive speed can't be re-timed. Contrast-detect AF was tried and dropped as unreliable on this sensor, especially in low light.
 - **Long-press** the viewfinder to focus there and lock.
 - **TAP SETS EXPOSURE** also spot-meters at the tapped point.
 - The **AE** button meters centre-weighted, and prefers a detected face (placed ½ stop over grey).

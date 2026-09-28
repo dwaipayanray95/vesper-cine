@@ -133,11 +133,10 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   double _chromaNr = 0; // 0 off, 0.5 low, 1 high
   bool _nrAlignment = true;
   Offset? _focusMark; // last tap-to-focus point (normalised), shown briefly
-  Timer? _focusMarkTimer;
+  int _focusGen = 0; // bumps per tap so a stale AF-lock wait gives up
   int _codec = 0; // 0 HEVC, 1 AV1
-  bool _tapFocusCine = true; // tap: smooth contrast AF ending locked (CINE) vs hardware AF-C (FAST)
+  bool _tapLocks = false; // tap: AF then hold (AF-L) instead of tracking (AF-C)
   bool _tapSetsExposure = false; // tap also spot-meters exposure at that point
-  double _focusSpeed = 1.5; // seconds for a full-range focus move
   bool _profileAvailable = false; // a chart calibration exists for this device/camera
   bool _useProfile = true;
   String _profileInfo = '';
@@ -223,7 +222,6 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     _engine.setTemporalNr(_temporalNr);
     _engine.setChromaNr(_chromaNr);
     _engine.setNrAlignment(_nrAlignment);
-    _engine.setFocusSpeed(_focusSpeed);
     _engine.useColorProfile(_useProfile);
     _engine.setFrameRate(_fps);
     _applyShutter();
@@ -324,7 +322,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
         _kelvin = s.kelvin.round();
         _tint = s.tint.round();
       }
-      if (_afContinuous || s.focusSearching || s.focusLocked) _focus = s.focusDiopters;
+      if (_afContinuous || s.focusPulling || s.focusLocked) _focus = s.focusDiopters;
     });
     if (s.calibrationSaved.isNotEmpty && s.calibrationSaved != _lastCalibrationSaved) {
       _lastCalibrationSaved = s.calibrationSaved;
@@ -680,10 +678,10 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                   runSpacing: 8,
                   children: [
                     Segmented(
-                      options: const ['TAP: CINE', 'TAP: FAST'],
-                      selected: _tapFocusCine ? 0 : 1,
+                      options: const ['TAP: TRACK', 'TAP: FOCUS & LOCK'],
+                      selected: _tapLocks ? 1 : 0,
                       onSelected: (i) {
-                        setState(() => _tapFocusCine = i == 0);
+                        setState(() => _tapLocks = i == 1);
                         setSheet(() {});
                       },
                     ),
@@ -695,21 +693,13 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                         setSheet(() {});
                       },
                     ),
-                    Segmented(
-                      options: const ['FAST 0.8s', 'MED 1.5s', 'SLOW 3s'],
-                      selected: const [0.8, 1.5, 3.0].indexOf(_focusSpeed),
-                      onSelected: (i) {
-                        setState(() => _focusSpeed = const [0.8, 1.5, 3.0][i]);
-                        setSheet(() {});
-                        _engine.setFocusSpeed(_focusSpeed);
-                      },
-                    ),
                   ],
                 ),
                 const Padding(
                   padding: EdgeInsets.only(top: 6),
                   child: Text(
-                    'CINE racks focus smoothly and holds it (AF-L). Long-press the viewfinder to focus and lock.',
+                    'PDAF + laser AF. TRACK keeps following; FOCUS & LOCK holds once sharp (AF-L). '
+                    'Long-press the viewfinder always focuses and locks.',
                     style: TextStyle(color: Colors.white38, fontSize: 10),
                   ),
                 ),
@@ -732,45 +722,42 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     );
   }
 
-  // Tap: CINE = smooth contrast search that ends locked; FAST = hardware AF-C on
-  // the region. Optionally also spot-meters exposure there.
+  // Tap: hardware AF (PDAF + laser) on the region, either tracking (AF-C) or
+  // holding once it converges (AF-L). Optionally also spot-meters exposure there.
   void _tapToFocus(Offset p, {bool lock = false}) {
     if (!_streaming) return;
-    final cine = _tapFocusCine && (_caps?.minFocusDiopters ?? 0) > 0;
-    if (cine) {
-      _engine.focusSearchAt(p.dx, p.dy);
-    } else {
-      _engine.setFocusPoint(p.dx, p.dy);
-      if (lock) _lockWhenFocused();
+    lock = lock || _tapLocks;
+    _engine.setFocusPoint(p.dx, p.dy);
+    final gen = ++_focusGen;
+    if (lock) {
+      HapticFeedback.mediumImpact();
+      _lockWhenFocused(gen);
     }
-    if (lock) HapticFeedback.mediumImpact();
     if (_tapSetsExposure) {
       _engine.setMetering(1, p.dx, p.dy);
       _autoExpose(keepShutter: true, quiet: true);
     }
-    _showFocusMark(p, afContinuous: !cine && !lock);
-  }
-
-  // FAST + long-press: let hardware AF settle, then hold it (AF-L).
-  Future<void> _lockWhenFocused() async {
-    for (var i = 0; i < 20; i++) {
-      await Future<void>.delayed(const Duration(milliseconds: 100));
-      final st = _engine.status()?.afState ?? 0;
-      if (st == 2 || st == 4 || st == 5 || st == 6) break;
-    }
-    _engine.focusLock();
-    if (mounted) setState(() => _afContinuous = false);
-  }
-
-  void _showFocusMark(Offset p, {required bool afContinuous}) {
-    _focusMarkTimer?.cancel();
+    // The box stays on screen (green once AF has landed) until the next tap.
     setState(() {
-      _afContinuous = afContinuous;
+      _afContinuous = true;
       _focusMark = p;
     });
-    _focusMarkTimer = Timer(const Duration(milliseconds: 2500), () {
-      if (mounted) setState(() => _focusMark = null);
-    });
+  }
+
+  // Waits for the HAL's AF to converge on the new region, then holds it (AF-L).
+  // States: 1/3 scanning, 2 passive focused, 4/5 locked, 6 passive unfocused.
+  Future<void> _lockWhenFocused(int gen) async {
+    var sawScan = false;
+    for (var i = 0; i < 30; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      if (gen != _focusGen || !mounted) return; // superseded by a newer tap
+      final st = _engine.status()?.afState ?? 0;
+      if (st == 1 || st == 3) sawScan = true;
+      if ((sawScan || i >= 5) && (st == 2 || st == 4 || st == 5 || st == 6)) break;
+    }
+    if (gen != _focusGen || !mounted) return;
+    _engine.focusLock();
+    setState(() => _afContinuous = false);
   }
 
   void _pickProcessing() {
@@ -906,10 +893,18 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       : '${(1 / d).toStringAsFixed(1)}m';
   String get _focusLabel {
     final s = _status;
-    if (s?.focusSearching ?? false) return 'AF…';
-    if (_afContinuous) return 'AF-C';
+    final st = s?.afState ?? 0;
+    if (_afContinuous) return st == 1 || st == 3 ? 'AF…' : 'AF-C';
     if (s?.focusLocked ?? false) return 'AF-L ${_distanceLabel(_focus)}';
     return _distanceLabel(_focus);
+  }
+
+  // AF has converged (tracking and focused, or locked after focusing).
+  bool get _afLanded {
+    final s = _status;
+    if (s == null) return false;
+    if (s.focusLocked && !_afContinuous) return true;
+    return s.afState == 2 || s.afState == 4;
   }
 
   // One-shot auto exposure: two metering passes (the second one refines very
@@ -999,14 +994,8 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                                     height: 60,
                                     decoration: BoxDecoration(
                                       border: Border.all(
-                                        color: (s?.focusSearching ?? false)
-                                            ? Colors.white
-                                            : (s?.focusLocked ?? false)
-                                            ? Colors.amber
-                                            : (s?.afState ?? 0) == 2 || (s?.afState ?? 0) == 4
-                                            ? Colors.greenAccent
-                                            : Colors.white,
-                                        width: 1.5,
+                                        color: _afLanded ? Colors.greenAccent : Colors.white,
+                                        width: _afLanded ? 2 : 1.5,
                                       ),
                                     ),
                                   ),

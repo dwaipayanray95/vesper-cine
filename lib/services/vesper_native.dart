@@ -48,7 +48,7 @@ class EngineStatus {
   final bool nrThrottled; // temporal/chroma NR also paused: GPU still over budget
   final String calibrationSaved; // base path of the last calibration frame written
   final bool profileActive; // per-device chart calibration in use
-  final bool focusSearching; // cinema AF search / smooth pull running
+  final bool focusPulling; // smooth manual focus pull running
   final bool focusLocked; // focus held (AF-L)
 
   EngineStatus.fromJson(Map<String, dynamic> j)
@@ -76,7 +76,7 @@ class EngineStatus {
       nrThrottled = j['nrThrottled'] as bool,
       calibrationSaved = (j['calibrationSaved'] as String?) ?? '',
       profileActive = (j['profileActive'] as bool?) ?? false,
-      focusSearching = (j['focusSearching'] as bool?) ?? false,
+      focusPulling = (j['focusPulling'] as bool?) ?? false,
       focusLocked = (j['focusLocked'] as bool?) ?? false;
 }
 
@@ -168,7 +168,6 @@ class VesperNative {
   late final void Function() _stopRecording;
   late final int Function(Pointer<Utf8>, int) _status;
   late final void Function() _close;
-  late final void Function(double, double) _focusSearchAt;
   late final void Function(double) _focusPullTo;
   late final void Function(double) _setFocusSpeed;
   late final void Function() _focusLock;
@@ -243,9 +242,6 @@ class VesperNative {
         'vesper_get_status',
       );
       _close = _lib.lookupFunction<Void Function(), void Function()>('vesper_close');
-      _focusSearchAt = _lib.lookupFunction<Void Function(Float, Float), void Function(double, double)>(
-        'vesper_focus_search_at',
-      );
       _focusPullTo = _lib.lookupFunction<Void Function(Float), void Function(double)>('vesper_focus_pull_to');
       _setFocusSpeed = _lib.lookupFunction<Void Function(Float), void Function(double)>('vesper_set_focus_speed');
       _focusLock = _lib.lookupFunction<Void Function(), void Function()>('vesper_focus_lock');
@@ -430,9 +426,6 @@ class VesperNative {
     if (!Platform.isAndroid) return;
     await _channel.invokeMethod('destroyTexture');
   }
-
-  /// Cinema AF: contrast search at an upright viewfinder point, moved smoothly, ends locked.
-  void focusSearchAt(double x, double y) => _loaded ? _focusSearchAt(x, y) : null;
 
   /// Smooth focus rack to a distance in diopters.
   void focusPullTo(double diopters) => _loaded ? _focusPullTo(diopters) : null;
