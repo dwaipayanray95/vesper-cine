@@ -110,6 +110,16 @@ The previous pipeline had several defects that directly caused the reported issu
 - **`ForwardMatrix` outputs XYZ relative to D50,** so it is Bradford-adapted to Rec.2020's D65.
 - **The static black level pattern is unpopulated on this HAL.** Black level is read per frame from the CaptureResult.
 
+## Focus, metering, calibration
+
+- **Tap to focus** has two modes (FOCUS sheet):
+  - **CINE** (the default) runs a contrast-detect search on the raw green channel. It racks the lens smoothly, velocity- and acceleration-limited at 0.8, 1.5 or 3 s per full range, and ends locked (AF-L).
+  - **FAST** uses the phone's PDAF/laser AF-C.
+- **Long-press** the viewfinder to focus there and lock.
+- **TAP SETS EXPOSURE** also spot-meters at the tapped point.
+- The **AE** button meters centre-weighted, and prefers a detected face (placed ½ stop over grey).
+- **Colour calibration** is per phone and per camera, from a ColorChecker chart; see [tools/calibration](tools/calibration/README.md). Profiles live in `assets/color_profiles/`. PROCESSING switches between FACTORY and CHART PROFILE.
+
 ## Roadmap
 
 1. On-device verification of the items above.

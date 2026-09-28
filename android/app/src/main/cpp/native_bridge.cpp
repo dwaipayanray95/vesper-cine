@@ -2,6 +2,7 @@
 // entry point MainActivity uses to hand over the viewfinder Surface.
 #include "camera_engine.h"
 #include "color_science.h"
+#include "focus_controller.h"
 #include "recorder.h"
 #include "vulkan_engine.h"
 
@@ -11,12 +12,16 @@
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
+#include <thread>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <cstdio>
 #include <string>
+#include <vector>
 
 using namespace vesper;
 
@@ -37,6 +42,8 @@ struct Settings {
     float temporalNr = 0.0f;     // 0 = off, else max blend weight toward history (0.5..0.85)
     bool nrAlignment = true;     // warp history by a per-tile motion field before blending
     float chromaNr = 0.0f;       // 0 = off, 1 = full chroma smoothing
+    int meterMode = 0;           // 0 = centre-weighted (+ face priority), 1 = spot at (meterX, meterY)
+    float meterX = 0.5f, meterY = 0.5f; // output-normalised
     int32_t iso = 100;
     ColorState color;
 };
@@ -59,6 +66,9 @@ struct MeterStats {
     int64_t exposureNs = 0;
     int32_t iso = 0;
     bool valid = false;
+    bool spot = false;          // measured with a spot around the tapped point
+    bool faceValid = false;     // a face was found and measured separately
+    double faceLogMeanG = 0;
 };
 MeterStats gMeter;
 
@@ -72,6 +82,73 @@ struct FrameGeometry {
     int afState = 0;
 };
 FrameGeometry gGeom;
+
+// Chart calibration (tools/calibration). gStateMutex.
+struct ColorProfile { int count = 0; Mat3 fm[2]; float kelvin[2] = {5600, 5600}; };
+ColorProfile gProfile;
+bool gProfileEnabled = true;
+std::string gCalibrationRequest;  // base path for the next frame dump ("" = none)
+std::string gCalibrationDevice;
+std::string gCalibrationSaved;    // last written base path (reported in status)
+
+std::string jsonEscape(const std::string& in);
+
+DngCalibration withProfile(DngCalibration cal) {
+    if (gProfileEnabled && gProfile.count > 0) {
+        cal.profileCount = gProfile.count;
+        for (int i = 0; i < gProfile.count; ++i) {
+            cal.profileMatrix[i] = gProfile.fm[i];
+            cal.profileKelvin[i] = gProfile.kelvin[i];
+        }
+    }
+    return cal;
+}
+
+std::string jsonArray(const float* v, size_t n) {
+    std::string s = "[";
+    char b[32];
+    for (size_t i = 0; i < n; ++i) {
+        std::snprintf(b, sizeof(b), "%s%.7g", i ? "," : "", v[i]);
+        s += b;
+    }
+    return s + "]";
+}
+
+// Writes the raw RAW10 plane + everything the calibration tool needs to
+// linearise it exactly like the GPU does. Runs on the camera thread, once.
+void dumpCalibrationFrame(const RawFrame& f, const std::string& base, const std::string& device,
+                          const Settings& s) {
+    const CaptureMetadata& m = *f.meta;
+    const SensorInfo& info = gCamera->sensorInfo();
+    FILE* rf = std::fopen((base + ".raw10").c_str(), "wb");
+    if (!rf) { __android_log_print(ANDROID_LOG_ERROR, "Vesper", "calibration dump: cannot write %s", base.c_str()); return; }
+    std::fwrite(f.data, 1, std::min(static_cast<size_t>(f.rowStride) * f.height, f.size), rf);
+    std::fclose(rf);
+    Mat3 fmNow = gColor.forwardMatrixFor(s.color.kelvin);
+    const DngCalibration& cal = info.calibration;
+    std::string j = "{";
+    char b[512];
+    std::snprintf(b, sizeof(b), "\"format\":\"vesper-calibration-capture/1\",\"device\":\"%s\",\"cameraId\":\"0\","
+                  "\"width\":%d,\"height\":%d,\"rowStride\":%d,\"cfa\":%d,\"whiteLevel\":%.1f,"
+                  "\"arrayWidth\":%d,\"arrayHeight\":%d,\"kelvin\":%.0f,\"tint\":%.1f,\"iso\":%d,\"exposureNs\":%lld,",
+                  jsonEscape(device).c_str(), f.width, f.height, f.rowStride, info.cfa, m.whiteLevel,
+                  info.preWidth, info.preHeight, s.color.kelvin, s.color.tint, m.iso, static_cast<long long>(m.exposureNs));
+    j += b;
+    j += "\"blackLevel\":" + jsonArray(m.blackLevel, 4) + ",";
+    j += "\"cameraNeutral\":" + jsonArray(s.color.cameraNeutral.data(), 3) + ",";
+    j += "\"forwardMatrix\":" + jsonArray(fmNow.data(), 9) + ",";
+    j += "\"factoryForwardMatrix1\":" + jsonArray(cal.forwardMatrix1.data(), 9) + ",";
+    j += "\"factoryForwardMatrix2\":" + jsonArray(cal.forwardMatrix2.data(), 9) + ",";
+    std::snprintf(b, sizeof(b), "\"factoryIlluminantKelvin\":[%.0f,%.0f],\"shadingCols\":%d,\"shadingRows\":%d,",
+                  cal.illuminant1Kelvin, cal.illuminant2Kelvin, m.shadingCols, m.shadingRows);
+    j += b;
+    j += "\"shadingMap\":" + jsonArray(m.shadingMap.data(), m.shadingMap.size()) + "}";
+    FILE* jf = std::fopen((base + ".json").c_str(), "w");
+    if (!jf) return;
+    std::fwrite(j.data(), 1, j.size(), jf);
+    std::fclose(jf);
+    __android_log_print(ANDROID_LOG_INFO, "Vesper", "Calibration frame saved: %s (.raw10/.json)", base.c_str());
+}
 Vec3 gAwbNeutral{0, 0, 0};
 
 // Output-normalised (upright) <-> crop-normalised (unrotated raw), mirroring rawPosFor() in render.comp.
@@ -171,13 +248,69 @@ void meterCentre(const RawFrame& f) {
 // Whole-frame metering on a sparse grid of 2x2 quads (~12k samples), from
 // raw data before white balance: log-average green for mid-tones and the
 // 99.5th percentile of each quad's brightest channel for highlight clipping.
+// Raw (unrotated) pixel position of an upright, output-normalised point.
+void outputToRawPx(const FrameGeometry& g, float ox, float oy, float& rx, float& ry) {
+    float u, v;
+    outputToCrop(g.rot, ox, oy, u, v);
+    rx = g.crop[0] + u * g.crop[2];
+    ry = g.crop[1] + v * g.crop[3];
+}
+
+float rawGreen(const RawFrame& f, int cfa, const CaptureMetadata& m, int x, int y) {
+    // Mean of the two greens of the 2x2 quad containing (x, y).
+    x &= ~1; y &= ~1;
+    float g = 0;
+    for (int k = 0; k < 4; ++k) {
+        int px = x + (k & 1), py = y + (k >> 1);
+        int site = cfaSite(cfa, px, py);
+        if (site != 1 && site != 2) continue;
+        const uint8_t* grp = f.data + static_cast<size_t>(py) * f.rowStride + (px / 4) * 5;
+        int i = px & 3;
+        int dn = (grp[i] << 2) | ((grp[4] >> (2 * i)) & 3);
+        g += 0.5f * (dn - m.blackLevel[site]) / (m.whiteLevel - m.blackLevel[site]);
+    }
+    return g;
+}
+
+// Whole-frame metering on a sparse grid of 2x2 quads (~12k samples), from raw
+// data before white balance:
+//  * centre-weighted log-average of green (the frame centre counts ~4x the corners);
+//  * the largest detected face measured separately (face priority);
+//  * spot mode: a tight Gaussian around the tapped point;
+//  * the 99.5th percentile of each quad's brightest channel for highlight protection.
 void meterFrame(const RawFrame& f) {
     const CaptureMetadata& m = *f.meta;
     const int cfa = gCamera->sensorInfo().cfa;
+    FrameGeometry geo;
+    int mode;
+    float spotX, spotY;
+    {
+        std::lock_guard<std::mutex> lk(gStateMutex);
+        geo = gGeom;
+        mode = gSettings.meterMode;
+        spotX = gSettings.meterX;
+        spotY = gSettings.meterY;
+    }
+    float cx = geo.crop[0] + geo.crop[2] * 0.5f, cy = geo.crop[1] + geo.crop[3] * 0.5f;
+    float halfW = std::max(1.0f, geo.crop[2] * 0.5f), halfH = std::max(1.0f, geo.crop[3] * 0.5f);
+    float spotRx = cx, spotRy = cy;
+    if (mode == 1) outputToRawPx(geo, spotX, spotY, spotRx, spotRy);
+    // Face rectangle (pre-correction array px) -> raw px.
+    const SensorInfo& info = gCamera->sensorInfo();
+    bool face = m.face[2] > m.face[0];
+    float fx0 = 0, fy0 = 0, fx1 = 0, fy1 = 0;
+    if (face) {
+        float sx = geo.sensorMap[0] > 0 ? geo.sensorMap[0] : 1.0f;
+        fx0 = (m.face[0] - info.preLeft - geo.sensorMap[2]) / sx;
+        fx1 = (m.face[2] - info.preLeft - geo.sensorMap[2]) / sx;
+        fy0 = (m.face[1] - info.preTop - geo.sensorMap[3]) / sx;
+        fy1 = (m.face[3] - info.preTop - geo.sensorMap[3]) / sx;
+    }
+
     constexpr int kBins = 512;
     int hist[kBins] = {};
-    double logSum = 0;
-    int n = 0;
+    double logSum = 0, wSum = 0, faceSum = 0;
+    int n = 0, faceN = 0;
     const int step = std::max(8, (f.width / 128) & ~3);
     for (int y = step / 2 & ~1; y + 1 < f.height; y += step) {
         for (int x = step / 2 & ~3; x + 1 < f.width; x += step) {
@@ -193,16 +326,134 @@ void meterFrame(const RawFrame& f) {
                 if (site == 1 || site == 2) g += 0.5f * v;
                 mx = std::max(mx, v);
             }
-            logSum += std::log(std::max(g, 1e-4f));
+            const double lg = std::log(std::max(g, 1e-4f));
+            double w;
+            if (mode == 1) {
+                // Spot: sigma = 5% of the frame width around the tapped point.
+                double dx = (x - spotRx) / (0.05 * geo.crop[2]), dy = (y - spotRy) / (0.05 * geo.crop[2]);
+                w = std::exp(-0.5 * (dx * dx + dy * dy)) + 1e-4;
+            } else {
+                double dx = (x - cx) / halfW, dy = (y - cy) / halfH;
+                w = 0.25 + 0.75 * std::exp(-(dx * dx + dy * dy) / (2 * 0.35 * 0.35));
+            }
+            logSum += w * lg;
+            wSum += w;
+            if (face && x >= fx0 && x <= fx1 && y >= fy0 && y <= fy1) { faceSum += lg; ++faceN; }
             ++hist[std::min(kBins - 1, static_cast<int>(mx * (kBins - 1)))];
             ++n;
         }
     }
-    if (n == 0) return;
+    if (n == 0 || wSum <= 0) return;
     int target = static_cast<int>(n * 0.995), acc = 0, bin = kBins - 1;
     for (int b = 0; b < kBins; ++b) { acc += hist[b]; if (acc >= target) { bin = b; break; } }
     std::lock_guard<std::mutex> lk(gStateMutex);
-    gMeter = {logSum / n, static_cast<double>(bin) / (kBins - 1), m.exposureNs, m.iso, true};
+    gMeter = {logSum / wSum, static_cast<double>(bin) / (kBins - 1), m.exposureNs, m.iso, true};
+    gMeter.spot = mode == 1;
+    gMeter.faceValid = mode == 0 && faceN >= 4;
+    gMeter.faceLogMeanG = faceN ? faceSum / faceN : 0;
+}
+
+// --- Smooth focus -----------------------------------------------------------
+// FocusController (focus_controller.cpp) decides where the lens goes; this
+// worker feeds it one sample per camera frame and commands the lens. The lens
+// is driven from its own thread, never from the camera frame thread, which
+// holds camera locks the lens command also needs.
+struct FocusSample { double p = 0, sharpness = 0, dt = 0; };
+std::mutex gFocusMutex;
+std::condition_variable gFocusCv;
+FocusController gFocus;
+bool gFocusHasSample = false;
+FocusSample gFocusSample;
+bool gFocusSearchActive = false;   // contrast AF running (gFocusMutex)
+bool gFocusLocked = false;         // lens held where the last search/lock left it
+float gFocusRegion[2] = {0.5f, 0.5f};
+std::thread gFocusThread;
+bool gFocusQuit = false;
+
+double diopterToP(double d) {
+    double maxD = gCamera ? gCamera->sensorInfo().minFocusDiopters : 0;
+    return maxD > 0 ? std::sqrt(std::clamp(d / maxD, 0.0, 1.0)) : 0;
+}
+double pToDiopter(double p) {
+    double maxD = gCamera ? gCamera->sensorInfo().minFocusDiopters : 0;
+    return p * p * maxD;
+}
+
+void focusThreadMain() {
+    double lastCmd = -1;
+    std::unique_lock<std::mutex> lk(gFocusMutex);
+    while (!gFocusQuit) {
+        gFocusCv.wait(lk, [] { return gFocusQuit || gFocusHasSample; });
+        if (gFocusQuit) break;
+        FocusSample s = gFocusSample;
+        gFocusHasSample = false;
+        if (!gFocus.active()) continue;
+        double cmd = gFocus.update(s.dt, s.p, s.sharpness);
+        bool finished = !gFocus.active();
+        if (finished && gFocusSearchActive) {
+            gFocusSearchActive = false;
+            gFocusLocked = true;
+        }
+        lk.unlock();
+        if (std::fabs(cmd - lastCmd) > 1e-4 && gCamera) gCamera->setFocusDistance(static_cast<float>(pToDiopter(cmd)));
+        lastCmd = cmd;
+        lk.lock();
+    }
+}
+
+// Normalised contrast (gradient energy / mean) of the green channel in a
+// square around the AF point, ~10% of the frame wide.
+double regionSharpness(const RawFrame& f, float ox, float oy) {
+    FrameGeometry geo;
+    {
+        std::lock_guard<std::mutex> lk(gStateMutex);
+        geo = gGeom;
+    }
+    float rx, ry;
+    outputToRawPx(geo, ox, oy, rx, ry);
+    const int half = std::max(16, static_cast<int>(geo.crop[2] * 0.05f)) & ~1;
+    const int x0 = std::clamp(static_cast<int>(rx) - half, 2, f.width - 4) & ~1;
+    const int y0 = std::clamp(static_cast<int>(ry) - half, 2, f.height - 4) & ~1;
+    const int x1 = std::min(f.width - 4, x0 + 2 * half), y1 = std::min(f.height - 4, y0 + 2 * half);
+    const int step = std::max(2, ((x1 - x0) / 96) & ~1); // ~96x96 quads max
+    const int cfa = gCamera->sensorInfo().cfa;
+    double grad = 0, sum = 0;
+    for (int y = y0; y < y1; y += step)
+        for (int x = x0; x < x1; x += step) {
+            float g = rawGreen(f, cfa, *f.meta, x, y);
+            grad += std::fabs(rawGreen(f, cfa, *f.meta, x + 2, y) - g) + std::fabs(rawGreen(f, cfa, *f.meta, x, y + 2) - g);
+            sum += g;
+        }
+    return sum > 0 ? grad / sum : 0;
+}
+
+void feedFocus(const RawFrame& f, double frameSeconds) {
+    bool active, searching;
+    float ox, oy;
+    {
+        std::lock_guard<std::mutex> lk(gFocusMutex);
+        active = gFocus.active();
+        searching = gFocusSearchActive;
+        ox = gFocusRegion[0];
+        oy = gFocusRegion[1];
+    }
+    if (!active) return;
+    FocusSample s;
+    s.p = diopterToP(f.meta->focusDiopters);
+    s.sharpness = searching ? regionSharpness(f, ox, oy) : 0;
+    s.dt = frameSeconds;
+    {
+        std::lock_guard<std::mutex> lk(gFocusMutex);
+        gFocusSample = s;
+        gFocusHasSample = true;
+    }
+    gFocusCv.notify_one();
+}
+
+void ensureFocusThread() {
+    if (gFocusThread.joinable()) return;
+    gFocusQuit = false;
+    gFocusThread = std::thread(focusThreadMain);
 }
 
 void onFrame(const RawFrame& f) {
@@ -219,6 +470,7 @@ void onFrame(const RawFrame& f) {
         gMeasuredFps = 0.9 * gMeasuredFps + 0.1 * (1e9 / std::max(gap, 1.0));
     }
     gLastTimestampNs = f.timestampNs;
+    feedFocus(f, frameNs * 1e-9);
     if ((++frameIndex & 3) == 0) meterCentre(f);
     if ((frameIndex & 3) == 2) meterFrame(f);
 
@@ -360,6 +612,19 @@ void onFrame(const RawFrame& f) {
         for (int c = 0; c < 3; ++c) p.camToRec2020[r * 4 + c] = s.color.camToRec2020[r * 3 + c];
         p.camToRec2020[r * 4 + 3] = 0.0f;
     }
+    {
+        std::string calBase, calDevice;
+        {
+            std::lock_guard<std::mutex> lk(gStateMutex);
+            calBase.swap(gCalibrationRequest);
+            calDevice = gCalibrationDevice;
+        }
+        if (!calBase.empty()) {
+            dumpCalibrationFrame(f, calBase, calDevice, s);
+            std::lock_guard<std::mutex> lk(gStateMutex);
+            gCalibrationSaved = calBase;
+        }
+    }
     in.raw = f.data;
     in.rawSize = f.size;
 
@@ -426,7 +691,7 @@ EXPORT int32_t vesper_enumerate_cameras(char* out, int32_t maxLen) {
 EXPORT int32_t vesper_open_camera(const char* id) {
     if (!gCamera || !id) return -1;
     if (!gCamera->openCamera(id)) return -1;
-    const DngCalibration cal = gCamera->sensorInfo().calibration;
+    const DngCalibration cal = withProfile(gCamera->sensorInfo().calibration);
     std::lock_guard<std::mutex> lk(gStateMutex);
     gColor.setCalibration(cal);
     gColor.setClipLinear(0.18f * std::exp2(gSettings.headroomStops));
@@ -568,9 +833,20 @@ EXPORT int32_t vesper_auto_expose(int32_t priority, int64_t* outExposureNs, int3
     const SensorInfo& info = gCamera->sensorInfo();
 
     const double greyRaw = std::exp2(-headroom);          // raw green level that encodes as 18% grey
-    double scale = greyRaw / std::exp(m.logMeanG);
-    if (m.p995 >= 0.98) scale = std::min(scale, 0.35);    // clipped: true level unknown, step down ~1.5 stops
-    else scale = std::min(scale, 0.92 / std::max(m.p995, 1e-3));
+    double scale;
+    if (m.faceValid) {
+        // Face priority: skin half a stop over 18% grey — a middle ground that
+        // keeps light skin out of the shoulder and dark skin out of the noise.
+        scale = greyRaw * std::sqrt(2.0) / std::exp(m.faceLogMeanG);
+    } else {
+        scale = greyRaw / std::exp(m.logMeanG);
+    }
+    // Highlight protection. A spot reading is a deliberate choice, so the
+    // rest of the frame may clip; centre/face metering keeps <0.5% clipped.
+    if (!m.spot) {
+        if (m.p995 >= 0.98) scale = std::min(scale, 0.35); // clipped: true level unknown, step down ~1.5 stops
+        else scale = std::min(scale, 0.92 / std::max(m.p995, 1e-3));
+    }
     scale = std::clamp(scale, 1.0 / 64, 64.0);
 
     const double frameNs = 1e9 / gCamera->frameRate();
@@ -597,8 +873,9 @@ EXPORT int32_t vesper_auto_expose(int32_t priority, int64_t* outExposureNs, int3
     applyShutter();
     if (outExposureNs) *outExposureNs = ns;
     if (outIso) *outIso = isoI;
-    __android_log_print(ANDROID_LOG_INFO, "Vesper", "Auto-expose: logMeanG=%.4f p99.5=%.3f x%.3f -> %.3fms ISO %d",
-                        std::exp(m.logMeanG), m.p995, scale, ns / 1e6, isoI);
+    __android_log_print(ANDROID_LOG_INFO, "Vesper", "Auto-expose (%s): meanG=%.4f p99.5=%.3f x%.3f -> %.3fms ISO %d",
+                        m.spot ? "spot" : (m.faceValid ? "face" : "centre"),
+                        std::exp(m.faceValid ? m.faceLogMeanG : m.logMeanG), m.p995, scale, ns / 1e6, isoI);
     return 0;
 }
 
@@ -638,6 +915,12 @@ EXPORT void vesper_set_auto_white_balance(int32_t enable) {
 // 0 = manual (vesper_set_focus), 1 = continuous AF (PDAF + laser, via the HAL).
 // Switching from continuous to manual locks the lens where AF left it.
 EXPORT void vesper_set_focus_mode(int32_t mode) {
+    {
+        std::lock_guard<std::mutex> lk(gFocusMutex);
+        gFocus.cancel();
+        gFocusSearchActive = false;
+        gFocusLocked = mode != 1;
+    }
     if (gCamera) gCamera->setFocusMode(mode == 1 ? FocusMode::Continuous : FocusMode::Manual);
 }
 
@@ -645,6 +928,12 @@ EXPORT void vesper_set_focus_mode(int32_t mode) {
 // Switches to continuous AF metering that region.
 EXPORT void vesper_set_focus_point(float ox, float oy) {
     if (!gCamera) return;
+    {
+        std::lock_guard<std::mutex> lk(gFocusMutex);
+        gFocus.cancel();
+        gFocusSearchActive = false;
+        gFocusLocked = false;
+    }
     FrameGeometry g;
     {
         std::lock_guard<std::mutex> lk(gStateMutex);
@@ -663,6 +952,66 @@ EXPORT void vesper_set_focus_point(float ox, float oy) {
 
 EXPORT void vesper_clear_focus_point() {
     if (gCamera) gCamera->setFocusRegion(0, 0, 0, 0);
+}
+
+// Cinema focus: contrast-detect AF at an output-normalised point, driven
+// smoothly (never snapping), ending locked on the sharpest position.
+EXPORT void vesper_focus_search_at(float ox, float oy) {
+    if (!gCamera || gCamera->sensorInfo().minFocusDiopters <= 0) return;
+    ensureFocusThread();
+    double current = 0;
+    {
+        std::lock_guard<std::mutex> lk(gStateMutex);
+        current = diopterToP(gGeom.focusDiopters);
+    }
+    std::lock_guard<std::mutex> lk(gFocusMutex);
+    gFocusRegion[0] = std::clamp(ox, 0.0f, 1.0f);
+    gFocusRegion[1] = std::clamp(oy, 0.0f, 1.0f);
+    gFocusSearchActive = true;
+    gFocusLocked = false;
+    gFocus.startSearch(current);
+}
+
+// Smooth rack to a manual focus distance (diopters).
+EXPORT void vesper_focus_pull_to(float diopters) {
+    if (!gCamera) return;
+    ensureFocusThread();
+    double current;
+    {
+        std::lock_guard<std::mutex> lk(gStateMutex);
+        current = diopterToP(gGeom.focusDiopters);
+    }
+    std::lock_guard<std::mutex> lk(gFocusMutex);
+    gFocusSearchActive = false;
+    gFocusLocked = false;
+    gFocus.pullTo(current, diopterToP(diopters));
+}
+
+// Seconds for a full-range focus move (cinema pulls ~1-2 s).
+EXPORT void vesper_set_focus_speed(float fullRangeSeconds) {
+    std::lock_guard<std::mutex> lk(gFocusMutex);
+    gFocus.setSpeed(fullRangeSeconds);
+}
+
+// Stops any smooth focus move / search and holds the lens where it is.
+// Also used after hardware AF to lock ("AF-L").
+EXPORT void vesper_focus_lock() {
+    {
+        std::lock_guard<std::mutex> lk(gFocusMutex);
+        gFocus.cancel();
+        gFocusSearchActive = false;
+        gFocusLocked = true;
+    }
+    if (gCamera) gCamera->setFocusMode(FocusMode::Manual);
+}
+
+// Metering: mode 0 = centre-weighted with face priority, 1 = spot at (x, y) (output-normalised).
+EXPORT void vesper_set_metering(int32_t mode, float x, float y) {
+    std::lock_guard<std::mutex> lk(gStateMutex);
+    gSettings.meterMode = mode == 1 ? 1 : 0;
+    gSettings.meterX = std::clamp(x, 0.0f, 1.0f);
+    gSettings.meterY = std::clamp(y, 0.0f, 1.0f);
+    gMeter.valid = false; // next auto-expose waits for fresh statistics
 }
 
 EXPORT void vesper_set_face_detection(int32_t enable) {
@@ -693,6 +1042,40 @@ EXPORT void vesper_set_nr_alignment(int32_t enable) {
 EXPORT void vesper_set_chroma_nr(float strength) {
     std::lock_guard<std::mutex> lk(gStateMutex);
     gSettings.chromaNr = std::clamp(strength, 0.0f, 1.0f);
+}
+
+// Asks the camera thread to save the next raw frame + metadata to
+// `<basePath>.raw10` / `<basePath>.json` for tools/calibration.
+EXPORT void vesper_capture_calibration_frame(const char* basePath, const char* deviceModel) {
+    if (!basePath) return;
+    std::lock_guard<std::mutex> lk(gStateMutex);
+    gCalibrationRequest = basePath;
+    gCalibrationDevice = deviceModel ? deviceModel : "";
+}
+
+// Per-device chart calibration: `count` (1 or 2) forward matrices, 9 floats
+// each row-major, with their CCTs. count = 0 clears it (factory calibration).
+EXPORT void vesper_set_color_profile(int32_t count, const float* matrices, const float* kelvins) {
+    std::lock_guard<std::mutex> lk(gStateMutex);
+    gProfile.count = std::clamp(count, 0, 2);
+    for (int i = 0; i < gProfile.count; ++i) {
+        std::copy(matrices + 9 * i, matrices + 9 * i + 9, gProfile.fm[i].begin());
+        gProfile.kelvin[i] = kelvins[i];
+    }
+    if (gCamera) {
+        gColor.setCalibration(withProfile(gCamera->sensorInfo().calibration));
+        setColorLocked(gColor.fromKelvinTint(gSettings.color.kelvin, gSettings.color.tint));
+    }
+}
+
+// Switch between the chart profile (if loaded) and the factory calibration.
+EXPORT void vesper_use_color_profile(int32_t enable) {
+    std::lock_guard<std::mutex> lk(gStateMutex);
+    gProfileEnabled = enable != 0;
+    if (gCamera) {
+        gColor.setCalibration(withProfile(gCamera->sensorInfo().calibration));
+        setColorLocked(gColor.fromKelvinTint(gSettings.color.kelvin, gSettings.color.tint));
+    }
 }
 
 EXPORT void vesper_set_ois(int32_t enable) { if (gCamera) gCamera->setOpticalStabilization(enable != 0); }
@@ -772,8 +1155,15 @@ EXPORT int32_t vesper_get_status(char* out, int32_t maxLen) {
     double kelvin, tint, fps;
     long long drops, expNs;
     int iso, afState;
-    bool awbAuto;
+    bool awbAuto, profileActive;
     float focusD, face[4];
+    std::string calSaved;
+    bool focusSearching, focusLocked;
+    {
+        std::lock_guard<std::mutex> lk(gFocusMutex);
+        focusSearching = gFocusSearchActive;
+        focusLocked = gFocusLocked;
+    }
     {
         std::lock_guard<std::mutex> lk(gStateMutex);
         outputSize(gSettings, ow, oh);
@@ -786,28 +1176,39 @@ EXPORT int32_t vesper_get_status(char* out, int32_t maxLen) {
         expNs = gMeter.exposureNs;
         iso = gMeter.iso;
         awbAuto = gSettings.awbAuto;
+        calSaved = gCalibrationSaved;
+        profileActive = gProfileEnabled && gProfile.count > 0;
         afState = gGeom.afState;
         focusD = gGeom.focusDiopters;
         std::copy(gGeom.faceNorm, gGeom.faceNorm + 4, face);
     }
-    char buf[1024];
+    char buf[2048];
     std::snprintf(buf, sizeof(buf),
                   "{\"streaming\":%s,\"fps\":%.2f,\"raw\":[%d,%d],\"output\":[%d,%d],\"cameraDrops\":%lld,"
                   "\"kelvin\":%.0f,\"tint\":%.1f,\"recording\":%s,\"durationMs\":%lld,\"framesEncoded\":%lld,"
                   "\"framesDropped\":%lld,\"thermal\":%d,\"audio\":%s,\"codec\":\"%s\",\"stopReason\":\"%s\","
                   "\"exposureNs\":%lld,\"iso\":%d,\"awbAuto\":%s,\"afState\":%d,\"focusDiopters\":%.3f,"
-                  "\"face\":[%.4f,%.4f,%.4f,%.4f],\"gpuMs\":%.2f,\"alignThrottled\":%s,\"nrThrottled\":%s}",
+                  "\"face\":[%.4f,%.4f,%.4f,%.4f],\"gpuMs\":%.2f,\"alignThrottled\":%s,\"nrThrottled\":%s,\"calibrationSaved\":\"%s\",\"profileActive\":%s,"
+                  "\"focusSearching\":%s,\"focusLocked\":%s}",
                   gCamera && gCamera->isStreaming() ? "true" : "false", fps, rw, rh, ow, oh, drops, kelvin, tint,
                   r.recording ? "true" : "false", static_cast<long long>(r.durationUs / 1000),
                   static_cast<long long>(r.framesEncoded), static_cast<long long>(r.framesDropped), r.thermalStatus,
                   r.audio ? "true" : "false", jsonEscape(r.codecName).c_str(), jsonEscape(r.stopReason).c_str(), expNs, iso,
                   awbAuto ? "true" : "false", afState, focusD, face[0], face[1], face[2], face[3],
                   gGpu ? gGpu->gpuFrameMs() : 0.0, gGpu && gGpu->alignmentThrottled() ? "true" : "false",
-                  gGpu && gGpu->noiseReductionThrottled() ? "true" : "false");
+                  gGpu && gGpu->noiseReductionThrottled() ? "true" : "false", jsonEscape(calSaved).c_str(),
+                  profileActive ? "true" : "false", focusSearching ? "true" : "false", focusLocked ? "true" : "false");
     return writeString(buf, out, maxLen);
 }
 
 EXPORT void vesper_close() {
+    {
+        std::lock_guard<std::mutex> lk(gFocusMutex);
+        gFocusQuit = true;
+        gFocus.cancel();
+    }
+    gFocusCv.notify_all();
+    if (gFocusThread.joinable()) gFocusThread.join();
     if (gRecorder) gRecorder->stop("user");
     if (gCamera) gCamera->closeCamera();
     if (gGpu) gGpu->release();

@@ -168,6 +168,9 @@ static double regionStdDevY(const P010& f, int x0, int y0, int w, int h) {
 int main() {
     VulkanEngine gpu;
     if (!gpu.initialize()) { std::puts("SKIP: no Vulkan device"); return 0; }
+    // The software GPU is far slower than a phone: disable the budget guard so
+    // it never throttles NR/alignment mid-test (that made the pan test flaky).
+    gpu.setFrameBudgetMs(1e9);
     std::vector<uint8_t> raw = makeRaw10(TestScene());
     P010 f{};
 

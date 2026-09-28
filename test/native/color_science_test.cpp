@@ -89,6 +89,21 @@ int main() {
     Vec3 g = mat3MulVec(ss.camToRec2020, {1, 1, 1});
     for (int i = 0; i < 3; ++i) CHECK_NEAR(g[i], 1.0, 5e-3, "no-FM neutral renders grey");
 
+    // Chart profile overrides the factory forward matrix and still keeps neutrals neutral.
+    {
+        DngCalibration cal = sampleCalibration();
+        cal.profileCount = 1;
+        cal.profileMatrix[0] = {0.60f, 0.25f, 0.11422f, 0.20f, 0.85f, -0.05f, 0.02f, -0.20f, 1.00521f};
+        ColorPipeline pp;
+        pp.setCalibration(cal);
+        pp.setClipLinear(1.0f);
+        ColorState s = pp.fromKelvinTint(5600, 0);
+        Vec3 g2 = mat3MulVec(s.camToRec2020, {1, 1, 1});
+        for (int i = 0; i < 3; ++i) CHECK_NEAR(g2[i], 1.0, 3e-3, "profile: neutral renders grey");
+        Mat3 fm = pp.forwardMatrixFor(5600);
+        CHECK_NEAR(fm[0], 0.60, 1e-6, "profile matrix in use");
+    }
+
     std::printf(failures ? "%d FAILURES\n" : "all color_science tests passed\n", failures);
     return failures ? 1 : 0;
 }

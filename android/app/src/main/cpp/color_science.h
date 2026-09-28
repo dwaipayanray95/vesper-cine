@@ -53,6 +53,12 @@ struct DngCalibration {
     bool haveForwardMatrix2 = false;
     float illuminant1Kelvin = 2850.0f;
     float illuminant2Kelvin = 6500.0f;
+
+    // Per-device chart calibration (tools/calibration): replaces the factory
+    // forward matrices, with its own illuminant CCTs. 0 = use factory.
+    int profileCount = 0;
+    Mat3 profileMatrix[2] = {mat3Identity(), mat3Identity()};
+    float profileKelvin[2] = {5600.0f, 5600.0f};
 };
 
 // Everything the shader needs for one white-balance state.
@@ -80,6 +86,10 @@ public:
 
     // Tap-to-WB / AsShotNeutral: iterate xy <-> neutral per DNG spec.
     ColorState fromCameraNeutral(const Vec3& cameraNeutral) const;
+
+    // The WB'd camera -> XYZ(D50) matrix in use at `kelvin` (profile or factory).
+    Mat3 forwardMatrixFor(double kelvin) const { return forwardMatrixAt(kelvin); }
+    const DngCalibration& calibration() const { return cal_; }
 
 private:
     Mat3 colorMatrixAt(double kelvin) const;   // CC * CM, mired-interpolated

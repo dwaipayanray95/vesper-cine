@@ -192,6 +192,10 @@ void ColorPipeline::setCalibration(const DngCalibration& cal) {
             std::swap(cal_.haveForwardMatrix1, cal_.haveForwardMatrix2);
         }
     }
+    if (cal_.profileCount == 2 && cal_.profileKelvin[0] > cal_.profileKelvin[1]) {
+        std::swap(cal_.profileMatrix[0], cal_.profileMatrix[1]);
+        std::swap(cal_.profileKelvin[0], cal_.profileKelvin[1]);
+    }
     if (std::fabs(cal_.illuminant1Kelvin - cal_.illuminant2Kelvin) < 50.0f) {
         cal_.haveColorMatrix2 = false; // degenerate pair: treat as single illuminant
     }
@@ -216,6 +220,12 @@ Mat3 ColorPipeline::colorMatrixAt(double kelvin) const {
 }
 
 Mat3 ColorPipeline::forwardMatrixAt(double kelvin) const {
+    if (cal_.profileCount == 1) return cal_.profileMatrix[0];
+    if (cal_.profileCount == 2) {
+        double t1 = cal_.profileKelvin[0], t2 = cal_.profileKelvin[1];
+        double w = kelvin <= t1 ? 1.0 : kelvin >= t2 ? 0.0 : (1.0 / kelvin - 1.0 / t2) / (1.0 / t1 - 1.0 / t2);
+        return mat3Lerp(cal_.profileMatrix[1], cal_.profileMatrix[0], static_cast<float>(w));
+    }
     if (cal_.haveForwardMatrix1 && cal_.haveForwardMatrix2 && cal_.haveColorMatrix2) {
         return mat3Lerp(cal_.forwardMatrix2, cal_.forwardMatrix1, static_cast<float>(weight1At(kelvin)));
     }
@@ -237,7 +247,7 @@ ColorState ColorPipeline::finish(const Vec3& neutralIn, Chromaticity whiteXy) co
     if (!mat3Inverse(cc, ccInv)) ccInv = mat3Identity();
 
     Mat3 camToXyzD50;
-    if (cal_.haveForwardMatrix1 || cal_.haveForwardMatrix2) {
+    if (cal_.haveForwardMatrix1 || cal_.haveForwardMatrix2 || cal_.profileCount > 0) {
         // DNG 1.6 §6.3: CameraToXYZ_D50 = FM * D * Inverse(AB * CC), D = diag(1 / ReferenceNeutral).
         Vec3 ref = mat3MulVec(ccInv, n);
         Mat3 d = mat3Diag({1.0f / std::max(ref[0], 1e-6f), 1.0f / std::max(ref[1], 1e-6f), 1.0f / std::max(ref[2], 1e-6f)});

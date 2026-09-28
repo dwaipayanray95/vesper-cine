@@ -9,6 +9,7 @@ add_library(vesper_engine SHARED
     native_bridge.cpp
     camera_engine.cpp
     color_science.cpp
+    focus_controller.cpp
     vulkan_engine.cpp
     recorder.cpp
 )

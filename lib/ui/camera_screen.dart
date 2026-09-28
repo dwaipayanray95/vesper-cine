@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -134,6 +135,15 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   Offset? _focusMark; // last tap-to-focus point (normalised), shown briefly
   Timer? _focusMarkTimer;
   int _codec = 0; // 0 HEVC, 1 AV1
+  bool _tapFocusCine = true; // tap: smooth contrast AF ending locked (CINE) vs hardware AF-C (FAST)
+  bool _tapSetsExposure = false; // tap also spot-meters exposure at that point
+  double _focusSpeed = 1.5; // seconds for a full-range focus move
+  bool _profileAvailable = false; // a chart calibration exists for this device/camera
+  bool _useProfile = true;
+  String _profileInfo = '';
+  String? _calibrationDir;
+  String? _deviceModel;
+  String _lastCalibrationSaved = '';
 
   int? _textureId;
   String _statusMessage = 'INITIALIZING SENSOR...';
@@ -181,6 +191,10 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       return;
     }
     _cameraId = cam.id;
+    final info = await _engine.deviceInfo();
+    _deviceModel = info?['model'] as String?;
+    _calibrationDir = info?['calibrationDir'] as String?;
+    await _loadColorProfile();
     if (!await _openAndStream(createTexture: true)) return;
     _poll = Timer.periodic(const Duration(milliseconds: 250), (_) => _onPoll());
   }
@@ -209,6 +223,8 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     _engine.setTemporalNr(_temporalNr);
     _engine.setChromaNr(_chromaNr);
     _engine.setNrAlignment(_nrAlignment);
+    _engine.setFocusSpeed(_focusSpeed);
+    _engine.useColorProfile(_useProfile);
     _engine.setFrameRate(_fps);
     _applyShutter();
 
@@ -241,6 +257,37 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     } else if (state == AppLifecycleState.resumed && !_streaming) {
       _openAndStream();
     }
+  }
+
+  // Chart calibrations ship as assets/color_profiles/*.json (tools/calibration);
+  // the one matching this phone model and camera id is used.
+  Future<void> _loadColorProfile() async {
+    try {
+      final manifest = await AssetManifest.loadFromAssetBundle(rootBundle);
+      for (final path in manifest.listAssets().where((a) => a.startsWith('assets/color_profiles/') && a.endsWith('.json'))) {
+        final j = jsonDecode(await rootBundle.loadString(path)) as Map<String, dynamic>;
+        if (j['format'] != 'vesper-color-profile/1') continue;
+        if (j['device'] != _deviceModel || '${j['cameraId']}' != _cameraId) continue;
+        final ill = (j['illuminants'] as List).cast<Map<String, dynamic>>();
+        _engine.setColorProfile(
+          [for (final i in ill) (i['forwardMatrix'] as List).map((e) => (e as num).toDouble()).toList()],
+          [for (final i in ill) (i['cct'] as num).toDouble()],
+        );
+        _profileAvailable = true;
+        _profileInfo = ill.map((i) => '${(i['cct'] as num).round()}K ΔE ${i['meanDeltaE']}').join(', ');
+        return;
+      }
+    } catch (_) {
+      // No or malformed profile: factory calibration.
+    }
+  }
+
+  void _captureCalibration() {
+    final dir = _calibrationDir;
+    if (dir == null || !_streaming) return;
+    final stamp = DateTime.now().toIso8601String().replaceAll(RegExp(r'[:.]'), '-');
+    _engine.captureCalibrationFrame('$dir/CAL_${_cameraId}_${_kelvin}K_$stamp', _deviceModel ?? 'unknown');
+    _toast('Capturing calibration frame…');
   }
 
   List<double> get _fpsOptions {
@@ -277,8 +324,14 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
         _kelvin = s.kelvin.round();
         _tint = s.tint.round();
       }
-      if (_afContinuous) _focus = s.focusDiopters;
+      if (_afContinuous || s.focusSearching || s.focusLocked) _focus = s.focusDiopters;
     });
+    if (s.calibrationSaved.isNotEmpty && s.calibrationSaved != _lastCalibrationSaved) {
+      _lastCalibrationSaved = s.calibrationSaved;
+      _engine.publishCalibration(s.calibrationSaved).then((ok) {
+        if (mounted) _toast(ok ? 'Saved to Downloads/Vesper Calibration' : 'Calibration frame saved (app files only)');
+      });
+    }
     // The engine stops on its own on thermal/storage limits.
     if (_recording && !_stopping && !s.recording && s.stopReason.isNotEmpty) {
       _finishRecording(s.stopReason);
@@ -620,6 +673,46 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                     ),
                   ],
                 ),
+                const SizedBox(height: 8),
+                Wrap(
+                  alignment: WrapAlignment.center,
+                  spacing: 12,
+                  runSpacing: 8,
+                  children: [
+                    Segmented(
+                      options: const ['TAP: CINE', 'TAP: FAST'],
+                      selected: _tapFocusCine ? 0 : 1,
+                      onSelected: (i) {
+                        setState(() => _tapFocusCine = i == 0);
+                        setSheet(() {});
+                      },
+                    ),
+                    Segmented(
+                      options: const ['TAP SETS EXPOSURE'],
+                      selected: _tapSetsExposure ? 0 : -1,
+                      onSelected: (_) {
+                        setState(() => _tapSetsExposure = !_tapSetsExposure);
+                        setSheet(() {});
+                      },
+                    ),
+                    Segmented(
+                      options: const ['FAST 0.8s', 'MED 1.5s', 'SLOW 3s'],
+                      selected: const [0.8, 1.5, 3.0].indexOf(_focusSpeed),
+                      onSelected: (i) {
+                        setState(() => _focusSpeed = const [0.8, 1.5, 3.0][i]);
+                        setSheet(() {});
+                        _engine.setFocusSpeed(_focusSpeed);
+                      },
+                    ),
+                  ],
+                ),
+                const Padding(
+                  padding: EdgeInsets.only(top: 6),
+                  child: Text(
+                    'CINE racks focus smoothly and holds it (AF-L). Long-press the viewfinder to focus and lock.',
+                    style: TextStyle(color: Colors.white38, fontSize: 10),
+                  ),
+                ),
                 if (!_afContinuous)
                   // Slider runs on sqrt(diopters) so the far range isn't crammed into a sliver.
                   Slider(
@@ -639,15 +732,43 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     );
   }
 
-  void _tapToFocus(Offset normalised) {
+  // Tap: CINE = smooth contrast search that ends locked; FAST = hardware AF-C on
+  // the region. Optionally also spot-meters exposure there.
+  void _tapToFocus(Offset p, {bool lock = false}) {
     if (!_streaming) return;
-    _engine.setFocusPoint(normalised.dx, normalised.dy);
+    final cine = _tapFocusCine && (_caps?.minFocusDiopters ?? 0) > 0;
+    if (cine) {
+      _engine.focusSearchAt(p.dx, p.dy);
+    } else {
+      _engine.setFocusPoint(p.dx, p.dy);
+      if (lock) _lockWhenFocused();
+    }
+    if (lock) HapticFeedback.mediumImpact();
+    if (_tapSetsExposure) {
+      _engine.setMetering(1, p.dx, p.dy);
+      _autoExpose(keepShutter: true, quiet: true);
+    }
+    _showFocusMark(p, afContinuous: !cine && !lock);
+  }
+
+  // FAST + long-press: let hardware AF settle, then hold it (AF-L).
+  Future<void> _lockWhenFocused() async {
+    for (var i = 0; i < 20; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      final st = _engine.status()?.afState ?? 0;
+      if (st == 2 || st == 4 || st == 5 || st == 6) break;
+    }
+    _engine.focusLock();
+    if (mounted) setState(() => _afContinuous = false);
+  }
+
+  void _showFocusMark(Offset p, {required bool afContinuous}) {
     _focusMarkTimer?.cancel();
     setState(() {
-      _afContinuous = true;
-      _focusMark = normalised;
+      _afContinuous = afContinuous;
+      _focusMark = p;
     });
-    _focusMarkTimer = Timer(const Duration(milliseconds: 1500), () {
+    _focusMarkTimer = Timer(const Duration(milliseconds: 2500), () {
       if (mounted) setState(() => _focusMark = null);
     });
   }
@@ -735,6 +856,30 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                     ),
                   ),
                   row(
+                    'Colour calibration',
+                    Segmented(
+                      options: const ['FACTORY', 'CHART PROFILE'],
+                      selected: _profileAvailable && _useProfile ? 1 : 0,
+                      onSelected: (i) {
+                        if (!_profileAvailable) {
+                          _toast('No chart profile for this phone yet (see tools/calibration)');
+                          return;
+                        }
+                        update(() => _useProfile = i == 1);
+                        _engine.useColorProfile(_useProfile);
+                      },
+                    ),
+                  ),
+                  if (_profileAvailable)
+                    Text(_profileInfo, style: const TextStyle(color: Colors.white38, fontSize: 10)),
+                  row(
+                    'Calibration frame (chart)',
+                    TextButton(
+                      onPressed: _streaming && _calibrationDir != null ? _captureCalibration : null,
+                      child: const Text('CAPTURE'),
+                    ),
+                  ),
+                  row(
                     'Chroma noise reduction',
                     Segmented(
                       options: const ['OFF', 'LOW', 'HIGH'],
@@ -759,11 +904,17 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       : d > 1
       ? '${(100 / d).round()}cm'
       : '${(1 / d).toStringAsFixed(1)}m';
-  String get _focusLabel => _afContinuous ? 'AF-C' : _distanceLabel(_focus);
+  String get _focusLabel {
+    final s = _status;
+    if (s?.focusSearching ?? false) return 'AF…';
+    if (_afContinuous) return 'AF-C';
+    if (s?.focusLocked ?? false) return 'AF-L ${_distanceLabel(_focus)}';
+    return _distanceLabel(_focus);
+  }
 
   // One-shot auto exposure: two metering passes (the second one refines very
   // over/under-exposed starts). Tap keeps the shutter, long-press keeps ISO.
-  Future<void> _autoExpose({required bool keepShutter}) async {
+  Future<void> _autoExpose({required bool keepShutter, bool quiet = false}) async {
     (int, int)? r;
     for (var pass = 0; pass < 3; pass++) {
       final next = _engine.autoExpose(keepShutter: keepShutter);
@@ -783,7 +934,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
         _exposureNs = ns;
       }
     });
-    _toast('Exposure set: ${_speedLabel(ns)}, ISO $iso${keepShutter ? '' : ' (ISO priority)'}');
+    if (!quiet) _toast('Exposure set: ${_speedLabel(ns)}, ISO $iso${keepShutter ? '' : ' (ISO priority)'}');
   }
 
   String _timecode(int ms) {
@@ -820,6 +971,10 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                           onTapUp: (d) => _tapToFocus(
                             Offset(d.localPosition.dx / box.maxWidth, d.localPosition.dy / box.maxHeight),
                           ),
+                          onLongPressStart: (d) => _tapToFocus(
+                            Offset(d.localPosition.dx / box.maxWidth, d.localPosition.dy / box.maxHeight),
+                            lock: true,
+                          ),
                           child: Stack(
                             children: [
                               Positioned.fill(
@@ -844,7 +999,11 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                                     height: 60,
                                     decoration: BoxDecoration(
                                       border: Border.all(
-                                        color: (s?.afState ?? 0) == 2 || (s?.afState ?? 0) == 4
+                                        color: (s?.focusSearching ?? false)
+                                            ? Colors.white
+                                            : (s?.focusLocked ?? false)
+                                            ? Colors.amber
+                                            : (s?.afState ?? 0) == 2 || (s?.afState ?? 0) == 4
                                             ? Colors.greenAccent
                                             : Colors.white,
                                         width: 1.5,
@@ -988,8 +1147,18 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                     onTap: _pickWhiteBalance,
                   ),
                   GestureDetector(
-                    onTap: _streaming ? () => _autoExpose(keepShutter: true) : null,
-                    onLongPress: _streaming ? () => _autoExpose(keepShutter: false) : null,
+                    onTap: _streaming
+                        ? () {
+                            _engine.setMetering(0); // centre-weighted, faces first
+                            _autoExpose(keepShutter: true);
+                          }
+                        : null,
+                    onLongPress: _streaming
+                        ? () {
+                            _engine.setMetering(0);
+                            _autoExpose(keepShutter: false);
+                          }
+                        : null,
                     child: _pill('AUTO', 'AE', subtitle: 'hold: ISO', onTap: null, enabled: _streaming),
                   ),
                   IconButton(

@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.ContentValues
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
 import android.view.Surface
@@ -95,6 +96,19 @@ class MainActivity : FlutterActivity() {
                         result.error("file", e.message, null)
                     }
                 }
+                "deviceInfo" -> {
+                    val dir = java.io.File(getExternalFilesDir(null), "calibration").apply { mkdirs() }
+                    result.success(mapOf("model" to Build.MODEL, "device" to Build.DEVICE, "calibrationDir" to dir.absolutePath))
+                }
+                "publishCalibration" -> {
+                    val base = call.argument<String>("base") ?: ""
+                    try {
+                        for (ext in listOf(".raw10", ".json")) publishDownload(java.io.File(base + ext))
+                        result.success(true)
+                    } catch (e: Exception) {
+                        result.error("file", e.message, null)
+                    }
+                }
                 else -> result.notImplemented()
             }
         }
@@ -114,6 +128,19 @@ class MainActivity : FlutterActivity() {
         val uri = contentResolver.insert(collection, values) ?: throw IllegalStateException("MediaStore insert failed")
         val pfd = contentResolver.openFileDescriptor(uri, "rw") ?: throw IllegalStateException("open failed")
         return mapOf("fd" to pfd.detachFd(), "uri" to uri.toString(), "name" to name)
+    }
+
+    // Copies an app-private calibration file to Downloads/Vesper Calibration so it
+    // can be pulled off the phone without adb.
+    private fun publishDownload(src: java.io.File) {
+        val values = ContentValues().apply {
+            put(MediaStore.Downloads.DISPLAY_NAME, src.name)
+            put(MediaStore.Downloads.MIME_TYPE, if (src.name.endsWith(".json")) "application/json" else "application/octet-stream")
+            put(MediaStore.Downloads.RELATIVE_PATH, "Download/Vesper Calibration")
+        }
+        val uri = contentResolver.insert(MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), values)
+            ?: throw IllegalStateException("MediaStore insert failed")
+        contentResolver.openOutputStream(uri)!!.use { out -> src.inputStream().use { it.copyTo(out) } }
     }
 
     private fun releaseTexture() {

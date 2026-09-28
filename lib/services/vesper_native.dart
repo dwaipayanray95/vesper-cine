@@ -46,6 +46,10 @@ class EngineStatus {
   final double gpuMs; // measured GPU time per frame
   final bool alignThrottled; // NR alignment auto-disabled: GPU over budget
   final bool nrThrottled; // temporal/chroma NR also paused: GPU still over budget
+  final String calibrationSaved; // base path of the last calibration frame written
+  final bool profileActive; // per-device chart calibration in use
+  final bool focusSearching; // cinema AF search / smooth pull running
+  final bool focusLocked; // focus held (AF-L)
 
   EngineStatus.fromJson(Map<String, dynamic> j)
     : streaming = j['streaming'] as bool,
@@ -69,7 +73,11 @@ class EngineStatus {
       face = (j['face'] as List).map((e) => (e as num).toDouble()).toList(),
       gpuMs = (j['gpuMs'] as num).toDouble(),
       alignThrottled = j['alignThrottled'] as bool,
-      nrThrottled = j['nrThrottled'] as bool;
+      nrThrottled = j['nrThrottled'] as bool,
+      calibrationSaved = (j['calibrationSaved'] as String?) ?? '',
+      profileActive = (j['profileActive'] as bool?) ?? false,
+      focusSearching = (j['focusSearching'] as bool?) ?? false,
+      focusLocked = (j['focusLocked'] as bool?) ?? false;
 }
 
 class RawMode {
@@ -160,6 +168,14 @@ class VesperNative {
   late final void Function() _stopRecording;
   late final int Function(Pointer<Utf8>, int) _status;
   late final void Function() _close;
+  late final void Function(double, double) _focusSearchAt;
+  late final void Function(double) _focusPullTo;
+  late final void Function(double) _setFocusSpeed;
+  late final void Function() _focusLock;
+  late final void Function(int, double, double) _setMetering;
+  late final void Function(Pointer<Utf8>, Pointer<Utf8>) _captureCalibration;
+  late final void Function(int, Pointer<Float>, Pointer<Float>) _setColorProfile;
+  late final void Function(int) _useColorProfile;
 
   VesperNative._() {
     if (!Platform.isAndroid) return;
@@ -227,6 +243,25 @@ class VesperNative {
         'vesper_get_status',
       );
       _close = _lib.lookupFunction<Void Function(), void Function()>('vesper_close');
+      _focusSearchAt = _lib.lookupFunction<Void Function(Float, Float), void Function(double, double)>(
+        'vesper_focus_search_at',
+      );
+      _focusPullTo = _lib.lookupFunction<Void Function(Float), void Function(double)>('vesper_focus_pull_to');
+      _setFocusSpeed = _lib.lookupFunction<Void Function(Float), void Function(double)>('vesper_set_focus_speed');
+      _focusLock = _lib.lookupFunction<Void Function(), void Function()>('vesper_focus_lock');
+      _setMetering = _lib.lookupFunction<Void Function(Int32, Float, Float), void Function(int, double, double)>(
+        'vesper_set_metering',
+      );
+      _captureCalibration = _lib
+          .lookupFunction<Void Function(Pointer<Utf8>, Pointer<Utf8>), void Function(Pointer<Utf8>, Pointer<Utf8>)>(
+            'vesper_capture_calibration_frame',
+          );
+      _setColorProfile = _lib
+          .lookupFunction<
+            Void Function(Int32, Pointer<Float>, Pointer<Float>),
+            void Function(int, Pointer<Float>, Pointer<Float>)
+          >('vesper_set_color_profile');
+      _useColorProfile = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_use_color_profile');
       _loaded = true;
     } catch (_) {
       _loaded = false;
@@ -394,6 +429,71 @@ class VesperNative {
   Future<void> destroyViewfinderTexture() async {
     if (!Platform.isAndroid) return;
     await _channel.invokeMethod('destroyTexture');
+  }
+
+  /// Cinema AF: contrast search at an upright viewfinder point, moved smoothly, ends locked.
+  void focusSearchAt(double x, double y) => _loaded ? _focusSearchAt(x, y) : null;
+
+  /// Smooth focus rack to a distance in diopters.
+  void focusPullTo(double diopters) => _loaded ? _focusPullTo(diopters) : null;
+
+  /// Seconds for a full-range focus move.
+  void setFocusSpeed(double seconds) => _loaded ? _setFocusSpeed(seconds) : null;
+
+  /// Holds focus where it is (AF-L).
+  void focusLock() => _loaded ? _focusLock() : null;
+
+  /// 0 = centre-weighted with face priority, 1 = spot at (x, y).
+  void setMetering(int mode, [double x = 0.5, double y = 0.5]) => _loaded ? _setMetering(mode, x, y) : null;
+
+  /// Saves the next raw frame (+ metadata JSON) to `<basePath>.raw10/.json`.
+  void captureCalibrationFrame(String basePath, String deviceModel) {
+    if (!_loaded) return;
+    final b = basePath.toNativeUtf8();
+    final d = deviceModel.toNativeUtf8();
+    try {
+      _captureCalibration(b, d);
+    } finally {
+      calloc.free(b);
+      calloc.free(d);
+    }
+  }
+
+  /// Per-device forward matrices (9 floats row-major each) with their CCTs; empty clears.
+  void setColorProfile(List<List<double>> matrices, List<double> kelvins) {
+    if (!_loaded) return;
+    final n = matrices.length.clamp(0, 2);
+    final m = calloc<Float>(18);
+    final k = calloc<Float>(2);
+    try {
+      for (var i = 0; i < n; i++) {
+        for (var j = 0; j < 9; j++) {
+          m[i * 9 + j] = matrices[i][j];
+        }
+        k[i] = kelvins[i];
+      }
+      _setColorProfile(n, m, k);
+    } finally {
+      calloc.free(m);
+      calloc.free(k);
+    }
+  }
+
+  void useColorProfile(bool on) => _loaded ? _useColorProfile(on ? 1 : 0) : null;
+
+  Future<Map<String, dynamic>?> deviceInfo() async {
+    if (!Platform.isAndroid) return null;
+    return _channel.invokeMapMethod<String, dynamic>('deviceInfo');
+  }
+
+  /// Copies the .raw10/.json pair into Downloads/Vesper Calibration.
+  Future<bool> publishCalibration(String basePath) async {
+    if (!Platform.isAndroid) return false;
+    try {
+      return await _channel.invokeMethod<bool>('publishCalibration', {'base': basePath}) ?? false;
+    } on PlatformException {
+      return false;
+    }
   }
 
   void close() => _loaded ? _close() : null;
