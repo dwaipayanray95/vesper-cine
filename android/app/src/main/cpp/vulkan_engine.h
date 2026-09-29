@@ -74,6 +74,10 @@ public:
 
     // Camera frame interval; used to keep optional GPU passes within budget.
     void setFrameBudgetMs(double ms) { frameBudgetMs_ = ms; }
+    // false: never pause alignment / HQ / NR automatically (frames may drop instead).
+    void setBudgetGuard(bool enabled);
+    bool oversamplingSupported() const { return hqSupported_; }
+    bool oversamplingThrottled() const { return hqThrottled_; }
     // Averaged GPU time per frame (ms) from timestamp queries; 0 if unsupported.
     double gpuFrameMs() const { return gpuFrameMs_; }
     // True once alignment was switched off automatically because the GPU ran over budget.
@@ -164,8 +168,14 @@ private:
     Image quadImage_, cleanImage_, historyImage_, vfImage_;
     Image curLowImage_, histLowImage_, motionImage_; // tile alignment (align.comp)
     Image greenImage_;                              // full-res green (green.comp), HQ oversampling
-    bool hqSupported_ = false;                      // R16_SFLOAT storage + linear sampling available
+    bool hqSupported_ = false;                      // a storage + linearly filterable format for greenImage_
+    VkFormat hqFormat_ = VK_FORMAT_R16_SFLOAT;      // R16F, or RGBA16F on GPUs without R16F storage
     bool hqThrottled_ = false;
+    // Budget guard: throttled stages come back once there is headroom again.
+    bool guardEnabled_ = true;
+    int graceFrames_ = 0;       // ignore the first frames after (re)allocation: always slow
+    int underBudgetFrames_ = 0;
+    int recoverFrames_ = 120;   // under-budget frames needed before re-enabling a stage (doubles on flapping)
     bool historyValid_ = false;
 
     // GPU timing: kStamps timestamps per slot (start, unpack, align, clean, end).

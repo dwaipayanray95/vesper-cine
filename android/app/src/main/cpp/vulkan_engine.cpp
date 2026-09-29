@@ -4,6 +4,7 @@
 #include "shaders/clean_spv.h"
 #include "shaders/align_spv.h"
 #include "shaders/green_spv.h"
+#include "shaders/green_rgba_spv.h"
 
 #include <algorithm>
 #include <chrono>
@@ -196,11 +197,24 @@ bool VulkanEngine::createPipelines() {
                     VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE}, greenLayout_)) return false;
     {
         // HQ oversampling needs an R16F image that is both writable and linearly filterable.
-        VkFormatProperties fp{};
-        vkGetPhysicalDeviceFormatProperties(physical_, VK_FORMAT_R16_SFLOAT, &fp);
         const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
-        hqSupported_ = (fp.optimalTilingFeatures & need) == need;
-        if (!hqSupported_) VK_LOGW("R16F storage/linear sampling unsupported: HQ oversampling disabled");
+        auto has = [&](VkFormat f) {
+            VkFormatProperties fp{};
+            vkGetPhysicalDeviceFormatProperties(physical_, f, &fp);
+            return (fp.optimalTilingFeatures & need) == need;
+        };
+        if (has(VK_FORMAT_R16_SFLOAT)) {
+            hqFormat_ = VK_FORMAT_R16_SFLOAT;
+            hqSupported_ = true;
+        } else if (has(VK_FORMAT_R16G16B16A16_SFLOAT)) {
+            hqFormat_ = VK_FORMAT_R16G16B16A16_SFLOAT; // 4x memory, but always available
+            hqSupported_ = true;
+            VK_LOGW("R16F storage unsupported: HQ oversampling uses an RGBA16F image");
+        } else {
+            hqSupported_ = false;
+            VK_LOGW("No usable format: HQ oversampling disabled");
+        }
+        VK_LOGI("HQ oversampling: %s", hqSupported_ ? (hqFormat_ == VK_FORMAT_R16_SFLOAT ? "R16F" : "RGBA16F") : "unsupported");
     }
 
     VkDescriptorPoolSize sizes[] = {
@@ -265,7 +279,9 @@ bool VulkanEngine::createPipelines() {
            makePipe(kCleanSpv, sizeof(kCleanSpv), cleanLayout_, cleanPipeLayout_, cleanPipe_) &&
            makePipe(kAlignSpv, sizeof(kAlignSpv), alignLayout_, alignPipeLayout_, alignPipe_, sizeof(int32_t)) &&
            makePipe(kRenderSpv, sizeof(kRenderSpv), renderLayout_, renderPipeLayout_, renderPipe_) &&
-           makePipe(kGreenSpv, sizeof(kGreenSpv), greenLayout_, greenPipeLayout_, greenPipe_);
+           (hqFormat_ == VK_FORMAT_R16_SFLOAT
+                ? makePipe(kGreenSpv, sizeof(kGreenSpv), greenLayout_, greenPipeLayout_, greenPipe_)
+                : makePipe(kGreenRgbaSpv, sizeof(kGreenRgbaSpv), greenLayout_, greenPipeLayout_, greenPipe_));
 }
 
 void VulkanEngine::release() {
@@ -473,7 +489,7 @@ bool VulkanEngine::ensureResources(const Geometry& g) {
     if (!createImage(quadW, quadH, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, quadImage_) ||
         // Full-res green for HQ oversampling (1x1 placeholder when unsupported, so descriptors stay valid).
         !createImage(hqSupported_ ? static_cast<uint32_t>(g.rawW) : 1u, hqSupported_ ? static_cast<uint32_t>(g.rawH) : 1u,
-                     hqSupported_ ? VK_FORMAT_R16_SFLOAT : VK_FORMAT_R16G16B16A16_SFLOAT,
+                     hqSupported_ ? hqFormat_ : VK_FORMAT_R16G16B16A16_SFLOAT,
                      VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, greenImage_) ||
         !createImage(quadW, quadH, VK_FORMAT_R16G16B16A16_SFLOAT,
                      VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, cleanImage_) ||
@@ -515,6 +531,7 @@ bool VulkanEngine::ensureResources(const Geometry& g) {
     vkQueueWaitIdle(queue_);
 
     geom_ = g;
+    graceFrames_ = 48; // first ~2 s after (re)allocation don't count towards the budget guard
     for (auto& s : slots_) writeDescriptors(s);
     swapchainStale_ = true; // viewfinder extent may need to follow the new output size
     VK_LOGI("GPU resources: raw %dx%d (stride %d) -> quad %ux%u -> out %dx%d",
@@ -1027,18 +1044,45 @@ void VulkanEngine::readTimestamps(int slot) {
     gpuFrameMs_ = gpuFrameMs_ == 0 ? frameMs : 0.9 * gpuFrameMs_ + 0.1 * frameMs;
     // Sustained >85% of the frame interval means we are about to drop frames:
     // alignment is the optional, most expensive pass, so it goes first.
+    if (!guardEnabled_) return;
+    if (graceFrames_ > 0) { --graceFrames_; overBudgetFrames_ = underBudgetFrames_ = 0; return; }
+    // Sustained >85% of the frame interval means we are about to drop frames:
+    // pause the optional passes, cheapest-to-lose first (alignment, then HQ
+    // oversampling, then NR). Sustained headroom (<65%) brings them back in
+    // reverse order; a stage that flaps waits twice as long each time.
     overBudgetFrames_ = gpuFrameMs_ > 0.85 * frameBudgetMs_ ? overBudgetFrames_ + 1 : 0;
-    if (overBudgetFrames_ > 30 && !alignThrottled_) {
-        alignThrottled_ = true;
-        overBudgetFrames_ = 0;
-        VK_LOGW("GPU %.1fms over %.1fms budget: temporal NR alignment disabled", gpuFrameMs_, frameBudgetMs_);
-    } else if (overBudgetFrames_ > 30 && !hqThrottled_ && hqSupported_) {
-        hqThrottled_ = true;
-        overBudgetFrames_ = 0;
-        VK_LOGW("GPU %.1fms still over %.1fms budget: HQ oversampling paused", gpuFrameMs_, frameBudgetMs_);
-    } else if (overBudgetFrames_ > 30 && !nrThrottled_) {
-        nrThrottled_ = true;
-        VK_LOGW("GPU %.1fms still over %.1fms budget: temporal and chroma NR paused", gpuFrameMs_, frameBudgetMs_);
+    underBudgetFrames_ = gpuFrameMs_ < 0.65 * frameBudgetMs_ ? underBudgetFrames_ + 1 : 0;
+    if (overBudgetFrames_ > 30) {
+        overBudgetFrames_ = underBudgetFrames_ = 0;
+        if (!alignThrottled_) {
+            alignThrottled_ = true;
+            VK_LOGW("GPU %.1fms over %.1fms budget: temporal NR alignment paused", gpuFrameMs_, frameBudgetMs_);
+        } else if (hqSupported_ && !hqThrottled_) {
+            hqThrottled_ = true;
+            VK_LOGW("GPU %.1fms still over %.1fms budget: HQ oversampling paused", gpuFrameMs_, frameBudgetMs_);
+        } else if (!nrThrottled_) {
+            nrThrottled_ = true;
+            VK_LOGW("GPU %.1fms still over %.1fms budget: temporal and chroma NR paused", gpuFrameMs_, frameBudgetMs_);
+        }
+        graceFrames_ = 24; // let the timing settle before judging the new load
+    } else if (underBudgetFrames_ > recoverFrames_ && (alignThrottled_ || hqThrottled_ || nrThrottled_)) {
+        underBudgetFrames_ = 0;
+        if (nrThrottled_) nrThrottled_ = false;
+        else if (hqThrottled_) hqThrottled_ = false;
+        else alignThrottled_ = false;
+        recoverFrames_ = std::min(recoverFrames_ * 2, 24 * 120); // back off if it flaps (max ~2 min)
+        graceFrames_ = 24;
+        VK_LOGI("GPU %.1fms has headroom: re-enabled a paused stage (align %d hq %d nr %d)", gpuFrameMs_,
+                !alignThrottled_, !hqThrottled_, !nrThrottled_);
+    }
+}
+
+void VulkanEngine::setBudgetGuard(bool enabled) {
+    std::lock_guard<std::mutex> lock(frameMutex_);
+    guardEnabled_ = enabled;
+    if (!enabled) {
+        alignThrottled_ = hqThrottled_ = nrThrottled_ = false;
+        overBudgetFrames_ = underBudgetFrames_ = 0;
     }
 }
 

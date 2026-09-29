@@ -19,3 +19,7 @@ Mention the new version in the commit message and in the reply to the user.
 
 ## UI-only work
 Agents doing design/UI work must not edit `android/**`, `lib/services/vesper_native.dart`, `tools/**`, `color_science/**` or `test/native/**`. Keep the engine calls in `camera_screen.dart` (`_start`, `_openAndStream`, lifecycle, `_onPoll`, recording) and their order intact; tap coordinates are normalised to the viewfinder texture rect.
+
+## Build flavours
+- `kDevTools` (`lib/build_flags.dart`): developer-only features (chart calibration capture) are shown in debug/profile builds and hidden in release builds; force with `--dart-define=VESPER_DEV_TOOLS=true` (GitHub workflow input `dev_tools`). Gate new internal/diagnostic tools behind it.
+- All builds are signed with the shared tester key `android/app/vesper-dev.jks` so APKs install over each other.

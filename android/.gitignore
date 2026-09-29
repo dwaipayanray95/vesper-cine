@@ -12,3 +12,6 @@ GeneratedPluginRegistrant.java
 key.properties
 **/*.keystore
 **/*.jks
+
+# Shared tester signing key (see app/build.gradle.kts): committed on purpose.
+!app/vesper-dev.jks

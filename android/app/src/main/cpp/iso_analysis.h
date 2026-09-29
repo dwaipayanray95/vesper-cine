@@ -37,4 +37,15 @@ struct IsoAnalysis {
 
 IsoAnalysis analyzeIsoSweep(const std::vector<IsoSample>& samples, int maxAnalogIso);
 
+// "Cleanest image" exposure: reach `target` (exposure time x ISO product) by
+//  1. the base native ISO (or the lowest ISO when not analysed), exposing with
+//     the shutter up to the 180-degree limit `maxShutterNs` (1/(2*fps));
+//  2. still too dark: the dual-gain (HCG) native ISO, shutter again;
+//  3. still too dark: raise ISO above that with the shutter at 180 degrees.
+// Too bright even at the fastest shutter: ISO drops below base (extended low)
+// only as a last resort.
+struct ExposureChoice { double exposureNs = 0; double iso = 0; };
+ExposureChoice solveCleanExposure(double target, double minShutterNs, double maxShutterNs, int minIso, int isoCap,
+                                  int baseIso, int hcgIso);
+
 } // namespace vesper

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../build_flags.dart';
 import 'value_picker.dart';
 
 /// Full-screen cinema settings page.
@@ -22,6 +23,8 @@ class SettingsScreen extends StatefulWidget {
   final ValueChanged<double> onChromaNrChanged;
   final int sharpening;
   final bool oversampling;
+  final bool gpuGuard;
+  final ValueChanged<bool> onGpuGuardChanged;
   final ValueChanged<bool> onOversamplingChanged;
   final ValueChanged<int> onSharpeningChanged;
   final bool profileAvailable;
@@ -57,6 +60,8 @@ class SettingsScreen extends StatefulWidget {
     required this.onChromaNrChanged,
     this.sharpening = 1,
     this.oversampling = true,
+    this.gpuGuard = true,
+    required this.onGpuGuardChanged,
     required this.onOversamplingChanged,
     required this.onSharpeningChanged,
     required this.profileAvailable,
@@ -93,6 +98,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late double chromaNr = widget.chromaNr;
   late int sharpening = widget.sharpening;
   late bool oversampling = widget.oversampling;
+  late bool gpuGuard = widget.gpuGuard;
   late bool useProfile = widget.useProfile;
   late bool tapLocks = widget.tapLocks;
   late bool tapSetsExposure = widget.tapSetsExposure;
@@ -271,6 +277,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
             ),
             _settingRow(
+              'GPU Performance Guard',
+              gpuGuard
+                  ? 'AUTO: briefly pauses alignment / HQ / NR if frames would drop, resumes when there is headroom'
+                  : 'OFF: your processing choices always run (frames may drop if the GPU can\'t keep up)',
+              Segmented(
+                options: const ['AUTO', 'OFF'],
+                selected: gpuGuard ? 0 : 1,
+                onSelected: (i) {
+                  setState(() => gpuGuard = i == 0);
+                  widget.onGpuGuardChanged(i == 0);
+                },
+              ),
+            ),
+            _settingRow(
               'Detail / Sharpening',
               'Noise-aware edge enhancement (recording + viewfinder)',
               Segmented(
@@ -324,23 +344,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
             const Divider(color: Colors.white12, height: 1),
             const SizedBox(height: 14),
 
-            // Section: COLOR SCIENCE & CALIBRATION
-            _sectionHeader('COLOR SCIENCE & CALIBRATION'),
-            _settingRow(
-              'Calibration Profile',
-              profileAvailable
-                  ? (useProfile ? 'Chart calibrated: $profileInfo' : 'Factory HAL profile')
-                  : 'No chart profile found',
-              Segmented(
-                options: const ['FACTORY', 'CHART PROFILE'],
-                selected: (profileAvailable && useProfile) ? 1 : 0,
-                onSelected: (i) {
-                  if (profileAvailable) setState(() => useProfile = i == 1);
-                  widget.onUseProfileChanged(i == 1);
-                },
+            // Section: COLOR SCIENCE & CALIBRATION (chart tools: developer builds only)
+            if (kDevTools || profileAvailable) _sectionHeader('COLOR SCIENCE & CALIBRATION'),
+            if (kDevTools || profileAvailable)
+              _settingRow(
+                'Calibration Profile',
+                profileAvailable
+                    ? (useProfile ? 'Chart calibrated: $profileInfo' : 'Factory HAL profile')
+                    : 'No chart profile found',
+                Segmented(
+                  options: const ['FACTORY', 'CHART PROFILE'],
+                  selected: (profileAvailable && useProfile) ? 1 : 0,
+                  onSelected: (i) {
+                    if (profileAvailable) setState(() => useProfile = i == 1);
+                    widget.onUseProfileChanged(i == 1);
+                  },
+                ),
               ),
-            ),
-            if (onCaptureCalibration != null)
+            if (kDevTools && onCaptureCalibration != null)
               _settingRow(
                 'Calibration Frame',
                 'Capture raw frame for calibration tool',

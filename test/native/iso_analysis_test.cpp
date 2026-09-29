@@ -54,6 +54,22 @@ int main() {
     for (auto& x : d) x.mean = 0.2;
     check(!analyzeIsoSweep(d, 3200).valid, "rejects a lit frame", 0, 0);
 
+    // Clean exposure solver: 24 fps -> 180 deg = 20.8 ms; base 50, HCG 200, cap 3200.
+    {
+        const double minT = 20e3, maxT = 1e9 / 48;
+        auto e = [&](double target) { return solveCleanExposure(target, minT, maxT, 32, 3200, 50, 200); };
+        auto a1 = e(50 * 5e6);   // bright: base ISO, 1/200
+        check(a1.iso == 50 && std::fabs(a1.exposureNs - 5e6) < 1, "bright scene: base ISO, shutter exposes", (int)a1.iso, 50);
+        auto a2 = e(50 * 30e6);  // needs more than 180 deg at base -> HCG native
+        check(a2.iso == 200 && a2.exposureNs <= maxT, "dim: jumps to HCG native before gaining up", (int)a2.iso, 200);
+        auto a3 = e(800 * maxT); // darker than HCG at 180 deg -> gain up, shutter stays at 180 deg
+        check(std::fabs(a3.iso - 800) < 1 && std::fabs(a3.exposureNs - maxT) < 1, "dark: shutter held at 180, ISO rises", (int)a3.iso, 800);
+        auto a4 = e(40 * minT);  // brighter than base at fastest shutter -> extended low
+        check(a4.iso < 50 && a4.iso >= 32 && a4.exposureNs == minT, "very bright: extended-low ISO as last resort", (int)a4.iso, 40);
+        auto a5 = solveCleanExposure(100 * 30e6, minT, maxT, 32, 3200, 0, 0); // not analysed: lowest ISO first
+        check(a5.exposureNs == maxT && a5.iso > 32, "uncalibrated: lowest ISO, shutter first, then gain", (int)a5.iso, 144);
+    }
+
     std::printf(failures ? "%d ISO ANALYSIS FAILURES\n" : "all ISO analysis tests passed\n", failures);
     return failures ? 1 : 0;
 }

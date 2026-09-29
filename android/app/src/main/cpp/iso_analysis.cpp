@@ -1,5 +1,6 @@
 #include "iso_analysis.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace vesper {
@@ -47,6 +48,34 @@ IsoAnalysis analyzeIsoSweep(const std::vector<IsoSample>& s, int maxAnalogIso) {
     if (a.hcgIso > 0) a.nativeIsos.push_back(a.hcgIso);
     a.valid = true;
     return a;
+}
+
+ExposureChoice solveCleanExposure(double target, double minT, double maxT, int minIso, int isoCap, int baseIso, int hcgIso) {
+    ExposureChoice c;
+    maxT = std::max(maxT, minT);
+    const int base = baseIso > 0 ? std::clamp(baseIso, minIso, isoCap) : minIso;
+    std::vector<int> natives{base};
+    if (hcgIso > base && hcgIso <= isoCap) natives.push_back(hcgIso);
+    for (int iso : natives) {
+        const double t = target / iso;
+        if (t <= maxT) {
+            if (t >= minT || iso != base) {
+                c.iso = iso;
+                c.exposureNs = std::max(t, minT);
+                // At the HCG ISO a shutter faster than the minimum is fine; if the
+                // HCG step overshoots badly (t < minT) the base ISO case above caught it.
+                return c;
+            }
+            // Too bright at base ISO even at the fastest shutter: extended-low ISO.
+            c.exposureNs = minT;
+            c.iso = std::clamp(target / minT, static_cast<double>(minIso), static_cast<double>(base));
+            return c;
+        }
+    }
+    // Too dark at every native ISO with a 180-degree shutter: gain up.
+    c.exposureNs = maxT;
+    c.iso = std::clamp(target / maxT, static_cast<double>(natives.back()), static_cast<double>(isoCap));
+    return c;
 }
 
 } // namespace vesper

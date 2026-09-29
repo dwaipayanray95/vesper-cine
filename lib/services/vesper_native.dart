@@ -48,6 +48,7 @@ class EngineStatus {
   final bool alignThrottled; // NR alignment auto-disabled: GPU over budget
   final bool nrThrottled; // temporal/chroma NR also paused: GPU still over budget
   final bool hqAvailable; // HQ oversampling supported by the GPU and not paused by the budget guard
+  final bool hqSupported; // the GPU can run HQ oversampling at all
   final String calibrationSaved; // base path of the last calibration frame written
   final bool profileActive; // per-device chart calibration in use
   final bool focusPulling; // smooth manual focus pull running
@@ -81,6 +82,7 @@ class EngineStatus {
       alignThrottled = j['alignThrottled'] as bool,
       nrThrottled = j['nrThrottled'] as bool,
       hqAvailable = (j['hqAvailable'] as bool?) ?? false,
+      hqSupported = (j['hqSupported'] as bool?) ?? false,
       calibrationSaved = (j['calibrationSaved'] as String?) ?? '',
       profileActive = (j['profileActive'] as bool?) ?? false,
       focusPulling = (j['focusPulling'] as bool?) ?? false,
@@ -216,6 +218,8 @@ class VesperNative {
   late final void Function(int) _setScopes;
   late final void Function(int) _setSharpening;
   late final void Function(int) _setOversampling;
+  late final void Function(int, int) _setNativeIsos;
+  late final void Function(int) _setBudgetGuard;
   late final int Function(Pointer<Utf8>, Pointer<Utf8>) _isoSweepStart;
   late final void Function() _isoSweepCancel;
   late final int Function(Pointer<Float>, Pointer<Float>) _getScopes;
@@ -301,6 +305,8 @@ class VesperNative {
             'vesper_iso_sweep_start',
           );
       _isoSweepCancel = _lib.lookupFunction<Void Function(), void Function()>('vesper_iso_sweep_cancel');
+      _setNativeIsos = _lib.lookupFunction<Void Function(Int32, Int32), void Function(int, int)>('vesper_set_native_isos');
+      _setBudgetGuard = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_budget_guard');
       _setOversampling = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_oversampling');
       _setSharpening = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_sharpening');
       _setScopes = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_scopes');
@@ -400,12 +406,12 @@ class VesperNative {
 
   /// One-shot exposure assist. keepShutter: move ISO first (keeps motion blur);
   /// otherwise move the shutter first. Returns (exposureNs, iso) or null.
-  (int, int)? autoExpose({bool keepShutter = true}) {
+  (int, int)? autoExpose({bool keepShutter = true, bool clean = false}) {
     if (!_loaded) return null;
     final ns = calloc<Int64>();
     final iso = calloc<Int32>();
     try {
-      return _autoExpose(keepShutter ? 0 : 1, ns, iso) == 0 ? (ns.value, iso.value) : null;
+      return _autoExpose(clean ? 2 : (keepShutter ? 0 : 1), ns, iso) == 0 ? (ns.value, iso.value) : null;
     } finally {
       calloc.free(ns);
       calloc.free(iso);
@@ -515,6 +521,18 @@ class VesperNative {
   }
 
   void cancelIsoSweep() => _loaded ? _isoSweepCancel() : null;
+
+  /// Measured native ISOs for the clean auto-exposure (0 = unknown).
+  void setNativeIsos(int baseIso, int hcgIso) => _loaded ? _setNativeIsos(baseIso, hcgIso) : null;
+
+  /// GPU budget guard: auto-pause alignment / HQ / NR when frames would drop.
+  void setBudgetGuard(bool on) => _loaded ? _setBudgetGuard(on ? 1 : 0) : null;
+
+  /// Locks the current landscape orientation (while recording) or frees both.
+  Future<void> lockRotation(bool locked) async {
+    if (!Platform.isAndroid) return;
+    await _channel.invokeMethod('lockRotation', {'locked': locked});
+  }
 
   /// HQ oversampling: luma from the full-resolution sensor, anti-alias downscaled.
   void setOversampling(bool on) => _loaded ? _setOversampling(on ? 1 : 0) : null;

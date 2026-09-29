@@ -14,6 +14,11 @@ on:
           - release
           - profile
           - debug
+      dev_tools:
+        description: "Include developer tools (chart calibration capture). Default: only in debug/profile builds"
+        type: boolean
+        required: false
+        default: false
       flutter_version:
         description: "Flutter version (blank = latest stable)"
         type: string
@@ -90,9 +95,12 @@ jobs:
       # shrinking, and tree-shaken icon fonts for free.
       - name: Build APK (arm64-v8a, ${{ inputs.build_mode }})
         run: |
+          DEV_FLAG=""
+          if [ "${{ inputs.dev_tools }}" = "true" ]; then DEV_FLAG="--dart-define=VESPER_DEV_TOOLS=true"; fi
           flutter build apk \
             --${{ inputs.build_mode }} \
-            --target-platform android-arm64
+            --target-platform android-arm64 \
+            $DEV_FLAG
 
       # pubspec.yaml's version line (e.g. "version: 0.2.20+22") is the single
       # source of truth for both versionName and versionCode that Flutter

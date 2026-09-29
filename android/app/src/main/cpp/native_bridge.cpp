@@ -196,10 +196,14 @@ void outputSize(const Settings& s, int& w, int& h) {
 }
 
 // Upright output = raw rotated by (sensor orientation - display rotation).
-// The UI is locked to landscape (Surface.ROTATION_90).
+// The UI runs in either landscape (Surface.ROTATION_90 or ROTATION_270); the
+// activity reports changes via nativeSetDisplayRotation. While recording the
+// rotation is frozen so a clip never flips mid-take.
+std::atomic<int> gDisplayRotation{90};
+int gRecordingRotation = -1; // frame thread only: rotation captured at record start
+
 int rotationDegrees() {
-    constexpr int kDisplayRotation = 90;
-    return ((gCamera->sensorInfo().orientation - kDisplayRotation) % 360 + 360) % 360;
+    return ((gCamera->sensorInfo().orientation - gDisplayRotation.load()) % 360 + 360) % 360;
 }
 
 // Never call into the camera while holding gStateMutex: the camera's frame
@@ -283,6 +287,7 @@ void meterCentre(const RawFrame& f) {
 }
 
 std::atomic<bool> gExposureRamping{false}; // auto-exposure glide in progress
+int gNativeBaseIso = 0, gNativeHcgIso = 0; // measured native ISOs (Settings > Native ISO Analysis), gStateMutex
 
 // --- Scopes -----------------------------------------------------------------
 // Luma histogram + waveform of the recorded signal (Apple Log Y', BT.2020
@@ -738,7 +743,11 @@ void onFrame(const RawFrame& f) {
     }
     int outW, outH;
     outputSize(s, outW, outH);
-    int rot = rotationDegrees();
+    // Freeze the rotation for the length of a recording.
+    const bool recNow = gRecorder && gRecorder->isRecording();
+    if (!recNow) gRecordingRotation = -1;
+    else if (gRecordingRotation < 0) gRecordingRotation = rotationDegrees();
+    int rot = recNow ? gRecordingRotation : rotationDegrees();
 
     FrameInput in;
     FrameParams& p = in.params;
@@ -1085,7 +1094,7 @@ EXPORT int32_t vesper_get_capabilities(char* out, int32_t maxLen) {
 
 // One-shot auto-exposure assist from the latest whole-frame raw statistics.
 // Places the scene's log-average at 18% grey *unless* that would clip more
-// than 0.5% of the frame — highlights win. priority 0 = keep the shutter
+// than 0.5% of the frame — highlights win. priority 2 = cleanest (native ISO, shutter to 180 deg, then gain); 0 = keep the shutter
 // (move ISO first, cinema-style), 1 = keep ISO (move the shutter first).
 // Writes the new exposure/ISO; returns 0, or -1 if no statistics yet.
 // Call repeatedly for a converging result on very over/under-exposed scenes.
@@ -1119,12 +1128,25 @@ EXPORT int32_t vesper_auto_expose(int32_t priority, int64_t* outExposureNs, int3
     scale = std::clamp(scale, 1.0 / 64, 64.0);
 
     const double frameNs = 1e9 / gCamera->frameRate();
-    const int32_t isoCap = std::min(info.maxIso, 3200);    // beyond this noise dominates
+    // Never into digital gain: it adds no information to the raw, just clips sooner.
+    const int32_t isoCap = std::min(info.maxIso, info.maxAnalogIso > 0 ? info.maxAnalogIso : 3200);
     double t = static_cast<double>(m.exposureNs), iso = m.iso;
     const double target = t * iso * scale;
     auto clampT = [&](double v) { return std::clamp(v, static_cast<double>(info.minExposureNs), std::min(frameNs, static_cast<double>(info.maxExposureNs))); };
     auto clampIso = [&](double v) { return std::clamp(v, static_cast<double>(info.minIso), static_cast<double>(isoCap)); };
-    if (priority == 0) {
+    if (priority == 2) {
+        // Cleanest image: native ISO first, shutter up to 180 degrees, then gain.
+        int base, hcg;
+        {
+            std::lock_guard<std::mutex> lk(gStateMutex);
+            base = gNativeBaseIso;
+            hcg = gNativeHcgIso;
+        }
+        const double maxT = std::min(frameNs * 0.5, static_cast<double>(info.maxExposureNs));
+        ExposureChoice c = solveCleanExposure(target, static_cast<double>(info.minExposureNs), maxT, info.minIso, isoCap, base, hcg);
+        t = c.exposureNs;
+        iso = c.iso;
+    } else if (priority == 0) {
         iso = clampIso(target / t);
         t = clampT(target / iso);
     } else {
@@ -1192,6 +1214,18 @@ EXPORT void vesper_iso_sweep_cancel() {
     std::lock_guard<std::mutex> lk(gSweep.mutex);
     gSweep.cancel = true;
     gSweep.cv.notify_all();
+}
+
+// Measured native ISOs for the clean auto-exposure (0 = unknown).
+EXPORT void vesper_set_native_isos(int32_t baseIso, int32_t hcgIso) {
+    std::lock_guard<std::mutex> lk(gStateMutex);
+    gNativeBaseIso = std::max(0, baseIso);
+    gNativeHcgIso = std::max(0, hcgIso);
+}
+
+// false: never auto-pause alignment / HQ / NR when the GPU is over budget.
+EXPORT void vesper_set_budget_guard(int32_t enable) {
+    if (gGpu) gGpu->setBudgetGuard(enable != 0);
 }
 
 // HQ oversampling: luma rebuilt from the full-resolution sensor and
@@ -1534,7 +1568,7 @@ EXPORT int32_t vesper_get_status(char* out, int32_t maxLen) {
                   "\"kelvin\":%.0f,\"tint\":%.1f,\"recording\":%s,\"durationMs\":%lld,\"framesEncoded\":%lld,"
                   "\"framesDropped\":%lld,\"thermal\":%d,\"audio\":%s,\"codec\":\"%s\",\"stopReason\":\"%s\","
                   "\"exposureNs\":%lld,\"iso\":%d,\"awbAuto\":%s,\"afState\":%d,\"focusDiopters\":%.3f,"
-                  "\"face\":[%.4f,%.4f,%.4f,%.4f],\"gpuMs\":%.2f,\"alignThrottled\":%s,\"nrThrottled\":%s,\"hqAvailable\":%s,\"calibrationSaved\":\"%s\",\"profileActive\":%s,"
+                  "\"face\":[%.4f,%.4f,%.4f,%.4f],\"gpuMs\":%.2f,\"alignThrottled\":%s,\"nrThrottled\":%s,\"hqAvailable\":%s,\"hqSupported\":%s,\"calibrationSaved\":\"%s\",\"profileActive\":%s,"
                   "\"focusPulling\":%s,\"exposureRamping\":%s,\"isoSweep\":%.3f,\"isoSweepResult\":\"%s\",\"isoSweepError\":\"%s\",\"focusLocked\":%s}",
                   gCamera && gCamera->isStreaming() ? "true" : "false", fps, rw, rh, ow, oh, drops, kelvin, tint,
                   r.recording ? "true" : "false", static_cast<long long>(r.durationUs / 1000),
@@ -1542,7 +1576,7 @@ EXPORT int32_t vesper_get_status(char* out, int32_t maxLen) {
                   r.audio ? "true" : "false", jsonEscape(r.codecName).c_str(), jsonEscape(r.stopReason).c_str(), expNs, iso,
                   awbAuto ? "true" : "false", afState, focusD, face[0], face[1], face[2], face[3],
                   gGpu ? gGpu->gpuFrameMs() : 0.0, gGpu && gGpu->alignmentThrottled() ? "true" : "false",
-                  gGpu && gGpu->noiseReductionThrottled() ? "true" : "false", gGpu && gGpu->oversamplingAvailable() ? "true" : "false", jsonEscape(calSaved).c_str(),
+                  gGpu && gGpu->noiseReductionThrottled() ? "true" : "false", gGpu && gGpu->oversamplingAvailable() ? "true" : "false", gGpu && gGpu->oversamplingSupported() ? "true" : "false", jsonEscape(calSaved).c_str(),
                   profileActive ? "true" : "false", focusSearching ? "true" : "false", gExposureRamping ? "true" : "false", static_cast<double>(gSweepProgress.load()), jsonEscape(sweepResult).c_str(), jsonEscape(sweepError).c_str(), focusLocked ? "true" : "false");
     return writeString(buf, out, maxLen);
 }
@@ -1559,6 +1593,11 @@ EXPORT void vesper_close() {
     if (gRecorder) gRecorder->stop("user");
     if (gCamera) gCamera->closeCamera();
     if (gGpu) gGpu->release();
+}
+
+// Display rotation in degrees (90 or 270: the two landscape orientations).
+JNIEXPORT void JNICALL Java_com_vesper_cine_MainActivity_nativeSetDisplayRotation(JNIEnv*, jobject, jint degrees) {
+    if (degrees == 90 || degrees == 270) gDisplayRotation = degrees;
 }
 
 JNIEXPORT jint JNICALL Java_com_vesper_cine_MainActivity_nativeSetViewfinderSurface(JNIEnv* env, jobject, jobject surface) {

@@ -144,6 +144,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   int _aeGen = 0; // bumps per AE request so an older run stops refining
   ScopeMode _scopeMode = ScopeMode.off;
   Scopes? _scopes;
+  bool _gpuGuard = true; // auto-pause optional passes when frames would drop
   bool _oversampling = true; // HQ: full-sensor luma, anti-alias downscaled
   int _sharpening = 1; // detail enhancement 0 off, 1 low, 2 medium, 3 high
   bool _magnify = false; // focus magnifier: viewfinder punched in around the focus point
@@ -183,7 +184,8 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     super.initState();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     // The native pipeline assumes Surface.ROTATION_90 (see native_bridge.cpp rotationDegrees()).
-    SystemChrome.setPreferredOrientations([DeviceOrientation.landscapeLeft]);
+    // Both landscapes; the native side follows the display rotation (MainActivity).
+    SystemChrome.setPreferredOrientations([DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight]);
     WidgetsBinding.instance.addObserver(this);
     _pulse = AnimationController(vsync: this, duration: const Duration(milliseconds: 1000))..repeat(reverse: true);
     _start();
@@ -255,6 +257,8 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     _engine.setNrAlignment(_nrAlignment);
     _engine.setSharpening(_sharpening);
     _engine.setOversampling(_oversampling);
+    _engine.setBudgetGuard(_gpuGuard);
+    _engine.setNativeIsos(_isoAnalysis?.baseIso ?? 0, _isoAnalysis?.hcgIso ?? 0);
     _engine.useColorProfile(_useProfile);
     _engine.setScopes(_scopeMode != ScopeMode.off);
     _engine.setFrameRate(_fps);
@@ -342,7 +346,10 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     }
     _loadIsoAnalysis();
     final a = _isoAnalysis;
-    if (a != null) _toast(a.summary);
+    if (a != null) {
+      _engine.setNativeIsos(a.baseIso, a.hcgIso);
+      _toast(a.summary);
+    }
   }
 
   // Sub-label for the ISO dial: native (star), extended low (L), digital gain (D).
@@ -383,6 +390,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     'nrAlignment': _nrAlignment,
     'sharpening': _sharpening,
     'oversampling': _oversampling,
+    'gpuGuard': _gpuGuard,
     'codec': _codec,
     'tapLocks': _tapLocks,
     'tapSetsExposure': _tapSetsExposure,
@@ -425,6 +433,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       _nrAlignment = get('nrAlignment', _nrAlignment);
       _sharpening = get('sharpening', _sharpening).clamp(0, 3);
       _oversampling = get('oversampling', _oversampling);
+      _gpuGuard = get('gpuGuard', _gpuGuard);
       _codec = get('codec', _codec).clamp(0, 1);
       _tapLocks = get('tapLocks', _tapLocks);
       _tapSetsExposure = get('tapSetsExposure', _tapSetsExposure);
@@ -549,6 +558,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       return;
     }
     setState(() => _recordingFile = file);
+    _engine.lockRotation(true); // a clip never flips orientation mid-take
   }
 
   Future<void> _finishRecording(String reason) async {
@@ -560,6 +570,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       _recordingFile = null;
       _stopping = false;
     });
+    _engine.lockRotation(false);
     switch (reason) {
       case 'thermal':
         _toast('Recording stopped: phone is too hot. Saved ${file?.name}');
@@ -668,6 +679,11 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
             setState(() => _nrAlignment = val);
             _engine.setNrAlignment(val);
           },
+          gpuGuard: _gpuGuard,
+          onGpuGuardChanged: (val) {
+            setState(() => _gpuGuard = val);
+            _engine.setBudgetGuard(val);
+          },
           oversampling: _oversampling,
           onOversamplingChanged: (val) {
             setState(() => _oversampling = val);
@@ -714,6 +730,21 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
         ),
       ),
     );
+  }
+
+  // Bottom-bar status line. Paused stages say why: the GPU guard paused them
+  // (they resume automatically) or the GPU can't run them at all.
+  String _telemetry(EngineStatus s) {
+    final parts = <String>['${s.fps.toStringAsFixed(_recording ? 0 : 1)} FPS'];
+    if (s.gpuMs > 0) parts.add('GPU ${s.gpuMs.toStringAsFixed(1)}ms');
+    if (_oversampling) {
+      parts.add(!s.hqSupported ? 'HQ N/A' : (s.hqAvailable ? 'HQ' : 'HQ PAUSED'));
+    }
+    if (_temporalNr > 0 && _nrAlignment && s.alignThrottled) parts.add('ALIGN PAUSED');
+    if ((_temporalNr > 0 || _chromaNr > 0) && s.nrThrottled) parts.add('NR PAUSED');
+    final drops = s.cameraDrops + s.framesDropped;
+    if (drops > 0) parts.add('$drops DROP');
+    return parts.join(' · ');
   }
 
   // Focus magnifier geometry: the viewfinder is scaled by _magScale about
@@ -773,7 +804,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     for (var pass = 0; pass < 3; pass++) {
       (int, int)? next;
       for (var i = 0; i < 10 && next == null; i++) {
-        next = _engine.autoExpose(keepShutter: keepShutter);
+        next = _engine.autoExpose(keepShutter: keepShutter, clean: true);
         if (next == null) await Future<void>.delayed(const Duration(milliseconds: 100));
       }
       if (gen != _aeGen) return; // superseded by a newer tap
@@ -1104,32 +1135,6 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                           const SizedBox(width: 6),
                         ],
 
-                        // Live engine telemetry
-                        if (s != null)
-                          Flexible(
-                            child: Text(
-                              _recording
-                                  ? '${s.fps.toStringAsFixed(0)} FPS'
-                                  : '${s.fps.toStringAsFixed(1)} FPS'
-                                        '${s.gpuMs > 0 ? ' · GPU ${s.gpuMs.toStringAsFixed(1)}ms' : ''}'
-                                        '${_oversampling && !s.hqAvailable ? ' · HQ OFF' : ''}'
-                                        '${s.nrThrottled
-                                            ? ' · NR PAUSED'
-                                            : s.alignThrottled
-                                            ? ' · ALIGN OFF'
-                                            : ''}'
-                                        '${s.cameraDrops + s.framesDropped > 0 ? ' · ${s.cameraDrops + s.framesDropped} DROP' : ''}',
-                              style: TextStyle(
-                                color: s.cameraDrops + s.framesDropped > 0 ? Colors.orangeAccent : Colors.white54,
-                                fontSize: 10,
-                                fontFamily: 'monospace',
-                              ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                        const SizedBox(width: 8),
-
                         // Recording status & timecode
                         if (_recording) ...[
                           FadeTransition(
@@ -1378,7 +1383,22 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                               fontWeight: FontWeight.bold,
                             ),
                           ),
-                        const Spacer(),
+                        // Live engine telemetry (moved here from the top bar so it's never cut off).
+                        Expanded(
+                          child: s == null
+                              ? const SizedBox()
+                              : Text(
+                                  _telemetry(s),
+                                  textAlign: TextAlign.center,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    color: s.cameraDrops + s.framesDropped > 0 ? Colors.orangeAccent : Colors.white60,
+                                    fontSize: 10,
+                                    fontFamily: 'monospace',
+                                  ),
+                                ),
+                        ),
                         if (s != null)
                           Text(
                             'AUDIO ${s.audio ? 'OK' : 'OFF'}',

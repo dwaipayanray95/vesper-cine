@@ -2,7 +2,9 @@ package com.vesper.cine
 
 import android.Manifest
 import android.content.ContentValues
+import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
+import android.hardware.display.DisplayManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -27,6 +29,35 @@ class MainActivity : FlutterActivity() {
     }
 
     private external fun nativeSetViewfinderSurface(surface: Surface?): Int
+    private external fun nativeSetDisplayRotation(degrees: Int)
+
+    // The UI runs in both landscape orientations; the native pipeline needs to
+    // know which one so the picture stays upright. A 180-degree flip between
+    // the two landscapes is not a configuration change, so listen to the display.
+    private val displayListener = object : DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) {}
+        override fun onDisplayRemoved(displayId: Int) {}
+        override fun onDisplayChanged(displayId: Int) = reportRotation()
+    }
+
+    private fun reportRotation() {
+        val degrees = when (display?.rotation) {
+            Surface.ROTATION_270 -> 270
+            else -> 90
+        }
+        nativeSetDisplayRotation(degrees)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        (getSystemService(DISPLAY_SERVICE) as DisplayManager).registerDisplayListener(displayListener, null)
+        reportRotation()
+    }
+
+    override fun onPause() {
+        (getSystemService(DISPLAY_SERVICE) as DisplayManager).unregisterDisplayListener(displayListener)
+        super.onPause()
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -95,6 +126,12 @@ class MainActivity : FlutterActivity() {
                     } catch (e: Exception) {
                         result.error("file", e.message, null)
                     }
+                }
+                "lockRotation" -> {
+                    // Freeze the current landscape while recording; free (both landscapes) otherwise.
+                    requestedOrientation = if (call.argument<Boolean>("locked") == true)
+                        ActivityInfo.SCREEN_ORIENTATION_LOCKED else ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                    result.success(true)
                 }
                 "deviceInfo" -> {
                     val dir = java.io.File(getExternalFilesDir(null), "calibration").apply { mkdirs() }
