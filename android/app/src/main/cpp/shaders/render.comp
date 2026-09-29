@@ -89,6 +89,42 @@ vec4 sampleCamera(vec2 rawPos) {
     return vec4(r, g.g, b, g.a);
 }
 
+// Focus peaking on the demosaiced green quads (texelFetch on the quad grid, so
+// no phase-dependent bilinear smoothing -> no moire pattern). A pixel peaks
+// only where the image is *sharp*, not merely high-contrast:
+//  * fine-scale (Sobel, 1 quad) slope clearly steeper than the coarse slope
+//    over +-3 quads (a blurred edge has the same slope at both scales);
+//  * slope well above sensor noise at that level (noise profile S/O), so
+//    noise in dark or defocused areas never lights up;
+//  * a minimum local contrast relative to the mean (sensitivity P.exposure.z).
+float greenQuad(ivec2 q) {
+    return texelFetch(quadTex, clamp(q, ivec2(0), ivec2(P.quadInfo.xy) - 1), 0).g;
+}
+
+vec3 peakingOverlay(vec2 rawPos, vec3 display) {
+    ivec2 q = ivec2(floor((rawPos - vec2(1.0)) * 0.5 + 0.5));
+    float g[9];
+    float mean = 0.0;
+    for (int j = -1; j <= 1; ++j)
+        for (int i = -1; i <= 1; ++i) {
+            float v = greenQuad(q + ivec2(i, j));
+            g[(j + 1) * 3 + i + 1] = v;
+            mean += v;
+        }
+    mean /= 9.0;
+    float gx = ((g[2] + 2.0 * g[5] + g[8]) - (g[0] + 2.0 * g[3] + g[6])) / 8.0; // slope per quad
+    float gy = ((g[6] + 2.0 * g[7] + g[8]) - (g[0] + 2.0 * g[1] + g[2])) / 8.0;
+    float fine = length(vec2(gx, gy));
+    float cx = (greenQuad(q + ivec2(3, 0)) - greenQuad(q - ivec2(3, 0))) / 6.0;
+    float cy = (greenQuad(q + ivec2(0, 3)) - greenQuad(q - ivec2(0, 3))) / 6.0;
+    float coarse = length(vec2(cx, cy));
+    float sigma = sqrt(max(P.noise.z * mean + P.noise.w, 1e-9)); // single-sample sensor noise
+    bool aboveNoise = fine > 2.0 * sigma;
+    bool contrast = fine > P.exposure.z * 0.5 * max(mean, 1e-4); // 0.06 -> 3% per quad
+    bool sharp = fine - 0.7 * sigma > 1.5 * coarse;
+    return aboveNoise && contrast && sharp ? vec3(0.1, 1.0, 0.3) : display;
+}
+
 uint pack16(float lo, float hi) {
     return (uint(lo) << 6) | (uint(hi) << 22);
 }
@@ -123,12 +159,7 @@ void main() {
             float lum = dot(lin, vec3(0.2627, 0.6780, 0.0593));
             vf = falseColor(log2(max(lum, 1e-6) / 0.18), clipped, display);
         } else if (mode == 3) {
-            // Peaking: log-domain green gradient over one output pixel.
-            vec2 step = P.cropRect.zw / vec2(P.outInfo.xy);
-            float c0 = appleLog(P.exposure.x * texture(quadTex, quadUv(rawPos, vec2(1.0))).g);
-            float gx = appleLog(P.exposure.x * texture(quadTex, quadUv(rawPos + vec2(step.x, 0.0), vec2(1.0))).g) - c0;
-            float gy = appleLog(P.exposure.x * texture(quadTex, quadUv(rawPos + vec2(0.0, step.y), vec2(1.0))).g) - c0;
-            vf = abs(gx) + abs(gy) > P.exposure.z ? vec3(0.1, 1.0, 0.3) : display;
+            vf = peakingOverlay(rawPos, display);
         } else if (mode == 4) {
             bool hot = clipped || max(lin.r, max(lin.g, lin.b)) >= P.exposure.y * P.exposure.x;
             bool stripe = ((o.x + o.y) / 6) % 2 == 0;
