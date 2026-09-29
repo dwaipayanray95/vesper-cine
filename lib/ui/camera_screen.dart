@@ -144,6 +144,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   int _aeGen = 0; // bumps per AE request so an older run stops refining
   ScopeMode _scopeMode = ScopeMode.off;
   Scopes? _scopes;
+  bool _oversampling = true; // HQ: full-sensor luma, anti-alias downscaled
   int _sharpening = 1; // detail enhancement 0 off, 1 low, 2 medium, 3 high
   bool _magnify = false; // focus magnifier: viewfinder punched in around the focus point
   Offset _magCenter = const Offset(0.5, 0.5);
@@ -253,6 +254,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     _engine.setChromaNr(_chromaNr);
     _engine.setNrAlignment(_nrAlignment);
     _engine.setSharpening(_sharpening);
+    _engine.setOversampling(_oversampling);
     _engine.useColorProfile(_useProfile);
     _engine.setScopes(_scopeMode != ScopeMode.off);
     _engine.setFrameRate(_fps);
@@ -380,6 +382,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     'chromaNr': _chromaNr,
     'nrAlignment': _nrAlignment,
     'sharpening': _sharpening,
+    'oversampling': _oversampling,
     'codec': _codec,
     'tapLocks': _tapLocks,
     'tapSetsExposure': _tapSetsExposure,
@@ -421,6 +424,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       _chromaNr = get('chromaNr', _chromaNr);
       _nrAlignment = get('nrAlignment', _nrAlignment);
       _sharpening = get('sharpening', _sharpening).clamp(0, 3);
+      _oversampling = get('oversampling', _oversampling);
       _codec = get('codec', _codec).clamp(0, 1);
       _tapLocks = get('tapLocks', _tapLocks);
       _tapSetsExposure = get('tapSetsExposure', _tapSetsExposure);
@@ -663,6 +667,11 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
           onNrAlignmentChanged: (val) {
             setState(() => _nrAlignment = val);
             _engine.setNrAlignment(val);
+          },
+          oversampling: _oversampling,
+          onOversamplingChanged: (val) {
+            setState(() => _oversampling = val);
+            _engine.setOversampling(val);
           },
           sharpening: _sharpening,
           onSharpeningChanged: (val) {
@@ -1103,6 +1112,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                                   ? '${s.fps.toStringAsFixed(0)} FPS'
                                   : '${s.fps.toStringAsFixed(1)} FPS'
                                         '${s.gpuMs > 0 ? ' · GPU ${s.gpuMs.toStringAsFixed(1)}ms' : ''}'
+                                        '${_oversampling && !s.hqAvailable ? ' · HQ OFF' : ''}'
                                         '${s.nrThrottled
                                             ? ' · NR PAUSED'
                                             : s.alignThrottled

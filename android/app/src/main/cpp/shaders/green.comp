@@ -1,0 +1,91 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// HQ (oversampled) path, pass 1b: full-resolution green (luma detail).
+//
+// The quad image keeps one green per 2x2 site (the mean of Gr and Gb), which
+// throws away about half of the sensor's luma resolution. Here green is
+// reconstructed at *every* raw pixel with edge-directed (Hamilton-Adams)
+// interpolation: at an R or B site, green is interpolated along whichever
+// direction (horizontal or vertical) has the smaller gradient, plus a
+// Laplacian correction from the site's own colour so fine luma detail
+// captured by R/B pixels isn't lost. The render pass area-samples this image
+// per output pixel (true oversampling: ~2x2 sensor pixels per 1080p pixel).
+//
+// Same black level, lens shading and white balance as unpack.comp, so the
+// values match the quad image (green WB gain is 1).
+layout(local_size_x = 16, local_size_y = 8) in;
+
+#include "frame_params.glsl"
+
+layout(std430, set = 0, binding = 1) readonly buffer RawBuffer { uint words[]; } raw;
+layout(std430, set = 0, binding = 2) readonly buffer Shading { float gains[]; } shading; // [row][col][R, Geven, Godd, B]
+layout(set = 0, binding = 3, r16f) uniform writeonly image2D greenImage;
+
+uint rawByte(uint offset) {
+    return (raw.words[offset >> 2] >> ((offset & 3u) * 8u)) & 0xFFu;
+}
+
+int cfaSite(int px, int py) {
+    int bit = (py << 1) | px;
+    int p = P.rawInfo.w;
+    if (p == 0) return bit;
+    if (p == 1) return bit ^ 1;
+    if (p == 2) return bit ^ 2;
+    return 3 - bit;
+}
+
+vec4 shadingAt(vec2 rawPos) {
+    int cols = P.quadInfo.z, rows = P.quadInfo.w;
+    if (cols < 2 || rows < 2) return vec4(1.0);
+    vec2 g = clamp(rawToArray(rawPos) / P.arrayInfo.xy * vec2(cols - 1, rows - 1), vec2(0.0), vec2(cols - 1, rows - 1));
+    ivec2 i0 = min(ivec2(g), ivec2(cols - 2, rows - 2));
+    vec2 f = g - vec2(i0);
+    vec4 s[4];
+    for (int k = 0; k < 4; ++k) {
+        int idx = ((i0.y + (k >> 1)) * cols + (i0.x + (k & 1))) * 4;
+        s[k] = vec4(shading.gains[idx], shading.gains[idx + 1], shading.gains[idx + 2], shading.gains[idx + 3]);
+    }
+    return mix(mix(s[0], s[1], f.x), mix(s[2], s[3], f.x), f.y);
+}
+
+vec4 gShade; // shading gains near this pixel (varies slowly: one lookup per invocation)
+
+// Black-level-subtracted, shaded, white-balanced value of raw pixel (x, y).
+float px(int x, int y) {
+    x = clamp(x, 0, P.rawInfo.x - 1);
+    y = clamp(y, 0, P.rawInfo.y - 1);
+    uint base = uint(y * P.rawInfo.z + (x >> 2) * 5);
+    int i = x & 3;
+    float dn = float((rawByte(base + uint(i)) << 2) | ((rawByte(base + 4u) >> (2 * i)) & 3u));
+    int site = cfaSite(x & 1, y & 1);
+    float bl = P.blackLevel[site];
+    float v = (dn - bl) / (P.wbGains.w - bl);
+    if (site == 0) return v * gShade.x * P.wbGains.r;
+    if (site == 3) return v * gShade.w * P.wbGains.b;
+    return v * ((y & 1) == 0 ? gShade.y : gShade.z) * P.wbGains.g;
+}
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= P.rawInfo.x || p.y >= P.rawInfo.y) return;
+    gShade = shadingAt(vec2(p) + 0.5);
+    int site = cfaSite(p.x & 1, p.y & 1);
+    float g;
+    if (site == 1 || site == 2) {
+        g = px(p.x, p.y);
+    } else {
+        float c = px(p.x, p.y);
+        float gl = px(p.x - 1, p.y), gr = px(p.x + 1, p.y), gu = px(p.x, p.y - 1), gd = px(p.x, p.y + 1);
+        float lapH = 2.0 * c - px(p.x - 2, p.y) - px(p.x + 2, p.y);
+        float lapV = 2.0 * c - px(p.x, p.y - 2) - px(p.x, p.y + 2);
+        float dH = abs(gl - gr) + abs(lapH);
+        float dV = abs(gu - gd) + abs(lapV);
+        float gH = 0.5 * (gl + gr) + 0.25 * lapH;
+        float gV = 0.5 * (gu + gd) + 0.25 * lapV;
+        g = dH < dV ? gH : (dV < dH ? gV : 0.5 * (gH + gV));
+        // Never overshoot the surrounding greens (keeps edges free of halos).
+        float lo = min(min(gl, gr), min(gu, gd)), hi = max(max(gl, gr), max(gu, gd));
+        g = clamp(g, lo, hi);
+    }
+    imageStore(greenImage, p, vec4(g, 0.0, 0.0, 0.0));
+}

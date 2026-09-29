@@ -80,6 +80,8 @@ public:
     bool alignmentThrottled() const { return alignThrottled_; }
     // Second stage: temporal + chroma NR paused too because alignment alone wasn't enough.
     bool noiseReductionThrottled() const { return nrThrottled_; }
+    // HQ oversampled luma: unsupported on this GPU, or paused by the budget guard.
+    bool oversamplingAvailable() const { return hqSupported_ && !hqThrottled_; }
 
     // Blocks until the slot's GPU work is done, then returns its P010 bytes
     // (Y plane of outW*outH uint16, then interleaved CbCr of outW*outH/2 uint16).
@@ -108,6 +110,7 @@ private:
         VkDescriptorSet cleanSet = VK_NULL_HANDLE;
         VkDescriptorSet alignSet = VK_NULL_HANDLE;
         VkDescriptorSet renderSet = VK_NULL_HANDLE;
+        VkDescriptorSet greenSet = VK_NULL_HANDLE;
         bool vfReadbackPending = false;
         bool encoderHold = false; // guarded by encoderMutex_
         bool timed = false;       // timestamp queries were written for this slot's last frame
@@ -148,7 +151,9 @@ private:
     VkCommandPool cmdPool_ = VK_NULL_HANDLE;
     VkDescriptorPool descPool_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout unpackLayout_ = VK_NULL_HANDLE, cleanLayout_ = VK_NULL_HANDLE, renderLayout_ = VK_NULL_HANDLE;
-    VkDescriptorSetLayout alignLayout_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout alignLayout_ = VK_NULL_HANDLE, greenLayout_ = VK_NULL_HANDLE;
+    VkPipelineLayout greenPipeLayout_ = VK_NULL_HANDLE;
+    VkPipeline greenPipe_ = VK_NULL_HANDLE;
     VkPipelineLayout alignPipeLayout_ = VK_NULL_HANDLE;
     VkPipeline alignPipe_ = VK_NULL_HANDLE;
     VkPipelineLayout unpackPipeLayout_ = VK_NULL_HANDLE, cleanPipeLayout_ = VK_NULL_HANDLE, renderPipeLayout_ = VK_NULL_HANDLE;
@@ -158,6 +163,9 @@ private:
     Slot slots_[kRingSize];
     Image quadImage_, cleanImage_, historyImage_, vfImage_;
     Image curLowImage_, histLowImage_, motionImage_; // tile alignment (align.comp)
+    Image greenImage_;                              // full-res green (green.comp), HQ oversampling
+    bool hqSupported_ = false;                      // R16_SFLOAT storage + linear sampling available
+    bool hqThrottled_ = false;
     bool historyValid_ = false;
 
     // GPU timing: kStamps timestamps per slot (start, unpack, align, clean, end).

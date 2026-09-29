@@ -14,6 +14,8 @@ layout(local_size_x = 8, local_size_y = 8) in;
 layout(set = 0, binding = 1) uniform sampler2D quadTex;
 layout(set = 0, binding = 2, rgba8) uniform writeonly image2D viewfinder;
 layout(std430, set = 0, binding = 3) writeonly buffer P010 { uint words[]; } p010;
+layout(set = 0, binding = 4) uniform sampler2D greenTex;   // full-res green (green.comp), HQ path only
+layout(set = 0, binding = 5) uniform sampler2D quadRawTex; // quad image before noise reduction
 
 // Apple Log (Apple Log Profile White Paper, 2023). C1-continuous at Rt.
 float appleLog(float x) {
@@ -85,8 +87,7 @@ vec2 quadUv(vec2 rawPos, vec2 offset) {
 // Catmull-Rom (bicubic) resample of the quad image in 5 bilinear taps
 // (Jimenez's optimisation; the 4 corner taps carry negligible weight). Much
 // crisper than plain bilinear, which softened the image by ~half a pixel.
-vec4 sampleCatmullRom(vec2 uv) {
-    vec2 size = vec2(P.quadInfo.xy);
+vec4 catmullRom(sampler2D tex, vec2 uv, vec2 size) {
     vec2 pos = uv * size;
     vec2 t1 = floor(pos - 0.5) + 0.5;
     vec2 f = pos - t1;
@@ -96,12 +97,50 @@ vec4 sampleCatmullRom(vec2 uv) {
     vec2 w3 = f * f * (-0.5 + 0.5 * f);
     vec2 w12 = w1 + w2;
     vec2 t0 = (t1 - 1.0) / size, t3 = (t1 + 2.0) / size, t12 = (t1 + w2 / w12) / size;
-    vec4 c = texture(quadTex, vec2(t12.x, t0.y)) * (w12.x * w0.y)
-           + texture(quadTex, vec2(t0.x, t12.y)) * (w0.x * w12.y)
-           + texture(quadTex, t12) * (w12.x * w12.y)
-           + texture(quadTex, vec2(t3.x, t12.y)) * (w3.x * w12.y)
-           + texture(quadTex, vec2(t12.x, t3.y)) * (w12.x * w3.y);
+    vec4 c = texture(tex, vec2(t12.x, t0.y)) * (w12.x * w0.y)
+           + texture(tex, vec2(t0.x, t12.y)) * (w0.x * w12.y)
+           + texture(tex, t12) * (w12.x * w12.y)
+           + texture(tex, vec2(t3.x, t12.y)) * (w3.x * w12.y)
+           + texture(tex, vec2(t12.x, t3.y)) * (w12.x * w3.y);
     return c / (w12.x * w0.y + w0.x * w12.y + w12.x * w12.y + w3.x * w12.y + w12.x * w3.y);
+}
+
+vec4 sampleCatmullRom(vec2 uv) { return catmullRom(quadTex, uv, vec2(P.quadInfo.xy)); }
+
+// HQ (oversampled) luma: area-sample the full-resolution green over this
+// output pixel's footprint (~2x2 sensor pixels at 1080p), then add only the
+// detail the quad path missed on top of the noise-reduced quad green:
+//   G = G_clean + (G_fullres - G_quad_before_NR)
+// With NR off the two quad terms cancel and G is exactly the full-res value.
+// With NR on, the extra detail is cored against the sensor noise so NR isn't
+// undone. Applied as a ratio so colour (from the quads) is unchanged.
+vec3 oversampleLuma(vec3 cam, vec2 rawPos, float clipFlag) {
+    if ((P.flags.w & 16) == 0 || clipFlag > 0.5) return cam;
+    ivec2 od = P.outInfo.xy;
+    vec2 ud = (P.outInfo.z == 90 || P.outInfo.z == 270) ? vec2(od.yx) : vec2(od);
+    vec2 foot = P.cropRect.zw / ud;                 // raw px per output px
+    vec2 size = vec2(P.rawInfo.xy);
+    // Anti-aliased downscale filter over the footprint: separable 5x5
+    // bilinear taps 0.7 footprint apart, weights (−0.08, 0.17, 0.82, 0.17,
+    // −0.08) per axis — a short Lanczos-like kernel optimised (with the
+    // bilinear taps' own response) to pass as much of the detail 1080p can
+    // hold as possible while suppressing finer detail that would alias into
+    // moire. The small negative lobe is limited to Lanczos-2 levels (no halos).
+    const float kw[5] = float[5](-0.08, 0.17, 0.82, 0.17, -0.08);
+    vec2 o = foot * 0.7;
+    float gFull = 0.0;
+    for (int j = 0; j < 5; ++j)
+        for (int i = 0; i < 5; ++i)
+            gFull += kw[i] * kw[j] * texture(greenTex, (rawPos + vec2(i - 2, j - 2) * o) / size).r;
+    vec2 guv = quadUv(rawPos, vec2(1.0));
+    float gQuad = catmullRom(quadRawTex, guv, vec2(P.quadInfo.xy)).g;
+    float detail = gFull - gQuad;
+    if (P.noise.x > 0.0 || P.noise.y > 0.0) {
+        float sigma = sqrt(max(P.noise.z * max(gQuad, 0.0) + P.noise.w, 1e-9)) * 0.5;
+        detail = sign(detail) * max(abs(detail) - sigma, 0.0);
+    }
+    float g = max(cam.g + detail, 0.0);
+    return cam * clamp(g / max(cam.g, 1e-5), 0.25, 4.0);
 }
 
 vec4 sampleCamera(vec2 rawPos) {
@@ -119,7 +158,7 @@ vec4 sampleCamera(vec2 rawPos) {
 // don't shift. Detail below ~2 sigma of the sensor noise at that level is
 // cored out, so it sharpens edges and texture, not noise.
 vec3 sharpen(vec3 cam, vec2 rawPos) {
-    int level = P.flags.w;
+    int level = P.flags.w & 15;
     if (level <= 0) return cam;
     ivec2 qmax = ivec2(P.quadInfo.xy) - 1;
     ivec2 q = ivec2(floor((rawPos - vec2(1.0)) * 0.5 + 0.5));
@@ -190,6 +229,7 @@ void main() {
         ivec2 o = block * 2 + ivec2(k & 1, k >> 1);
         vec2 rawPos = distort(rawPosFor(o));
         vec4 cam = sampleCamera(rawPos);
+        cam.rgb = oversampleLuma(cam.rgb, rawPos, cam.a);
         cam.rgb = sharpen(cam.rgb, rawPos);
         vec3 lin = toRec2020(cam.rgb);
         vec3 logv = vec3(appleLog(lin.r), appleLog(lin.g), appleLog(lin.b));

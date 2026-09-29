@@ -47,6 +47,7 @@ class EngineStatus {
   final double gpuMs; // measured GPU time per frame
   final bool alignThrottled; // NR alignment auto-disabled: GPU over budget
   final bool nrThrottled; // temporal/chroma NR also paused: GPU still over budget
+  final bool hqAvailable; // HQ oversampling supported by the GPU and not paused by the budget guard
   final String calibrationSaved; // base path of the last calibration frame written
   final bool profileActive; // per-device chart calibration in use
   final bool focusPulling; // smooth manual focus pull running
@@ -79,6 +80,7 @@ class EngineStatus {
       gpuMs = (j['gpuMs'] as num).toDouble(),
       alignThrottled = j['alignThrottled'] as bool,
       nrThrottled = j['nrThrottled'] as bool,
+      hqAvailable = (j['hqAvailable'] as bool?) ?? false,
       calibrationSaved = (j['calibrationSaved'] as String?) ?? '',
       profileActive = (j['profileActive'] as bool?) ?? false,
       focusPulling = (j['focusPulling'] as bool?) ?? false,
@@ -213,6 +215,7 @@ class VesperNative {
   late final void Function(double, double) _pickWb;
   late final void Function(int) _setScopes;
   late final void Function(int) _setSharpening;
+  late final void Function(int) _setOversampling;
   late final int Function(Pointer<Utf8>, Pointer<Utf8>) _isoSweepStart;
   late final void Function() _isoSweepCancel;
   late final int Function(Pointer<Float>, Pointer<Float>) _getScopes;
@@ -298,6 +301,7 @@ class VesperNative {
             'vesper_iso_sweep_start',
           );
       _isoSweepCancel = _lib.lookupFunction<Void Function(), void Function()>('vesper_iso_sweep_cancel');
+      _setOversampling = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_oversampling');
       _setSharpening = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_sharpening');
       _setScopes = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_scopes');
       _getScopes = _lib
@@ -511,6 +515,9 @@ class VesperNative {
   }
 
   void cancelIsoSweep() => _loaded ? _isoSweepCancel() : null;
+
+  /// HQ oversampling: luma from the full-resolution sensor, anti-alias downscaled.
+  void setOversampling(bool on) => _loaded ? _setOversampling(on ? 1 : 0) : null;
 
   /// Detail enhancement: 0 off, 1 low, 2 medium, 3 high (recording and viewfinder).
   void setSharpening(int level) => _loaded ? _setSharpening(level) : null;

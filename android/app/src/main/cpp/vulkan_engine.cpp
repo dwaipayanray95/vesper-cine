@@ -3,6 +3,7 @@
 #include "shaders/render_spv.h"
 #include "shaders/clean_spv.h"
 #include "shaders/align_spv.h"
+#include "shaders/green_spv.h"
 
 #include <algorithm>
 #include <chrono>
@@ -189,16 +190,27 @@ bool VulkanEngine::createPipelines() {
                     VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE},
                    alignLayout_)) return false;
     if (!layoutFor({VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                    VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER}, renderLayout_)) return false;
+                    VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER}, renderLayout_)) return false;
+    if (!layoutFor({VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE}, greenLayout_)) return false;
+    {
+        // HQ oversampling needs an R16F image that is both writable and linearly filterable.
+        VkFormatProperties fp{};
+        vkGetPhysicalDeviceFormatProperties(physical_, VK_FORMAT_R16_SFLOAT, &fp);
+        const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+        hqSupported_ = (fp.optimalTilingFeatures & need) == need;
+        if (!hqSupported_) VK_LOGW("R16F storage/linear sampling unsupported: HQ oversampling disabled");
+    }
 
     VkDescriptorPoolSize sizes[] = {
-        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 4 * kRingSize},
-        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3 * kRingSize},
-        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 11 * kRingSize},
-        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kRingSize},
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 5 * kRingSize},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 5 * kRingSize},
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 12 * kRingSize},
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3 * kRingSize},
     };
     VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    dpi.maxSets = 4 * kRingSize;
+    dpi.maxSets = 5 * kRingSize;
     dpi.poolSizeCount = 4;
     dpi.pPoolSizes = sizes;
     if (vkCreateDescriptorPool(device_, &dpi, nullptr, &descPool_) != VK_SUCCESS) return false;
@@ -214,6 +226,8 @@ bool VulkanEngine::createPipelines() {
         if (vkAllocateDescriptorSets(device_, &ai, &s.cleanSet) != VK_SUCCESS) return false;
         ai.pSetLayouts = &alignLayout_;
         if (vkAllocateDescriptorSets(device_, &ai, &s.alignSet) != VK_SUCCESS) return false;
+        ai.pSetLayouts = &greenLayout_;
+        if (vkAllocateDescriptorSets(device_, &ai, &s.greenSet) != VK_SUCCESS) return false;
     }
 
     VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
@@ -250,7 +264,8 @@ bool VulkanEngine::createPipelines() {
     return makePipe(kUnpackSpv, sizeof(kUnpackSpv), unpackLayout_, unpackPipeLayout_, unpackPipe_) &&
            makePipe(kCleanSpv, sizeof(kCleanSpv), cleanLayout_, cleanPipeLayout_, cleanPipe_) &&
            makePipe(kAlignSpv, sizeof(kAlignSpv), alignLayout_, alignPipeLayout_, alignPipe_, sizeof(int32_t)) &&
-           makePipe(kRenderSpv, sizeof(kRenderSpv), renderLayout_, renderPipeLayout_, renderPipe_);
+           makePipe(kRenderSpv, sizeof(kRenderSpv), renderLayout_, renderPipeLayout_, renderPipe_) &&
+           makePipe(kGreenSpv, sizeof(kGreenSpv), greenLayout_, greenPipeLayout_, greenPipe_);
 }
 
 void VulkanEngine::release() {
@@ -278,6 +293,9 @@ void VulkanEngine::release() {
     if (renderPipe_) vkDestroyPipeline(device_, renderPipe_, nullptr);
     if (cleanPipe_) vkDestroyPipeline(device_, cleanPipe_, nullptr);
     if (alignPipe_) vkDestroyPipeline(device_, alignPipe_, nullptr);
+    if (greenPipe_) vkDestroyPipeline(device_, greenPipe_, nullptr);
+    if (greenPipeLayout_) vkDestroyPipelineLayout(device_, greenPipeLayout_, nullptr);
+    if (greenLayout_) vkDestroyDescriptorSetLayout(device_, greenLayout_, nullptr);
     if (alignPipeLayout_) vkDestroyPipelineLayout(device_, alignPipeLayout_, nullptr);
     if (alignLayout_) vkDestroyDescriptorSetLayout(device_, alignLayout_, nullptr);
     alignPipe_ = VK_NULL_HANDLE;
@@ -421,9 +439,11 @@ void VulkanEngine::destroyResources() {
     destroyImage(histLowImage_);
     destroyImage(motionImage_);
     destroyImage(vfImage_);
+    destroyImage(greenImage_);
     historyValid_ = false;
     alignThrottled_ = false;
     nrThrottled_ = false;
+    hqThrottled_ = false;
     overBudgetFrames_ = 0;
     geom_ = {};
 }
@@ -450,7 +470,11 @@ bool VulkanEngine::ensureResources(const Geometry& g) {
             return false;
         }
     }
-    if (!createImage(quadW, quadH, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT, quadImage_) ||
+    if (!createImage(quadW, quadH, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, quadImage_) ||
+        // Full-res green for HQ oversampling (1x1 placeholder when unsupported, so descriptors stay valid).
+        !createImage(hqSupported_ ? static_cast<uint32_t>(g.rawW) : 1u, hqSupported_ ? static_cast<uint32_t>(g.rawH) : 1u,
+                     hqSupported_ ? VK_FORMAT_R16_SFLOAT : VK_FORMAT_R16G16B16A16_SFLOAT,
+                     VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, greenImage_) ||
         !createImage(quadW, quadH, VK_FORMAT_R16G16B16A16_SFLOAT,
                      VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, cleanImage_) ||
         !createImage(quadW, quadH, VK_FORMAT_R16G16B16A16_SFLOAT,
@@ -471,7 +495,8 @@ bool VulkanEngine::ensureResources(const Geometry& g) {
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(cb, &bi);
-    VkImageMemoryBarrier bars[7] = {
+    VkImageMemoryBarrier bars[8] = {
+        imageBarrier(greenImage_.image, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL),
         imageBarrier(curLowImage_.image, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL),
         imageBarrier(histLowImage_.image, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL),
         imageBarrier(motionImage_.image, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL),
@@ -481,7 +506,7 @@ bool VulkanEngine::ensureResources(const Geometry& g) {
         imageBarrier(vfImage_.image, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL),
     };
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
-                         0, nullptr, 0, nullptr, 7, bars);
+                         0, nullptr, 0, nullptr, 8, bars);
     vkEndCommandBuffer(cb);
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     si.commandBufferCount = 1;
@@ -510,6 +535,9 @@ void VulkanEngine::writeDescriptors(Slot& s) {
     VkDescriptorImageInfo histLow{VK_NULL_HANDLE, histLowImage_.view, VK_IMAGE_LAYOUT_GENERAL};
     VkDescriptorImageInfo motion{VK_NULL_HANDLE, motionImage_.view, VK_IMAGE_LAYOUT_GENERAL};
     VkDescriptorImageInfo vf{VK_NULL_HANDLE, vfImage_.view, VK_IMAGE_LAYOUT_GENERAL};
+    VkDescriptorImageInfo greenStorage{VK_NULL_HANDLE, greenImage_.view, VK_IMAGE_LAYOUT_GENERAL};
+    VkDescriptorImageInfo greenSampled{sampler_, greenImage_.view, VK_IMAGE_LAYOUT_GENERAL};
+    VkDescriptorImageInfo quadRawSampled{sampler_, quadImage_.view, VK_IMAGE_LAYOUT_GENERAL};
 
     auto w = [](VkDescriptorSet set, uint32_t binding, VkDescriptorType type) {
         VkWriteDescriptorSet x{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
@@ -519,7 +547,13 @@ void VulkanEngine::writeDescriptors(Slot& s) {
         x.descriptorType = type;
         return x;
     };
-    VkWriteDescriptorSet writes[19] = {
+    VkWriteDescriptorSet writes[25] = {
+        w(s.greenSet, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER),
+        w(s.greenSet, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER),
+        w(s.greenSet, 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER),
+        w(s.greenSet, 3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE),
+        w(s.renderSet, 4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER),
+        w(s.renderSet, 5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER),
         w(s.unpackSet, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER),
         w(s.unpackSet, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER),
         w(s.unpackSet, 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER),
@@ -543,23 +577,29 @@ void VulkanEngine::writeDescriptors(Slot& s) {
     writes[0].pBufferInfo = &params;
     writes[1].pBufferInfo = &raw;
     writes[2].pBufferInfo = &shading;
-    writes[3].pImageInfo = &quadStorage;
-    writes[4].pBufferInfo = &params;
-    writes[5].pImageInfo = &quadSampled;
-    writes[6].pImageInfo = &vf;
-    writes[7].pBufferInfo = &p010;
-    writes[8].pBufferInfo = &params;
+    writes[3].pImageInfo = &greenStorage;
+    writes[4].pImageInfo = &greenSampled;
+    writes[5].pImageInfo = &quadRawSampled;
+    writes[6].pBufferInfo = &params;
+    writes[7].pBufferInfo = &raw;
+    writes[8].pBufferInfo = &shading;
     writes[9].pImageInfo = &quadStorage;
-    writes[10].pImageInfo = &historyStorage;
-    writes[11].pImageInfo = &cleanStorage;
-    writes[12].pImageInfo = &motion;
-    writes[13].pBufferInfo = &params;
-    writes[14].pImageInfo = &quadStorage;
-    writes[15].pImageInfo = &historyStorage;
-    writes[16].pImageInfo = &curLow;
-    writes[17].pImageInfo = &histLow;
+    writes[10].pBufferInfo = &params;
+    writes[11].pImageInfo = &quadSampled;
+    writes[12].pImageInfo = &vf;
+    writes[13].pBufferInfo = &p010;
+    writes[14].pBufferInfo = &params;
+    writes[15].pImageInfo = &quadStorage;
+    writes[16].pImageInfo = &historyStorage;
+    writes[17].pImageInfo = &cleanStorage;
     writes[18].pImageInfo = &motion;
-    vkUpdateDescriptorSets(device_, 19, writes, 0, nullptr);
+    writes[19].pBufferInfo = &params;
+    writes[20].pImageInfo = &quadStorage;
+    writes[21].pImageInfo = &historyStorage;
+    writes[22].pImageInfo = &curLow;
+    writes[23].pImageInfo = &histLow;
+    writes[24].pImageInfo = &motion;
+    vkUpdateDescriptorSets(device_, 25, writes, 0, nullptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -758,6 +798,9 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
         params.noise[1] = 0.0f;
     }
     const bool temporal = params.cleanFlags[1] != 0;
+    // HQ oversampled luma requested (flags.w bit 4) and available on this GPU / within budget.
+    if (!hqSupported_ || hqThrottled_) params.flags[3] &= ~16;
+    const bool hq = (params.flags[3] & 16) != 0;
     params.cleanFlags[2] = temporal && historyValid_ ? 1 : 0;
     const bool align = params.cleanFlags[2] != 0 && params.cleanFlags[3] != 0 && !alignThrottled_;
     if (!align) params.cleanFlags[3] = 0;
@@ -801,10 +844,18 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
     uint32_t groups = static_cast<uint32_t>((g.rawW + 3) / 4);
     vkCmdDispatch(cb, (groups + 15) / 16, static_cast<uint32_t>((g.rawH / 2 + 7) / 8), 1);
 
-    VkImageMemoryBarrier quadReady = imageBarrier(quadImage_.image, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
-                                                  VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
+    if (hq) {
+        // Full-res green for the oversampled luma (reads the raw buffer only).
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, greenPipe_);
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, greenPipeLayout_, 0, 1, &s.greenSet, 0, nullptr);
+        vkCmdDispatch(cb, static_cast<uint32_t>((g.rawW + 15) / 16), static_cast<uint32_t>((g.rawH + 7) / 8), 1);
+    }
+    VkImageMemoryBarrier quadReady[2] = {
+        imageBarrier(quadImage_.image, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL),
+        imageBarrier(greenImage_.image, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL),
+    };
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
-                         0, nullptr, 0, nullptr, 1, &quadReady);
+                         0, nullptr, 0, nullptr, 2, quadReady);
 
     if (queryPool_) vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool_, q0 + 1);
     if (align) {
@@ -981,6 +1032,10 @@ void VulkanEngine::readTimestamps(int slot) {
         alignThrottled_ = true;
         overBudgetFrames_ = 0;
         VK_LOGW("GPU %.1fms over %.1fms budget: temporal NR alignment disabled", gpuFrameMs_, frameBudgetMs_);
+    } else if (overBudgetFrames_ > 30 && !hqThrottled_ && hqSupported_) {
+        hqThrottled_ = true;
+        overBudgetFrames_ = 0;
+        VK_LOGW("GPU %.1fms still over %.1fms budget: HQ oversampling paused", gpuFrameMs_, frameBudgetMs_);
     } else if (overBudgetFrames_ > 30 && !nrThrottled_) {
         nrThrottled_ = true;
         VK_LOGW("GPU %.1fms still over %.1fms budget: temporal and chroma NR paused", gpuFrameMs_, frameBudgetMs_);

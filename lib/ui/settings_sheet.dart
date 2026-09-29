@@ -21,6 +21,8 @@ class SettingsScreen extends StatefulWidget {
   final double chromaNr;
   final ValueChanged<double> onChromaNrChanged;
   final int sharpening;
+  final bool oversampling;
+  final ValueChanged<bool> onOversamplingChanged;
   final ValueChanged<int> onSharpeningChanged;
   final bool profileAvailable;
   final bool useProfile;
@@ -54,6 +56,8 @@ class SettingsScreen extends StatefulWidget {
     required this.chromaNr,
     required this.onChromaNrChanged,
     this.sharpening = 1,
+    this.oversampling = true,
+    required this.onOversamplingChanged,
     required this.onSharpeningChanged,
     required this.profileAvailable,
     required this.useProfile,
@@ -88,6 +92,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late bool nrAlignment = widget.nrAlignment;
   late double chromaNr = widget.chromaNr;
   late int sharpening = widget.sharpening;
+  late bool oversampling = widget.oversampling;
   late bool useProfile = widget.useProfile;
   late bool tapLocks = widget.tapLocks;
   late bool tapSetsExposure = widget.tapSetsExposure;
@@ -250,6 +255,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 onSelected: (i) {
                   setState(() => nrAlignment = i == 1);
                   widget.onNrAlignmentChanged(i == 1);
+                },
+              ),
+            ),
+            _settingRow(
+              'HQ Oversampling',
+              'Full-sensor luma, anti-alias downscaled: sharper, less moire (more GPU)',
+              Segmented(
+                options: const ['OFF', 'ON'],
+                selected: oversampling ? 1 : 0,
+                onSelected: (i) {
+                  setState(() => oversampling = i == 1);
+                  widget.onOversamplingChanged(i == 1);
                 },
               ),
             ),

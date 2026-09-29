@@ -37,6 +37,7 @@ struct Settings {
     float zebra = 0.95f;     // fraction of sensor clip
     float peaking = 0.06f;   // Apple Log code-value gradient
     int sharpening = 1;      // detail enhancement 0 off, 1 low, 2 medium, 3 high
+    bool oversampling = true; // HQ: full-res green luma, area-downsampled (green.comp)
     float headroomStops = 5.5f; // stops of highlight headroom above 18% grey -> clip
     double shutterAngle = 180.0;
     int64_t fixedExposureNs = 0; // > 0: shutter set as a speed, not an angle
@@ -805,7 +806,7 @@ void onFrame(const RawFrame& f) {
     p.cropRect[2] = static_cast<float>(cw);
     p.cropRect[3] = static_cast<float>(ch);
 
-    p.flags[3] = s.sharpening;
+    p.flags[3] = s.sharpening | (s.oversampling ? 16 : 0);
     p.noise[0] = s.temporalNr;
     p.noise[1] = s.chromaNr;
     p.noise[2] = meta.noiseS > 0 ? meta.noiseS : 2e-4f; // typical phone sensor at base ISO if the HAL omits it
@@ -1193,6 +1194,13 @@ EXPORT void vesper_iso_sweep_cancel() {
     gSweep.cv.notify_all();
 }
 
+// HQ oversampling: luma rebuilt from the full-resolution sensor and
+// area-downsampled to the output (sharper, less moire); off = quad-only path.
+EXPORT void vesper_set_oversampling(int32_t enable) {
+    std::lock_guard<std::mutex> lk(gStateMutex);
+    gSettings.oversampling = enable != 0;
+}
+
 // Detail enhancement: 0 off, 1 low, 2 medium, 3 high (noise-aware unsharp mask,
 // applied to recording and viewfinder).
 EXPORT void vesper_set_sharpening(int32_t level) {
@@ -1526,7 +1534,7 @@ EXPORT int32_t vesper_get_status(char* out, int32_t maxLen) {
                   "\"kelvin\":%.0f,\"tint\":%.1f,\"recording\":%s,\"durationMs\":%lld,\"framesEncoded\":%lld,"
                   "\"framesDropped\":%lld,\"thermal\":%d,\"audio\":%s,\"codec\":\"%s\",\"stopReason\":\"%s\","
                   "\"exposureNs\":%lld,\"iso\":%d,\"awbAuto\":%s,\"afState\":%d,\"focusDiopters\":%.3f,"
-                  "\"face\":[%.4f,%.4f,%.4f,%.4f],\"gpuMs\":%.2f,\"alignThrottled\":%s,\"nrThrottled\":%s,\"calibrationSaved\":\"%s\",\"profileActive\":%s,"
+                  "\"face\":[%.4f,%.4f,%.4f,%.4f],\"gpuMs\":%.2f,\"alignThrottled\":%s,\"nrThrottled\":%s,\"hqAvailable\":%s,\"calibrationSaved\":\"%s\",\"profileActive\":%s,"
                   "\"focusPulling\":%s,\"exposureRamping\":%s,\"isoSweep\":%.3f,\"isoSweepResult\":\"%s\",\"isoSweepError\":\"%s\",\"focusLocked\":%s}",
                   gCamera && gCamera->isStreaming() ? "true" : "false", fps, rw, rh, ow, oh, drops, kelvin, tint,
                   r.recording ? "true" : "false", static_cast<long long>(r.durationUs / 1000),
@@ -1534,7 +1542,7 @@ EXPORT int32_t vesper_get_status(char* out, int32_t maxLen) {
                   r.audio ? "true" : "false", jsonEscape(r.codecName).c_str(), jsonEscape(r.stopReason).c_str(), expNs, iso,
                   awbAuto ? "true" : "false", afState, focusD, face[0], face[1], face[2], face[3],
                   gGpu ? gGpu->gpuFrameMs() : 0.0, gGpu && gGpu->alignmentThrottled() ? "true" : "false",
-                  gGpu && gGpu->noiseReductionThrottled() ? "true" : "false", jsonEscape(calSaved).c_str(),
+                  gGpu && gGpu->noiseReductionThrottled() ? "true" : "false", gGpu && gGpu->oversamplingAvailable() ? "true" : "false", jsonEscape(calSaved).c_str(),
                   profileActive ? "true" : "false", focusSearching ? "true" : "false", gExposureRamping ? "true" : "false", static_cast<double>(gSweepProgress.load()), jsonEscape(sweepResult).c_str(), jsonEscape(sweepError).c_str(), focusLocked ? "true" : "false");
     return writeString(buf, out, maxLen);
 }

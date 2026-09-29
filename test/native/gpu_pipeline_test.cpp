@@ -409,6 +409,115 @@ int main() {
         check(n2 < n0 * 1.25, "sharpening cores out sensor noise", n2, n0 * 1.25);
     }
 
+    // 9. HQ oversampling: full-res green, area-downsampled.
+    {
+        auto run = [&](const std::vector<uint8_t>& r, bool hq, P010& out, bool nr = false) {
+            FrameParams p = baseParams(0);
+            p.flags[3] = hq ? 16 : 0;
+            if (nr) { p.noise[1] = 1.0f; } // chroma NR on -> HQ detail is cored against noise
+            return runFrame(gpu, r, p, nullptr, out);
+        };
+        // (a) Flat field: identical with and without HQ.
+        P010 a0{}, a1{};
+        std::vector<uint8_t> flat = raw;
+        run(flat, false, a0);
+        std::vector<int> y0;
+        for (int x = OUT_W / 4; x < 3 * OUT_W / 4; x += 7) y0.push_back(a0.luma(x, 3 * OUT_H / 4));
+        run(flat, true, a1);
+        int maxDiff = 0, i = 0;
+        for (int x = OUT_W / 4; x < 3 * OUT_W / 4; x += 7) maxDiff = std::max(maxDiff, std::abs(a1.luma(x, 3 * OUT_H / 4) - y0[i++]));
+        check(maxDiff <= 2, "HQ leaves flat areas unchanged", maxDiff, 2);
+
+        // (b) Fine detail (period 5 raw px, just resolvable at 1080p-scale output):
+        // HQ keeps more of its contrast.
+        struct Stripes : Scene {
+            Vec3 at(int x, int y) const override {
+                const float grey = 0.18f / 8.0f * (1.0f + 0.6f * std::sin(6.2831853f * (x + 0.7f * y) / 5.0f));
+                return {grey / 2.0f, grey, grey / 1.25f};
+            }
+        };
+        auto stripes = makeRaw10(Stripes());
+        // Lock-in amplitude of the true pattern frequency (real resolved detail),
+        // separate from everything else (aliasing, noise).
+        auto modulation = [&](bool hq) {
+            P010 fr{};
+            if (!run(stripes, hq, fr)) return -1.0;
+            double ss = 0, sc = 0, mean = 0;
+            int n = 0;
+            for (int Y = OUT_H / 4; Y < 3 * OUT_H / 4; ++Y)
+                for (int X = OUT_W / 4; X < 3 * OUT_W / 4; ++X) { mean += fr.luma(X, Y); ++n; }
+            mean /= n;
+            for (int Y = OUT_H / 4; Y < 3 * OUT_H / 4; ++Y)
+                for (int X = OUT_W / 4; X < 3 * OUT_W / 4; ++X) {
+                    double ph = 6.2831853 * ((2 * X + 1) + 0.7 * (2 * Y + 1)) / 5.0; // output px centre in raw px
+                    ss += (fr.luma(X, Y) - mean) * std::sin(ph);
+                    sc += (fr.luma(X, Y) - mean) * std::cos(ph);
+                }
+            return 2.0 * std::sqrt(ss * ss + sc * sc) / n;
+        };
+        double m0 = modulation(false), m1 = modulation(true);
+        std::printf("  resolved detail (period 5 px): quad %.1f, HQ %.1f\n", m0, m1);
+        check(m1 > m0 * 1.1, "HQ resolves more fine detail", m1, m0 * 1.1);
+
+        // (b2) Detail the sensor captures but the output can't show (period
+        // 3.2 raw px: above the output's limit, inside the green sampling
+        // limit): it should average out, not alias into false patterns.
+        // (Finer than ~2.7 px even the sensor aliases, whatever the path.)
+        struct Fine : Scene {
+            Vec3 at(int x, int y) const override {
+                const float grey = 0.18f / 8.0f * (1.0f + 0.6f * std::sin(6.2831853f * (x + 0.2f * y) / 3.2f));
+                return {grey / 2.0f, grey, grey / 1.25f};
+            }
+        };
+        auto fine = makeRaw10(Fine());
+        auto alias = [&](bool hq) {
+            P010 fr{};
+            if (!run(fine, hq, fr)) return -1.0;
+            return regionStdDevY(fr, OUT_W / 4, OUT_H / 4, OUT_W / 2, OUT_H / 2);
+        };
+        double al0 = alias(false), al1 = alias(true);
+        std::printf("  aliasing (moire) above output resolution: quad %.1f, HQ %.1f\n", al0, al1);
+        check(al1 <= al0 * 1.05, "HQ doesn't add moire", al1, al0 * 1.05);
+
+        // (b3) No halos: a hard 2-stop edge must not overshoot / undershoot.
+        {
+            struct Edge : Scene {
+                Vec3 at(int x, int) const override {
+                    const float grey = 0.18f / 8.0f * (x > W / 2 + 1 ? 2.0f : 0.5f);
+                    return {grey / 2.0f, grey, grey / 1.25f};
+                }
+            };
+            auto e = makeRaw10(Edge());
+            auto ringing = [&](bool hq, int& step) {
+                P010 fr{};
+                run(e, hq, fr);
+                int lo = fr.luma(OUT_W / 2 - 12, OUT_H / 2), hi = fr.luma(OUT_W / 2 + 12, OUT_H / 2);
+                int mn = 1023, mx = 0;
+                for (int x = OUT_W / 2 - 12; x <= OUT_W / 2 + 12; ++x) {
+                    mn = std::min(mn, fr.luma(x, OUT_H / 2));
+                    mx = std::max(mx, fr.luma(x, OUT_H / 2));
+                }
+                step = hi - lo;
+                return std::max(lo - mn, mx - hi);
+            };
+            int step0, step1;
+            int r0 = ringing(false, step0), r1 = ringing(true, step1);
+            std::printf("  edge overshoot: quad %d/%d, HQ %d/%d codes\n", r0, step0, r1, step1);
+            check(r1 <= r0 + step1 / 40, "HQ adds no halo at hard edges", r1, r0 + step1 / 40);
+        }
+
+        // (c) Noise with NR on: HQ detail is cored, so noise doesn't jump.
+        auto noisy = makeNoisyRaw10(TestScene(), 5);
+        auto noise = [&](bool hq) {
+            P010 fr{};
+            if (!run(noisy, hq, fr, true)) return -1.0;
+            return regionStdDevY(fr, OUT_W / 4, OUT_H / 2, OUT_W / 2, OUT_H / 4);
+        };
+        double n0 = noise(false), n1 = noise(true);
+        std::printf("  noise with NR: quad %.2f, HQ %.2f\n", n0, n1);
+        check(n1 < n0 * 1.3, "HQ keeps noise under control with NR on", n1, n0 * 1.3);
+    }
+
     // 7. Ring: many frames in a row must all complete (fence/slot reuse).
     for (int i = 0; i < 12; ++i) {
         if (!runFrame(gpu, raw, baseParams(0), nullptr, f)) { std::puts("FAIL ring reuse"); ++failures; break; }

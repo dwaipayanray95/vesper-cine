@@ -122,6 +122,22 @@ The previous pipeline had several defects that directly caused the reported issu
 - The **AE** button meters centre-weighted, and prefers a detected face (placed ½ stop over grey).
 - **Colour calibration** is per phone and per camera, from a ColorChecker chart; see [tools/calibration](tools/calibration/README.md). Profiles live in `assets/color_profiles/`. PROCESSING switches between FACTORY and CHART PROFILE.
 
+## Image quality: HQ oversampling
+
+The sensor is read at full width (4000x2256 at 16:9). The base path builds one RGB value per 2x2 Bayer quad (2000 px wide), which is barely more than 1080p.
+
+HQ oversampling (on by default) works in two steps:
+- `green.comp` rebuilds green (luma detail) at every sensor pixel with edge-directed Hamilton-Adams interpolation.
+- The render pass downsamples it with an anti-aliasing 5x5 kernel optimised for 1080p. Only the extra detail is added on top of the noise-reduced quad image, cored against the noise profile.
+
+Measured in `gpu_pipeline_test`:
+- +39% resolved fine detail.
+- -52% moire on detail finer than 1080p.
+- The same noise with NR on.
+- A 2% edge overshoot.
+
+If the GPU runs over budget, the guard pauses alignment first, then HQ, then NR.
+
 ## Roadmap
 
 1. On-device verification of the items above.
