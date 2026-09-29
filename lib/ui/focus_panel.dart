@@ -55,31 +55,18 @@ class CineFocusPanel extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           // Header
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text(
-                'FOCUS · ${distanceLabel(focus)}',
-                style: const TextStyle(
-                  color: Colors.amber,
-                  fontSize: 10,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 1.0,
-                  fontFamily: 'monospace',
-                ),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              'FOCUS · ${distanceLabel(focus)}',
+              style: const TextStyle(
+                color: Colors.amber,
+                fontSize: 10,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 1.0,
+                fontFamily: 'monospace',
               ),
-              GestureDetector(
-                onTap: onClose,
-                child: Container(
-                  padding: const EdgeInsets.all(2),
-                  decoration: BoxDecoration(
-                    color: Colors.white10,
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                  child: const Icon(Icons.close, size: 14, color: Colors.white70),
-                ),
-              ),
-            ],
+            ),
           ),
           const SizedBox(height: 8),
 

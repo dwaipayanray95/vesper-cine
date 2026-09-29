@@ -616,9 +616,9 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
             child: SizedBox(width: 16, height: 16, child: CustomPaint(painter: CrosshairPainter())),
           ),
 
-          // 2. TOP BAR
+          // 2. TOP BAR (shifted rightwards beyond left rack to give left rack full headroom)
           Positioned(
-            left: 0,
+            left: 88,
             right: 0,
             top: 0,
             child: Container(
@@ -632,7 +632,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
               child: SafeArea(
                 bottom: false,
                 child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                   child: Row(
                     children: [
                       // Apple Log badge
@@ -689,31 +689,33 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
 
                       // Hardware / thermal warning
                       if (hot) ...[
-                        _badge(s!.thermal >= 3 ? 'THERMAL LIMIT' : 'PHONE WARM', Colors.orangeAccent),
-                        const SizedBox(width: 8),
+                        _badge(s!.thermal >= 3 ? 'HOT' : 'WARM', Colors.orangeAccent),
+                        const SizedBox(width: 6),
                       ],
 
                       // Live engine telemetry
                       if (s != null)
                         Text(
-                          '${s.fps.toStringAsFixed(1)} FPS'
-                          '${s.gpuMs > 0 ? ' · GPU ${s.gpuMs.toStringAsFixed(1)}ms' : ''}'
-                          '${s.nrThrottled ? ' · NR PAUSED' : s.alignThrottled ? ' · ALIGN OFF' : ''}'
-                          '${s.cameraDrops + s.framesDropped > 0 ? ' · ${s.cameraDrops + s.framesDropped} DROP' : ''}',
+                          _recording
+                              ? '${s.fps.toStringAsFixed(0)} FPS'
+                              : '${s.fps.toStringAsFixed(1)} FPS'
+                                '${s.gpuMs > 0 ? ' · GPU ${s.gpuMs.toStringAsFixed(1)}ms' : ''}'
+                                '${s.nrThrottled ? ' · NR PAUSED' : s.alignThrottled ? ' · ALIGN OFF' : ''}'
+                                '${s.cameraDrops + s.framesDropped > 0 ? ' · ${s.cameraDrops + s.framesDropped} DROP' : ''}',
                           style: TextStyle(
                             color: s.cameraDrops + s.framesDropped > 0 ? Colors.orangeAccent : Colors.white54,
                             fontSize: 10,
                             fontFamily: 'monospace',
                           ),
                         ),
-                      const SizedBox(width: 10),
+                      const SizedBox(width: 8),
 
                       // Recording status & timecode
                       if (_recording) ...[
                         FadeTransition(
                           opacity: _pulse,
                           child: Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                             decoration: BoxDecoration(
                               color: Colors.red.shade900,
                               borderRadius: BorderRadius.circular(4),
@@ -723,32 +725,34 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                               mainAxisSize: MainAxisSize.min,
                               children: [
                                 Container(
-                                  width: 7,
-                                  height: 7,
+                                  width: 6,
+                                  height: 6,
                                   decoration: const BoxDecoration(
                                     color: Colors.white,
                                     shape: BoxShape.circle,
                                   ),
                                 ),
-                                const SizedBox(width: 6),
+                                const SizedBox(width: 5),
                                 Text(
                                   _timecode(s?.durationMs ?? 0),
                                   style: const TextStyle(
                                     color: Colors.white,
                                     fontFamily: 'monospace',
                                     fontWeight: FontWeight.bold,
-                                    fontSize: 12,
+                                    fontSize: 11,
                                   ),
                                 ),
                               ],
                             ),
                           ),
                         ),
-                        const SizedBox(width: 8),
+                        const SizedBox(width: 4),
                       ],
 
                       // Settings button
                       IconButton(
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
                         icon: const Icon(Icons.settings, color: Colors.white70, size: 20),
                         tooltip: 'Settings',
                         onPressed: _openSettings,
@@ -760,11 +764,11 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
             ),
           ),
 
-            // 3. LEFT CONTROL RACK
+            // 3. LEFT CONTROL RACK (utilizing top headroom now that top bar starts at left: 92)
             Positioned(
               left: 12,
-              top: 50,
-              bottom: 44,
+              top: 10,
+              bottom: 34,
               child: SingleChildScrollView(
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
@@ -865,14 +869,14 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
               Positioned(
                 left: 92,
                 top: _activeWheel == OpenWheelType.fps
-                    ? 50
+                    ? 18
                     : _activeWheel == OpenWheelType.shutter
-                    ? 75
+                    ? 50
                     : _activeWheel == OpenWheelType.iso
-                    ? 110
+                    ? 85
                     : _activeWheel == OpenWheelType.wb
-                    ? 130
-                    : 160,
+                    ? 110
+                    : 140,
                 child: _buildActiveWheelDial(speedList, angleList, isoList, fpsList, maxD),
               ),
 
@@ -918,49 +922,60 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
               ),
             ),
 
-            // 6. BOTTOM BAR
+            // 6. BOTTOM BAR (subtle cinematic gradient so 16:9/open-gate frame remains visible, with safe area padding for curved corners)
             Positioned(
               left: 0,
               right: 0,
               bottom: 0,
               child: Container(
-                color: const Color(0xEE090B0D),
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-                child: Row(
-                  children: [
-                    Text(
-                      '${_codec == 0 ? 'HEVC 10-BIT' : 'AV1 10-BIT'} · ${_cropMode == 0 ? '16:9' : '4:3 OPEN GATE'}',
-                      style: const TextStyle(
-                        color: Colors.white70,
-                        fontSize: 10,
-                        fontFamily: 'monospace',
-                        fontWeight: FontWeight.w600,
-                        letterSpacing: 0.8,
-                      ),
+                decoration: const BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.bottomCenter,
+                    end: Alignment.topCenter,
+                    colors: [Color(0x99000000), Color(0x00000000)],
+                  ),
+                ),
+                child: SafeArea(
+                  top: false,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 6),
+                    child: Row(
+                      children: [
+                        Text(
+                          '${_codec == 0 ? 'HEVC 10-BIT' : 'AV1 10-BIT'} · ${_cropMode == 0 ? '16:9' : '4:3 OPEN GATE'}',
+                          style: const TextStyle(
+                            color: Colors.white70,
+                            fontSize: 10,
+                            fontFamily: 'monospace',
+                            fontWeight: FontWeight.w600,
+                            letterSpacing: 0.8,
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        if (_useProfile && _profileAvailable)
+                          const Text(
+                            '· CAL ACTIVE',
+                            style: TextStyle(
+                              color: Colors.amber,
+                              fontSize: 10,
+                              fontFamily: 'monospace',
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        const Spacer(),
+                        if (s != null)
+                          Text(
+                            'AUDIO ${s.audio ? 'OK' : 'OFF'}',
+                            style: TextStyle(
+                              color: s.audio ? Colors.greenAccent : Colors.white38,
+                              fontSize: 10,
+                              fontFamily: 'monospace',
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                      ],
                     ),
-                    const SizedBox(width: 10),
-                    if (_useProfile && _profileAvailable)
-                      const Text(
-                        '· CAL ACTIVE',
-                        style: TextStyle(
-                          color: Colors.amber,
-                          fontSize: 10,
-                          fontFamily: 'monospace',
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    const Spacer(),
-                    if (s != null)
-                      Text(
-                        'AUDIO ${s.audio ? 'OK' : 'OFF'}',
-                        style: TextStyle(
-                          color: s.audio ? Colors.greenAccent : Colors.white38,
-                          fontSize: 10,
-                          fontFamily: 'monospace',
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                  ],
+                  ),
                 ),
               ),
             ),

@@ -42,31 +42,18 @@ class CineWbPanel extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           // Header
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text(
-                'WB · ${kelvin}K ${tint >= 0 ? "+$tint" : "$tint"}',
-                style: const TextStyle(
-                  color: Colors.amber,
-                  fontSize: 10,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 1.0,
-                  fontFamily: 'monospace',
-                ),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              'WB · ${kelvin}K ${tint >= 0 ? "+$tint" : "$tint"}',
+              style: const TextStyle(
+                color: Colors.amber,
+                fontSize: 10,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 1.0,
+                fontFamily: 'monospace',
               ),
-              GestureDetector(
-                onTap: onClose,
-                child: Container(
-                  padding: const EdgeInsets.all(2),
-                  decoration: BoxDecoration(
-                    color: Colors.white10,
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                  child: const Icon(Icons.close, size: 14, color: Colors.white70),
-                ),
-              ),
-            ],
+            ),
           ),
           const SizedBox(height: 6),
 
