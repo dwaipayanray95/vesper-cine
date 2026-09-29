@@ -218,6 +218,7 @@ class VesperNative {
   late final void Function(int) _setScopes;
   late final void Function(int) _setSharpening;
   late final void Function(int) _setOversampling;
+  late final void Function(int) _setProcessingPaused;
   late final void Function(int, int) _setNativeIsos;
   late final void Function(int) _setBudgetGuard;
   late final int Function(Pointer<Utf8>, Pointer<Utf8>) _isoSweepStart;
@@ -307,6 +308,7 @@ class VesperNative {
       _isoSweepCancel = _lib.lookupFunction<Void Function(), void Function()>('vesper_iso_sweep_cancel');
       _setNativeIsos = _lib.lookupFunction<Void Function(Int32, Int32), void Function(int, int)>('vesper_set_native_isos');
       _setBudgetGuard = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_budget_guard');
+      _setProcessingPaused = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_processing_paused');
       _setOversampling = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_oversampling');
       _setSharpening = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_sharpening');
       _setScopes = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_scopes');
@@ -529,7 +531,7 @@ class VesperNative {
   void setBudgetGuard(bool on) => _loaded ? _setBudgetGuard(on ? 1 : 0) : null;
 
   /// Asks for camera + microphone permission and waits for the answer.
-  /// True when the camera may be used.
+  /// True only when both are granted (every recording has sound).
   Future<bool> requestPermissions() async {
     if (!Platform.isAndroid) return true;
     try {
@@ -544,6 +546,10 @@ class VesperNative {
     if (!Platform.isAndroid) return;
     await _channel.invokeMethod('lockRotation', {'locked': locked});
   }
+
+  /// Skip per-frame processing while a full-screen page covers the viewfinder
+  /// (never while recording). The camera keeps streaming, so resuming is instant.
+  void setProcessingPaused(bool paused) => _loaded ? _setProcessingPaused(paused ? 1 : 0) : null;
 
   /// HQ oversampling: luma from the full-resolution sensor, anti-alias downscaled.
   void setOversampling(bool on) => _loaded ? _setOversampling(on ? 1 : 0) : null;

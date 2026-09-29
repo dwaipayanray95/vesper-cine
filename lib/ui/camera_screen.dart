@@ -166,6 +166,9 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   bool _isoSweepRunning = false;
   String _savedSettings = '';
 
+  bool _settingsOpen = false; // settings page covers the viewfinder: processing paused
+  bool _benchmarking = false;
+  String _benchStep = '';
   bool _permissionDenied = false; // camera permission refused: status text offers a retry
   int? _textureId;
   String _statusMessage = 'INITIALIZING SENSOR...';
@@ -214,7 +217,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     // Wait for the camera permission before touching the camera: on first
     // launch the dialog is still up when we get here.
     if (!await _engine.requestPermissions()) {
-      if (mounted) setState(() => _statusMessage = 'CAMERA PERMISSION NEEDED — TAP TO ASK AGAIN');
+      if (mounted) setState(() => _statusMessage = 'CAMERA + MICROPHONE PERMISSION NEEDED — TAP TO ASK AGAIN');
       _permissionDenied = true;
       return;
     }
@@ -303,6 +306,83 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     } else if (state == AppLifecycleState.resumed && !_streaming) {
       _openAndStream();
     }
+  }
+
+  // --- GPU benchmark (developer tool) --------------------------------------
+  // Measures the GPU time of each optional pass on this phone: every feature
+  // alone, then all together, with the budget guard off. Settings are
+  // restored afterwards. Results are shown and printed to logcat (VesperBench).
+  Future<void> _runGpuBenchmark() async {
+    if (_benchmarking || !_streaming || _recording) return;
+    setState(() => _benchmarking = true);
+    void apply({bool hq = false, int sharp = 0, double tnr = 0, double cnr = 0, bool align = false}) {
+      _engine.setOversampling(hq);
+      _engine.setSharpening(sharp);
+      _engine.setTemporalNr(tnr);
+      _engine.setChromaNr(cnr);
+      _engine.setNrAlignment(align);
+    }
+
+    _engine.setBudgetGuard(false);
+    final configs = <(String, void Function())>[
+      ('Base (all off)', () => apply()),
+      ('Sharpening LOW', () => apply(sharp: 1)),
+      ('HQ oversampling', () => apply(hq: true)),
+      ('Chroma NR', () => apply(cnr: 0.5)),
+      ('Temporal NR', () => apply(tnr: 0.7)),
+      ('Temporal NR + align', () => apply(tnr: 0.7, align: true)),
+      ('Everything on', () => apply(hq: true, sharp: 1, tnr: 0.7, cnr: 0.5, align: true)),
+    ];
+    final results = <String>[];
+    double? base;
+    for (var i = 0; i < configs.length && mounted; i++) {
+      final (name, set) = configs[i];
+      set();
+      setState(() => _benchStep = 'GPU BENCHMARK ${i + 1}/${configs.length}: $name');
+      await Future<void>.delayed(const Duration(milliseconds: 2500)); // let the smoothed timing settle
+      final drops0 = _engine.status()?.cameraDrops ?? 0;
+      var sum = 0.0;
+      for (var k = 0; k < 8; k++) {
+        await Future<void>.delayed(const Duration(milliseconds: 125));
+        sum += _engine.status()?.gpuMs ?? 0;
+      }
+      final ms = sum / 8;
+      final drops = (_engine.status()?.cameraDrops ?? 0) - drops0;
+      base ??= ms;
+      final line =
+          '${name.padRight(22)} ${ms.toStringAsFixed(1).padLeft(5)} ms'
+          '${i > 0 ? '  (+${(ms - base).toStringAsFixed(1)})' : ''}${drops > 0 ? '  $drops drops' : ''}';
+      results.add(line);
+      debugPrint('VesperBench: $line');
+    }
+    // Restore the user's settings.
+    _engine.setOversampling(_oversampling);
+    _engine.setSharpening(_sharpening);
+    _engine.setTemporalNr(_temporalNr);
+    _engine.setChromaNr(_chromaNr);
+    _engine.setNrAlignment(_nrAlignment);
+    _engine.setBudgetGuard(_gpuGuard);
+    if (!mounted) return;
+    setState(() {
+      _benchmarking = false;
+      _benchStep = '';
+    });
+    final budget = 1000 / _fps;
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF14171D),
+        title: Text(
+          'GPU benchmark · budget ${budget.toStringAsFixed(1)} ms @ ${_fpsLabel(_fps)} fps',
+          style: const TextStyle(color: Colors.white, fontSize: 14),
+        ),
+        content: Text(
+          results.join('\n'),
+          style: const TextStyle(color: Colors.white70, fontSize: 11, fontFamily: 'monospace'),
+        ),
+        actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('OK'))],
+      ),
+    );
   }
 
   // --- Native ISO analysis ------------------------------------------------
@@ -527,6 +607,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
 
   void _onPoll() {
     _saveSettings();
+    if (_settingsOpen) return; // viewfinder hidden: don't rebuild the camera screen
     final s = _engine.status();
     if (s == null || !mounted) return;
     setState(() {
@@ -658,9 +739,12 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     }.toList()..sort();
   }
 
-  void _openSettings() {
+  Future<void> _openSettings() async {
     setState(() => _activeWheel = OpenWheelType.none);
-    Navigator.of(context).push(
+    // The viewfinder is hidden behind the page: give the GPU/CPU to the UI.
+    _settingsOpen = true;
+    _engine.setProcessingPaused(true);
+    await Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => SettingsScreen(
           codec: _codec,
@@ -720,6 +804,12 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
             _engine.useColorProfile(val);
           },
           onCaptureCalibration: _streaming && _calibrationDir != null ? _captureCalibration : null,
+          onRunGpuBenchmark: _streaming && !_recording
+              ? () {
+                  Navigator.of(context).pop();
+                  _runGpuBenchmark();
+                }
+              : null,
           tapLocks: _tapLocks,
           onTapLocksChanged: (val) => setState(() => _tapLocks = val),
           tapSetsExposure: _tapSetsExposure,
@@ -739,6 +829,8 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
         ),
       ),
     );
+    _settingsOpen = false;
+    _engine.setProcessingPaused(false);
   }
 
   // Bottom-bar status line. Paused stages say why: the GPU guard paused them
@@ -764,7 +856,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   // Tap: hardware AF (PDAF + laser) on the region, either tracking (AF-C) or one
   // scan that the HAL then holds (AF-L). Optionally also spot-meters exposure there.
   void _tapToFocus(Offset p, {bool lock = false}) {
-    if (!_streaming || _isoSweepRunning) return; // the ISO analysis owns the exposure
+    if (!_streaming || _isoSweepRunning || _benchmarking) return; // a measurement owns the camera
     lock = lock || _tapLocks;
     _engine.focusAt(p.dx, p.dy, lock: lock);
     if (lock) HapticFeedback.mediumImpact();
@@ -948,6 +1040,26 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                                     right: 8,
                                     bottom: 8,
                                     child: ScopesOverlay(scopes: _scopes, mode: _scopeMode),
+                                  ),
+                                if (_benchmarking)
+                                  Positioned(
+                                    left: 0,
+                                    right: 0,
+                                    top: 12,
+                                    child: Center(
+                                      child: Container(
+                                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                                        color: const Color(0xCC000000),
+                                        child: Text(
+                                          _benchStep,
+                                          style: const TextStyle(
+                                            color: Colors.amber,
+                                            fontSize: 10,
+                                            fontWeight: FontWeight.bold,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
                                   ),
                                 if (_isoSweepRunning)
                                   Positioned.fill(

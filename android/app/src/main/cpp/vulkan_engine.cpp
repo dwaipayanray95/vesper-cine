@@ -194,7 +194,8 @@ bool VulkanEngine::createPipelines() {
                     VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                     VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER}, renderLayout_)) return false;
     if (!layoutFor({VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE}, greenLayout_)) return false;
+                    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    VK_DESCRIPTOR_TYPE_STORAGE_IMAGE}, greenLayout_)) return false;
     {
         // HQ oversampling needs an R16F image that is both writable and linearly filterable.
         const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
@@ -220,7 +221,7 @@ bool VulkanEngine::createPipelines() {
     VkDescriptorPoolSize sizes[] = {
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 5 * kRingSize},
         {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 5 * kRingSize},
-        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 12 * kRingSize},
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 13 * kRingSize},
         {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3 * kRingSize},
     };
     VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
@@ -488,7 +489,8 @@ bool VulkanEngine::ensureResources(const Geometry& g) {
     }
     if (!createImage(quadW, quadH, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, quadImage_) ||
         // Full-res green for HQ oversampling (1x1 placeholder when unsupported, so descriptors stay valid).
-        !createImage(hqSupported_ ? static_cast<uint32_t>(g.rawW) : 1u, hqSupported_ ? static_cast<uint32_t>(g.rawH) : 1u,
+        // HQ luma detail at quad resolution (1x1 placeholder when unsupported, so descriptors stay valid).
+        !createImage(hqSupported_ ? quadW : 1u, hqSupported_ ? quadH : 1u,
                      hqSupported_ ? hqFormat_ : VK_FORMAT_R16G16B16A16_SFLOAT,
                      VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, greenImage_) ||
         !createImage(quadW, quadH, VK_FORMAT_R16G16B16A16_SFLOAT,
@@ -564,7 +566,8 @@ void VulkanEngine::writeDescriptors(Slot& s) {
         x.descriptorType = type;
         return x;
     };
-    VkWriteDescriptorSet writes[25] = {
+    VkWriteDescriptorSet writes[26] = {
+        w(s.greenSet, 4, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE),
         w(s.greenSet, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER),
         w(s.greenSet, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER),
         w(s.greenSet, 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER),
@@ -591,32 +594,33 @@ void VulkanEngine::writeDescriptors(Slot& s) {
         w(s.alignSet, 4, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE),
         w(s.alignSet, 5, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE),
     };
-    writes[0].pBufferInfo = &params;
-    writes[1].pBufferInfo = &raw;
-    writes[2].pBufferInfo = &shading;
-    writes[3].pImageInfo = &greenStorage;
-    writes[4].pImageInfo = &greenSampled;
-    writes[5].pImageInfo = &quadRawSampled;
-    writes[6].pBufferInfo = &params;
-    writes[7].pBufferInfo = &raw;
-    writes[8].pBufferInfo = &shading;
-    writes[9].pImageInfo = &quadStorage;
-    writes[10].pBufferInfo = &params;
-    writes[11].pImageInfo = &quadSampled;
-    writes[12].pImageInfo = &vf;
-    writes[13].pBufferInfo = &p010;
-    writes[14].pBufferInfo = &params;
-    writes[15].pImageInfo = &quadStorage;
-    writes[16].pImageInfo = &historyStorage;
-    writes[17].pImageInfo = &cleanStorage;
-    writes[18].pImageInfo = &motion;
-    writes[19].pBufferInfo = &params;
-    writes[20].pImageInfo = &quadStorage;
-    writes[21].pImageInfo = &historyStorage;
-    writes[22].pImageInfo = &curLow;
-    writes[23].pImageInfo = &histLow;
-    writes[24].pImageInfo = &motion;
-    vkUpdateDescriptorSets(device_, 25, writes, 0, nullptr);
+    writes[0].pImageInfo = &quadStorage;
+    writes[1].pBufferInfo = &params;
+    writes[2].pBufferInfo = &raw;
+    writes[3].pBufferInfo = &shading;
+    writes[4].pImageInfo = &greenStorage;
+    writes[5].pImageInfo = &greenSampled;
+    writes[6].pImageInfo = &quadRawSampled;
+    writes[7].pBufferInfo = &params;
+    writes[8].pBufferInfo = &raw;
+    writes[9].pBufferInfo = &shading;
+    writes[10].pImageInfo = &quadStorage;
+    writes[11].pBufferInfo = &params;
+    writes[12].pImageInfo = &quadSampled;
+    writes[13].pImageInfo = &vf;
+    writes[14].pBufferInfo = &p010;
+    writes[15].pBufferInfo = &params;
+    writes[16].pImageInfo = &quadStorage;
+    writes[17].pImageInfo = &historyStorage;
+    writes[18].pImageInfo = &cleanStorage;
+    writes[19].pImageInfo = &motion;
+    writes[20].pBufferInfo = &params;
+    writes[21].pImageInfo = &quadStorage;
+    writes[22].pImageInfo = &historyStorage;
+    writes[23].pImageInfo = &curLow;
+    writes[24].pImageInfo = &histLow;
+    writes[25].pImageInfo = &motion;
+    vkUpdateDescriptorSets(device_, 26, writes, 0, nullptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -861,18 +865,20 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
     uint32_t groups = static_cast<uint32_t>((g.rawW + 3) / 4);
     vkCmdDispatch(cb, (groups + 15) / 16, static_cast<uint32_t>((g.rawH / 2 + 7) / 8), 1);
 
+    VkImageMemoryBarrier quadReady = imageBarrier(quadImage_.image, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                                                  VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+                         0, nullptr, 0, nullptr, 1, &quadReady);
     if (hq) {
-        // Full-res green for the oversampled luma (reads the raw buffer only).
+        // HQ luma detail per 8x8-quad tile (raw + quad image -> detail image).
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, greenPipe_);
         vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, greenPipeLayout_, 0, 1, &s.greenSet, 0, nullptr);
-        vkCmdDispatch(cb, static_cast<uint32_t>((g.rawW + 15) / 16), static_cast<uint32_t>((g.rawH + 7) / 8), 1);
+        vkCmdDispatch(cb, static_cast<uint32_t>((g.rawW / 2 + 7) / 8), static_cast<uint32_t>((g.rawH / 2 + 7) / 8), 1);
+        VkImageMemoryBarrier detailReady = imageBarrier(greenImage_.image, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                                                        VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+                             0, nullptr, 0, nullptr, 1, &detailReady);
     }
-    VkImageMemoryBarrier quadReady[2] = {
-        imageBarrier(quadImage_.image, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL),
-        imageBarrier(greenImage_.image, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL),
-    };
-    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
-                         0, nullptr, 0, nullptr, 2, quadReady);
 
     if (queryPool_) vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool_, q0 + 1);
     if (align) {

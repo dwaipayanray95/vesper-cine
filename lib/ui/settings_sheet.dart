@@ -32,6 +32,7 @@ class SettingsScreen extends StatefulWidget {
   final String profileInfo;
   final ValueChanged<bool> onUseProfileChanged;
   final VoidCallback? onCaptureCalibration;
+  final VoidCallback? onRunGpuBenchmark; // developer tool
   final bool tapLocks;
   final ValueChanged<bool> onTapLocksChanged;
   final bool tapSetsExposure;
@@ -69,6 +70,7 @@ class SettingsScreen extends StatefulWidget {
     required this.profileInfo,
     required this.onUseProfileChanged,
     this.onCaptureCalibration,
+    this.onRunGpuBenchmark,
     required this.tapLocks,
     required this.onTapLocksChanged,
     required this.tapSetsExposure,
@@ -290,6 +292,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 },
               ),
             ),
+            if (kDevTools)
+              _settingRow(
+                'GPU Benchmark (dev)',
+                'Measures each processing option\'s GPU cost on this phone (~25 s)',
+                OutlinedButton(
+                  style: OutlinedButton.styleFrom(
+                    side: const BorderSide(color: Colors.amber),
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  ),
+                  onPressed: widget.onRunGpuBenchmark,
+                  child: const Text('RUN', style: TextStyle(color: Colors.amber, fontSize: 11)),
+                ),
+              ),
             _settingRow(
               'Detail / Sharpening',
               'Noise-aware edge enhancement (recording + viewfinder)',

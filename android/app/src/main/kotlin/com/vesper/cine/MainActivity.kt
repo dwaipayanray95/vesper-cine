@@ -71,7 +71,7 @@ class MainActivity : FlutterActivity() {
         if (requestCode != 1001) return
         val r = permissionResult ?: return
         permissionResult = null
-        r.success(checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
+        r.success(missingPermissions().isEmpty())
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -136,7 +136,7 @@ class MainActivity : FlutterActivity() {
                     }
                 }
                 "requestPermissions" -> {
-                    // Resolves true once the camera permission is granted (microphone is optional).
+                    // Resolves true once camera AND microphone are granted (audio is part of every recording).
                     val missing = missingPermissions()
                     if (missing.isEmpty()) {
                         result.success(true)

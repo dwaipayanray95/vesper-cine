@@ -1,29 +1,45 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
-// HQ (oversampled) path, pass 1b: full-resolution green (luma detail).
+// HQ (oversampled) luma detail, computed per 8x8-quad tile in shared memory.
 //
 // The quad image keeps one green per 2x2 site (the mean of Gr and Gb), which
-// throws away about half of the sensor's luma resolution. Here green is
-// reconstructed at *every* raw pixel with edge-directed (Hamilton-Adams)
-// interpolation: at an R or B site, green is interpolated along whichever
-// direction (horizontal or vertical) has the smaller gradient, plus a
-// Laplacian correction from the site's own colour so fine luma detail
-// captured by R/B pixels isn't lost. The render pass area-samples this image
-// per output pixel (true oversampling: ~2x2 sensor pixels per 1080p pixel).
-//
-// Same black level, lens shading and white balance as unpack.comp, so the
-// values match the quad image (green WB gain is 1).
-layout(local_size_x = 16, local_size_y = 8) in;
+// throws away about half of the sensor's luma resolution. This pass:
+//   1. loads the tile's raw pixels (+ borders) once into shared memory
+//      (black level, lens shading and white balance applied — shading is
+//      evaluated once per tile: the map varies over hundreds of pixels);
+//   2. reconstructs green at every raw pixel with edge-directed
+//      (Hamilton-Adams) interpolation;
+//   3. applies the anti-alias downscale filter separably (8 taps per axis at
+//      the pixel positions around each quad centre) — the discrete form of the
+//      5x5 kernel tuned in gpu_pipeline_test (passband vs moire, Lanczos-2
+//      level negative lobe);
+//   4. writes D = G_hq - G_quad at quad resolution: exactly the detail the quad
+//      path misses. The render pass samples D (5 taps) instead of a 25-tap
+//      filter over a full-resolution image — a fraction of the memory traffic.
+// 64 threads: good occupancy on mobile GPUs (PowerVR / Mali / Adreno).
+layout(local_size_x = 8, local_size_y = 8) in;
 
 #include "frame_params.glsl"
 
 layout(std430, set = 0, binding = 1) readonly buffer RawBuffer { uint words[]; } raw;
 layout(std430, set = 0, binding = 2) readonly buffer Shading { float gains[]; } shading; // [row][col][R, Geven, Godd, B]
 #ifdef GREEN_RGBA16F
-layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D greenImage; // fallback: R16F storage unsupported
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D detailImage; // fallback: R16F storage unsupported
 #else
-layout(set = 0, binding = 3, r16f) uniform writeonly image2D greenImage;
+layout(set = 0, binding = 3, r16f) uniform writeonly image2D detailImage;
 #endif
+layout(set = 0, binding = 4, rgba16f) uniform readonly image2D quadImage;
+
+// Tile: 8x8 quads = 16x16 raw px. Filter reach +-3.5 px -> green needed over
+// 24x24; Hamilton-Adams reach +-2 px -> raw needed over 28x28. The row-filter
+// results reuse the raw array (raw isn't needed any more by then).
+const int Q = 8, T = 2 * Q, GB = 4, RB = 6;  // quads per side, tile px, green border, raw border
+const int GN = T + 2 * GB, RN = T + 2 * RB;  // 24, 28
+const int NT = Q * Q;                         // threads
+shared float sRaw[RN * RN];                   // 784 floats; later: rows (GN x Q = 192)
+shared float sGreen[GN * GN];                 // 576 floats
+
+const float K[8] = float[8](-0.024, -0.056, 0.153, 0.427, 0.427, 0.153, -0.056, -0.024);
 
 uint rawByte(uint offset) {
     return (raw.words[offset >> 2] >> ((offset & 3u) * 8u)) & 0xFFu;
@@ -52,44 +68,69 @@ vec4 shadingAt(vec2 rawPos) {
     return mix(mix(s[0], s[1], f.x), mix(s[2], s[3], f.x), f.y);
 }
 
-vec4 gShade; // shading gains near this pixel (varies slowly: one lookup per invocation)
-
-// Black-level-subtracted, shaded, white-balanced value of raw pixel (x, y).
-float px(int x, int y) {
-    x = clamp(x, 0, P.rawInfo.x - 1);
-    y = clamp(y, 0, P.rawInfo.y - 1);
-    uint base = uint(y * P.rawInfo.z + (x >> 2) * 5);
-    int i = x & 3;
-    float dn = float((rawByte(base + uint(i)) << 2) | ((rawByte(base + 4u) >> (2 * i)) & 3u));
-    int site = cfaSite(x & 1, y & 1);
-    float bl = P.blackLevel[site];
-    float v = (dn - bl) / (P.wbGains.w - bl);
-    if (site == 0) return v * gShade.x * P.wbGains.r;
-    if (site == 3) return v * gShade.w * P.wbGains.b;
-    return v * ((y & 1) == 0 ? gShade.y : gShade.z) * P.wbGains.g;
-}
+float R(int x, int y) { return sRaw[(y + RB) * RN + (x + RB)]; }   // tile-relative raw px
+float G(int x, int y) { return sGreen[(y + GB) * GN + (x + GB)]; } // tile-relative green
 
 void main() {
-    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
-    if (p.x >= P.rawInfo.x || p.y >= P.rawInfo.y) return;
-    gShade = shadingAt(vec2(p) + 0.5);
-    int site = cfaSite(p.x & 1, p.y & 1);
-    float g;
-    if (site == 1 || site == 2) {
-        g = px(p.x, p.y);
-    } else {
-        float c = px(p.x, p.y);
-        float gl = px(p.x - 1, p.y), gr = px(p.x + 1, p.y), gu = px(p.x, p.y - 1), gd = px(p.x, p.y + 1);
-        float lapH = 2.0 * c - px(p.x - 2, p.y) - px(p.x + 2, p.y);
-        float lapV = 2.0 * c - px(p.x, p.y - 2) - px(p.x, p.y + 2);
-        float dH = abs(gl - gr) + abs(lapH);
-        float dV = abs(gu - gd) + abs(lapV);
-        float gH = 0.5 * (gl + gr) + 0.25 * lapH;
-        float gV = 0.5 * (gu + gd) + 0.25 * lapV;
-        g = dH < dV ? gH : (dV < dH ? gV : 0.5 * (gH + gV));
-        // Never overshoot the surrounding greens (keeps edges free of halos).
-        float lo = min(min(gl, gr), min(gu, gd)), hi = max(max(gl, gr), max(gu, gd));
-        g = clamp(g, lo, hi);
+    const ivec2 tile = ivec2(gl_WorkGroupID.xy);
+    const ivec2 org = tile * T;                     // tile origin, raw px
+    const int lid = int(gl_LocalInvocationIndex);   // 0..63
+    const vec4 sh = shadingAt(vec2(org) + vec2(T * 0.5));
+
+    // 1. Raw -> shared (clamped at the frame edges), black/shading/WB applied.
+    for (int i = lid; i < RN * RN; i += NT) {
+        int x = clamp(org.x - RB + i % RN, 0, P.rawInfo.x - 1);
+        int y = clamp(org.y - RB + i / RN, 0, P.rawInfo.y - 1);
+        uint base = uint(y * P.rawInfo.z + (x >> 2) * 5);
+        int b = x & 3;
+        float dn = float((rawByte(base + uint(b)) << 2) | ((rawByte(base + 4u) >> (2 * b)) & 3u));
+        int site = cfaSite(x & 1, y & 1);
+        float bl = P.blackLevel[site];
+        float v = (dn - bl) / (P.wbGains.w - bl);
+        float gain = site == 0 ? sh.x * P.wbGains.r : (site == 3 ? sh.w * P.wbGains.b : ((y & 1) == 0 ? sh.y : sh.z) * P.wbGains.g);
+        sRaw[i] = v * gain;
     }
-    imageStore(greenImage, p, vec4(g, 0.0, 0.0, 0.0));
+    barrier();
+
+    // 2. Full-resolution green (Hamilton-Adams) over the 24x24 filter support.
+    for (int i = lid; i < GN * GN; i += NT) {
+        int x = i % GN - GB, y = i / GN - GB;
+        int site = cfaSite((org.x + x) & 1, (org.y + y) & 1);
+        float g;
+        if (site == 1 || site == 2) {
+            g = R(x, y);
+        } else {
+            float c = R(x, y);
+            float gl = R(x - 1, y), gr = R(x + 1, y), gu = R(x, y - 1), gd = R(x, y + 1);
+            float lapH = 2.0 * c - R(x - 2, y) - R(x + 2, y);
+            float lapV = 2.0 * c - R(x, y - 2) - R(x, y + 2);
+            float dH = abs(gl - gr) + abs(lapH);
+            float dV = abs(gu - gd) + abs(lapV);
+            float gH = 0.5 * (gl + gr) + 0.25 * lapH;
+            float gV = 0.5 * (gu + gd) + 0.25 * lapV;
+            g = dH < dV ? gH : (dV < dH ? gV : 0.5 * (gH + gV));
+            float lo = min(min(gl, gr), min(gu, gd)), hi = max(max(gl, gr), max(gu, gd));
+            g = clamp(g, lo, hi); // no overshoot: edges stay halo-free
+        }
+        sGreen[i] = g;
+    }
+    barrier();
+
+    // 3a. Horizontal filter: quad column qx covers px 2qx, 2qx+1; taps at px 2qx-3 .. 2qx+4.
+    for (int i = lid; i < GN * Q; i += NT) {
+        int row = i / Q, qx = i % Q;
+        float acc = 0.0;
+        for (int k = 0; k < 8; ++k) acc += K[k] * sGreen[row * GN + (2 * qx - 3 + k + GB)];
+        sRaw[i] = acc; // row-filter results (raw data no longer needed)
+    }
+    barrier();
+
+    // 3b. Vertical filter + 4. detail against the quad image.
+    ivec2 lq = ivec2(gl_LocalInvocationID.xy);
+    ivec2 q = tile * Q + lq;
+    if (q.x >= P.quadInfo.x || q.y >= P.quadInfo.y) return;
+    float hq = 0.0;
+    for (int k = 0; k < 8; ++k) hq += K[k] * sRaw[(2 * lq.y - 3 + k + GB) * Q + lq.x];
+    float gq = imageLoad(quadImage, q).g;
+    imageStore(detailImage, q, vec4(hq - gq, 0.0, 0.0, 0.0));
 }

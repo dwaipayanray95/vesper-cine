@@ -714,8 +714,13 @@ void isoSweepMain() {
     gSweepProgress = -1.0f;
 }
 
+// Settings page open (not recording): skip all per-frame work but keep the
+// camera streaming, so returning is instant and the UI gets the GPU/CPU.
+std::atomic<bool> gProcessingPaused{false};
+
 void onFrame(const RawFrame& f) {
     if (!gGpu) return;
+    if (gProcessingPaused && !(gRecorder && gRecorder->isRecording())) return;
     static int frameIndex = 0;
     const SensorInfo& info = gCamera->sensorInfo();
     const CaptureMetadata& meta = *f.meta;
@@ -1215,6 +1220,9 @@ EXPORT void vesper_iso_sweep_cancel() {
     gSweep.cancel = true;
     gSweep.cv.notify_all();
 }
+
+// Pause / resume per-frame processing (viewfinder freezes; recording is never paused).
+EXPORT void vesper_set_processing_paused(int32_t paused) { gProcessingPaused = paused != 0; }
 
 // Measured native ISOs for the clean auto-exposure (0 = unknown).
 EXPORT void vesper_set_native_isos(int32_t baseIso, int32_t hcgIso) {
