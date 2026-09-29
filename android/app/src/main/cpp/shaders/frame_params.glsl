@@ -8,7 +8,7 @@ layout(std140, set = 0, binding = 0) uniform FrameParams {
     ivec4 quadInfo;     // quad width, quad height, shading map cols, rows (0 = no map)
     vec4  cropRect;     // crop in raw pixel coordinates: x0, y0, width, height
     ivec4 outInfo;      // output width, height, rotation (0/90/180/270 cw), monitoring mode
-    ivec4 flags;        // x: write P010, y: swap R/B in viewfinder, z: write viewfinder
+    ivec4 flags;        // x: write P010, y: swap R/B in viewfinder, z: write viewfinder, w: sharpening 0-3
     vec4  cfaOffsets;   // raw-space centre of the R sample (xy) and B sample (zw) inside a quad
     vec4  exposure;     // x: clip linear k, y: zebra threshold (fraction of clip), z: peaking threshold, w: log2(k / 0.18)
     vec4  camToRec2020[3]; // rows of the 3x3 matrix (white-balanced camera RGB -> scene-linear Rec.2020, includes k)

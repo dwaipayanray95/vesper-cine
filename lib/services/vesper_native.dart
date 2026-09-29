@@ -212,6 +212,7 @@ class VesperNative {
   late final void Function(double) _focusPullTo;
   late final void Function(double, double) _pickWb;
   late final void Function(int) _setScopes;
+  late final void Function(int) _setSharpening;
   late final int Function(Pointer<Utf8>, Pointer<Utf8>) _isoSweepStart;
   late final void Function() _isoSweepCancel;
   late final int Function(Pointer<Float>, Pointer<Float>) _getScopes;
@@ -297,6 +298,7 @@ class VesperNative {
             'vesper_iso_sweep_start',
           );
       _isoSweepCancel = _lib.lookupFunction<Void Function(), void Function()>('vesper_iso_sweep_cancel');
+      _setSharpening = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_sharpening');
       _setScopes = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_scopes');
       _getScopes = _lib
           .lookupFunction<Int32 Function(Pointer<Float>, Pointer<Float>), int Function(Pointer<Float>, Pointer<Float>)>(
@@ -509,6 +511,9 @@ class VesperNative {
   }
 
   void cancelIsoSweep() => _loaded ? _isoSweepCancel() : null;
+
+  /// Detail enhancement: 0 off, 1 low, 2 medium, 3 high (recording and viewfinder).
+  void setSharpening(int level) => _loaded ? _setSharpening(level) : null;
 
   /// Histogram/waveform computation (off unless an overlay is shown).
   void setScopes(bool on) => _loaded ? _setScopes(on ? 1 : 0) : null;

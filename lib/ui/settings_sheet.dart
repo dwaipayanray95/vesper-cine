@@ -20,6 +20,8 @@ class SettingsScreen extends StatefulWidget {
   final ValueChanged<bool> onNrAlignmentChanged;
   final double chromaNr;
   final ValueChanged<double> onChromaNrChanged;
+  final int sharpening;
+  final ValueChanged<int> onSharpeningChanged;
   final bool profileAvailable;
   final bool useProfile;
   final String profileInfo;
@@ -51,6 +53,8 @@ class SettingsScreen extends StatefulWidget {
     required this.onNrAlignmentChanged,
     required this.chromaNr,
     required this.onChromaNrChanged,
+    this.sharpening = 1,
+    required this.onSharpeningChanged,
     required this.profileAvailable,
     required this.useProfile,
     required this.profileInfo,
@@ -83,6 +87,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late double temporalNr = widget.temporalNr;
   late bool nrAlignment = widget.nrAlignment;
   late double chromaNr = widget.chromaNr;
+  late int sharpening = widget.sharpening;
   late bool useProfile = widget.useProfile;
   late bool tapLocks = widget.tapLocks;
   late bool tapSetsExposure = widget.tapSetsExposure;
@@ -245,6 +250,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 onSelected: (i) {
                   setState(() => nrAlignment = i == 1);
                   widget.onNrAlignmentChanged(i == 1);
+                },
+              ),
+            ),
+            _settingRow(
+              'Detail / Sharpening',
+              'Noise-aware edge enhancement (recording + viewfinder)',
+              Segmented(
+                options: const ['OFF', 'LOW', 'MED', 'HIGH'],
+                selected: sharpening.clamp(0, 3),
+                onSelected: (i) {
+                  setState(() => sharpening = i);
+                  widget.onSharpeningChanged(i);
                 },
               ),
             ),

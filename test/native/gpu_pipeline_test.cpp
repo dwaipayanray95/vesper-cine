@@ -370,6 +370,45 @@ int main() {
         check(std::abs(lY - yCode(appleLog(8.0))) <= 3, "zero distortion = identity", lY, yCode(appleLog(8.0)));
     }
 
+    // 8. Detail: sharpening steepens a real edge but barely touches noise.
+    {
+        struct EdgeScene : Scene {
+            Vec3 at(int x, int) const override {
+                const float grey = 0.18f / 8.0f * (x > W / 2 + 1 ? 2.0f : 0.5f);
+                return {grey / 2.0f, grey, grey / 1.25f};
+            }
+        };
+        auto edgeRaw = makeRaw10(EdgeScene());
+        auto maxStep = [&](int level) {
+            FrameParams p = baseParams(0);
+            p.flags[3] = level;
+            p.noise[2] = 2e-4f; p.noise[3] = 2e-6f; // typical phone base-ISO profile (the raw here is noise-free)
+            P010 fr{};
+            if (!runFrame(gpu, edgeRaw, p, nullptr, fr)) return -1;
+            // Acutance: contrast across the edge within +-3 px (overshoot included).
+            int lo = 1023, hi = 0;
+            for (int x = OUT_W / 2 - 4; x <= OUT_W / 2 + 4; ++x) {
+                lo = std::min(lo, fr.luma(x, OUT_H / 2));
+                hi = std::max(hi, fr.luma(x, OUT_H / 2));
+            }
+            return hi - lo;
+        };
+        int s0 = maxStep(0), s2 = maxStep(2);
+        std::printf("  edge contrast: off %d, medium %d\n", s0, s2);
+        check(s2 > s0 + 12, "sharpening raises edge contrast", s2, s0 + 12);
+
+        auto noisy = makeNoisyRaw10(TestScene(), 3);
+        auto noiseAt = [&](int level) {
+            FrameParams p = baseParams(0);
+            p.flags[3] = level;
+            P010 fr{};
+            if (!runFrame(gpu, noisy, p, nullptr, fr)) return -1.0;
+            return regionStdDevY(fr, OUT_W / 4, OUT_H / 2, OUT_W / 2, OUT_H / 4);
+        };
+        double n0 = noiseAt(0), n2 = noiseAt(2);
+        check(n2 < n0 * 1.25, "sharpening cores out sensor noise", n2, n0 * 1.25);
+    }
+
     // 7. Ring: many frames in a row must all complete (fence/slot reuse).
     for (int i = 0; i < 12; ++i) {
         if (!runFrame(gpu, raw, baseParams(0), nullptr, f)) { std::puts("FAIL ring reuse"); ++failures; break; }

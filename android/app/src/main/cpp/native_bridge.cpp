@@ -36,6 +36,7 @@ struct Settings {
     int monitoringMode = 1;  // 0 log, 1 Rec.709, 2 false colour, 3 peaking, 4 zebras
     float zebra = 0.95f;     // fraction of sensor clip
     float peaking = 0.06f;   // Apple Log code-value gradient
+    int sharpening = 1;      // detail enhancement 0 off, 1 low, 2 medium, 3 high
     float headroomStops = 5.5f; // stops of highlight headroom above 18% grey -> clip
     double shutterAngle = 180.0;
     int64_t fixedExposureNs = 0; // > 0: shutter set as a speed, not an angle
@@ -804,6 +805,7 @@ void onFrame(const RawFrame& f) {
     p.cropRect[2] = static_cast<float>(cw);
     p.cropRect[3] = static_cast<float>(ch);
 
+    p.flags[3] = s.sharpening;
     p.noise[0] = s.temporalNr;
     p.noise[1] = s.chromaNr;
     p.noise[2] = meta.noiseS > 0 ? meta.noiseS : 2e-4f; // typical phone sensor at base ISO if the HAL omits it
@@ -1189,6 +1191,13 @@ EXPORT void vesper_iso_sweep_cancel() {
     std::lock_guard<std::mutex> lk(gSweep.mutex);
     gSweep.cancel = true;
     gSweep.cv.notify_all();
+}
+
+// Detail enhancement: 0 off, 1 low, 2 medium, 3 high (noise-aware unsharp mask,
+// applied to recording and viewfinder).
+EXPORT void vesper_set_sharpening(int32_t level) {
+    std::lock_guard<std::mutex> lk(gStateMutex);
+    gSettings.sharpening = std::clamp(level, 0, 3);
 }
 
 // Histogram / waveform overlay: computed only while enabled (~6 Hz at 24 fps).

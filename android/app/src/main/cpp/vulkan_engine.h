@@ -27,7 +27,7 @@ struct FrameParams {
     int32_t quadInfo[4];        // quadW, quadH, shadingCols, shadingRows
     float cropRect[4];          // raw-space x0, y0, w, h
     int32_t outInfo[4];         // outW, outH, rotation, monitoringMode
-    int32_t flags[4];           // writeP010, swapRB (set by the engine), writeViewfinder, 0
+    int32_t flags[4];           // writeP010, swapRB (set by the engine), writeViewfinder, sharpening 0-3
     float cfaOffsets[4];        // R sample centre (x, y), B sample centre (x, y), raw px within a quad
     float exposure[4];          // clipLinear, zebraThreshold, peakingThreshold, log2(clipLinear/0.18)
     float camToRec2020[12];     // 3 rows, each padded to vec4
