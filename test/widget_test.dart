@@ -36,15 +36,16 @@ void main() {
     await tester.pump(const Duration(milliseconds: 300));
     expect(find.text('ISO GAIN'), findsNothing);
 
-    // Tapping WB opens WB dial
+    // Tapping WB opens WB panel with Google AWB switch & Kelvin
     await tester.tap(find.text('WB'));
     await tester.pump(const Duration(milliseconds: 300));
-    expect(find.text('WHITE BALANCE'), findsOneWidget);
+    expect(find.text('GOOGLE AWB'), findsOneWidget);
+    expect(find.text('MANUAL'), findsOneWidget);
 
     // Tapping outside on the center closes the dial
     await tester.tapAt(const Offset(400, 300));
     await tester.pump(const Duration(milliseconds: 300));
-    expect(find.text('WHITE BALANCE'), findsNothing);
+    expect(find.text('GOOGLE AWB'), findsNothing);
   });
 
   // Picker sheets must fit a landscape phone (Pixel 10 is ~915x411 logical px).

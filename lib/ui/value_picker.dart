@@ -165,22 +165,28 @@ class Segmented extends StatelessWidget {
     mainAxisSize: MainAxisSize.min,
     children: [
       for (var i = 0; i < options.length; i++)
-        GestureDetector(
-          onTap: () => onSelected(i),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
-            margin: const EdgeInsets.symmetric(horizontal: 2),
-            decoration: BoxDecoration(
-              color: i == selected ? Colors.amber.withValues(alpha: 0.2) : Colors.white10,
-              borderRadius: BorderRadius.circular(4),
-              border: Border.all(color: i == selected ? Colors.amber : Colors.white24),
-            ),
-            child: Text(
-              options[i],
-              style: TextStyle(
-                color: i == selected ? Colors.amber : Colors.white70,
-                fontSize: 11,
-                fontWeight: FontWeight.bold,
+        Flexible(
+          child: GestureDetector(
+            onTap: () => onSelected(i),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+              margin: const EdgeInsets.symmetric(horizontal: 2),
+              decoration: BoxDecoration(
+                color: i == selected ? Colors.amber.withValues(alpha: 0.2) : Colors.white10,
+                borderRadius: BorderRadius.circular(4),
+                border: Border.all(color: i == selected ? Colors.amber : Colors.white24),
+              ),
+              child: Center(
+                child: Text(
+                  options[i],
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: i == selected ? Colors.amber : Colors.white70,
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
               ),
             ),
           ),
