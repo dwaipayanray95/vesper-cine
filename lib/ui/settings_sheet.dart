@@ -4,7 +4,7 @@ import 'value_picker.dart';
 /// Full-screen cinema settings page.
 /// Houses recording codec, resolution/crop selection, lens correction,
 /// noise reduction, chart calibration, autofocus options, etc.
-class SettingsScreen extends StatelessWidget {
+class SettingsScreen extends StatefulWidget {
   final int codec; // 0 = HEVC, 1 = AV1
   final ValueChanged<int> onCodecChanged;
   final int cropMode; // 0 = 16:9, 1 = 4:3
@@ -62,8 +62,32 @@ class SettingsScreen extends StatelessWidget {
     required this.onFaceDetectChanged,
   });
 
+  @override
+  State<SettingsScreen> createState() => _SettingsScreenState();
+}
+
+// The page is a separate route, so the camera screen's setState doesn't rebuild
+// it: keep local copies and update them alongside each callback.
+class _SettingsScreenState extends State<SettingsScreen> {
   static const _nrLevels = [0.0, 0.5, 0.7, 0.85];
   static const _chromaLevels = [0.0, 0.5, 1.0];
+
+  late int codec = widget.codec;
+  late int cropMode = widget.cropMode;
+  late bool lensCorrection = widget.lensCorrection;
+  late bool hotPixelFix = widget.hotPixelFix;
+  late double temporalNr = widget.temporalNr;
+  late bool nrAlignment = widget.nrAlignment;
+  late double chromaNr = widget.chromaNr;
+  late bool useProfile = widget.useProfile;
+  late bool tapLocks = widget.tapLocks;
+  late bool tapSetsExposure = widget.tapSetsExposure;
+  late bool faceDetect = widget.faceDetect;
+
+  bool get isRecording => widget.isRecording;
+  bool get profileAvailable => widget.profileAvailable;
+  String get profileInfo => widget.profileInfo;
+  VoidCallback? get onCaptureCalibration => widget.onCaptureCalibration;
 
   @override
   Widget build(BuildContext context) {
@@ -82,12 +106,7 @@ class SettingsScreen extends StatelessWidget {
             SizedBox(width: 10),
             Text(
               'VESPER CINE · SYSTEM SETTINGS',
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 13,
-                fontWeight: FontWeight.bold,
-                letterSpacing: 1.5,
-              ),
+              style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold, letterSpacing: 1.5),
             ),
           ],
         ),
@@ -104,7 +123,12 @@ class SettingsScreen extends StatelessWidget {
               Segmented(
                 options: const ['HEVC 10-BIT', 'AV1 10-BIT'],
                 selected: codec,
-                onSelected: isRecording ? (_) {} : onCodecChanged,
+                onSelected: isRecording
+                    ? (_) {}
+                    : (i) {
+                        setState(() => codec = i);
+                        widget.onCodecChanged(i);
+                      },
               ),
             ),
             _settingRow(
@@ -113,7 +137,13 @@ class SettingsScreen extends StatelessWidget {
               Segmented(
                 options: const ['16:9', '4:3 OPEN GATE'],
                 selected: cropMode,
-                onSelected: isRecording ? (_) {} : onCropModeChanged,
+                onSelected: isRecording
+                    ? (_) {}
+                    : (i) {
+                        if (i == cropMode) return;
+                        setState(() => cropMode = i);
+                        widget.onCropModeChanged(i);
+                      },
               ),
             ),
 
@@ -129,7 +159,10 @@ class SettingsScreen extends StatelessWidget {
               Segmented(
                 options: const ['OFF', 'ON'],
                 selected: faceDetect ? 1 : 0,
-                onSelected: (i) => onFaceDetectChanged(i == 1),
+                onSelected: (i) {
+                  setState(() => faceDetect = i == 1);
+                  widget.onFaceDetectChanged(i == 1);
+                },
               ),
             ),
             _settingRow(
@@ -138,7 +171,10 @@ class SettingsScreen extends StatelessWidget {
               Segmented(
                 options: const ['TRACK', 'FOCUS & LOCK'],
                 selected: tapLocks ? 1 : 0,
-                onSelected: (i) => onTapLocksChanged(i == 1),
+                onSelected: (i) {
+                  setState(() => tapLocks = i == 1);
+                  widget.onTapLocksChanged(i == 1);
+                },
               ),
             ),
             _settingRow(
@@ -147,7 +183,10 @@ class SettingsScreen extends StatelessWidget {
               Segmented(
                 options: const ['FOCUS ONLY', 'FOCUS + EXPOSURE'],
                 selected: tapSetsExposure ? 1 : 0,
-                onSelected: (i) => onTapSetsExposureChanged(i == 1),
+                onSelected: (i) {
+                  setState(() => tapSetsExposure = i == 1);
+                  widget.onTapSetsExposureChanged(i == 1);
+                },
               ),
             ),
 
@@ -163,7 +202,10 @@ class SettingsScreen extends StatelessWidget {
               Segmented(
                 options: const ['OFF', 'ON'],
                 selected: lensCorrection ? 1 : 0,
-                onSelected: (i) => onLensCorrectionChanged(i == 1),
+                onSelected: (i) {
+                  setState(() => lensCorrection = i == 1);
+                  widget.onLensCorrectionChanged(i == 1);
+                },
               ),
             ),
             _settingRow(
@@ -172,7 +214,10 @@ class SettingsScreen extends StatelessWidget {
               Segmented(
                 options: const ['OFF', 'ON'],
                 selected: hotPixelFix ? 1 : 0,
-                onSelected: (i) => onHotPixelFixChanged(i == 1),
+                onSelected: (i) {
+                  setState(() => hotPixelFix = i == 1);
+                  widget.onHotPixelFixChanged(i == 1);
+                },
               ),
             ),
             _settingRow(
@@ -181,7 +226,10 @@ class SettingsScreen extends StatelessWidget {
               Segmented(
                 options: const ['OFF', 'LOW', 'MED', 'HIGH'],
                 selected: _nrLevels.indexOf(temporalNr).clamp(0, 3),
-                onSelected: (i) => onTemporalNrChanged(_nrLevels[i]),
+                onSelected: (i) {
+                  setState(() => temporalNr = _nrLevels[i]);
+                  widget.onTemporalNrChanged(_nrLevels[i]);
+                },
               ),
             ),
             _settingRow(
@@ -190,7 +238,10 @@ class SettingsScreen extends StatelessWidget {
               Segmented(
                 options: const ['OFF', 'ON'],
                 selected: nrAlignment ? 1 : 0,
-                onSelected: (i) => onNrAlignmentChanged(i == 1),
+                onSelected: (i) {
+                  setState(() => nrAlignment = i == 1);
+                  widget.onNrAlignmentChanged(i == 1);
+                },
               ),
             ),
             _settingRow(
@@ -199,7 +250,10 @@ class SettingsScreen extends StatelessWidget {
               Segmented(
                 options: const ['OFF', 'LOW', 'HIGH'],
                 selected: _chromaLevels.indexOf(chromaNr).clamp(0, 2),
-                onSelected: (i) => onChromaNrChanged(_chromaLevels[i]),
+                onSelected: (i) {
+                  setState(() => chromaNr = _chromaLevels[i]);
+                  widget.onChromaNrChanged(_chromaLevels[i]);
+                },
               ),
             ),
 
@@ -211,11 +265,16 @@ class SettingsScreen extends StatelessWidget {
             _sectionHeader('COLOR SCIENCE & CALIBRATION'),
             _settingRow(
               'Calibration Profile',
-              profileAvailable ? (useProfile ? 'Chart calibrated: $profileInfo' : 'Factory HAL profile') : 'No chart profile found',
+              profileAvailable
+                  ? (useProfile ? 'Chart calibrated: $profileInfo' : 'Factory HAL profile')
+                  : 'No chart profile found',
               Segmented(
                 options: const ['FACTORY', 'CHART PROFILE'],
                 selected: (profileAvailable && useProfile) ? 1 : 0,
-                onSelected: (i) => onUseProfileChanged(i == 1),
+                onSelected: (i) {
+                  if (profileAvailable) setState(() => useProfile = i == 1);
+                  widget.onUseProfileChanged(i == 1);
+                },
               ),
             ),
             if (onCaptureCalibration != null)
@@ -242,12 +301,7 @@ class SettingsScreen extends StatelessWidget {
     padding: const EdgeInsets.only(bottom: 8),
     child: Text(
       title,
-      style: const TextStyle(
-        color: Colors.amber,
-        fontSize: 10,
-        fontWeight: FontWeight.bold,
-        letterSpacing: 1.2,
-      ),
+      style: const TextStyle(color: Colors.amber, fontSize: 10, fontWeight: FontWeight.bold, letterSpacing: 1.2),
     ),
   );
 
@@ -262,20 +316,10 @@ class SettingsScreen extends StatelessWidget {
             children: [
               Text(
                 title,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
-                ),
+                style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600),
               ),
               const SizedBox(height: 2),
-              Text(
-                subtitle,
-                style: const TextStyle(
-                  color: Colors.white38,
-                  fontSize: 10,
-                ),
-              ),
+              Text(subtitle, style: const TextStyle(color: Colors.white38, fontSize: 10)),
             ],
           ),
         ),

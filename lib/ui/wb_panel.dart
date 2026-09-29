@@ -3,7 +3,7 @@ import 'value_picker.dart';
 
 /// Interactive cinema white balance panel that docks next to the left rack.
 /// Allows toggling Auto WB (Google AWB) vs Manual Kelvin wheel + Tint slider.
-class CineWbPanel extends StatelessWidget {
+class CineWbPanel extends StatefulWidget {
   final int kelvin;
   final int tint;
   final bool awbAuto;
@@ -26,6 +26,28 @@ class CineWbPanel extends StatelessWidget {
   static final List<int> kelvinStops = [for (var k = 2000; k <= 10000; k += 100) k];
 
   @override
+  State<CineWbPanel> createState() => _CineWbPanelState();
+}
+
+class _CineWbPanelState extends State<CineWbPanel> {
+  static List<int> get kelvinStops => CineWbPanel.kelvinStops;
+  // Owned here: a controller created in build() is replaced on every status
+  // poll (4x/s), which resets the wheel mid-scroll.
+  late final FixedExtentScrollController _kelvinController = FixedExtentScrollController(
+    initialItem: kelvinStops.indexOf((widget.kelvin / 100).round() * 100).clamp(0, kelvinStops.length - 1),
+  );
+
+  int get kelvin => widget.kelvin;
+  int get tint => widget.tint;
+  bool get awbAuto => widget.awbAuto;
+
+  @override
+  void dispose() {
+    _kelvinController.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Container(
       width: 230,
@@ -34,9 +56,7 @@ class CineWbPanel extends StatelessWidget {
         color: const Color(0xF4101216),
         borderRadius: BorderRadius.circular(10),
         border: Border.all(color: Colors.white24, width: 1),
-        boxShadow: const [
-          BoxShadow(color: Colors.black87, blurRadius: 16, offset: Offset(2, 4)),
-        ],
+        boxShadow: const [BoxShadow(color: Colors.black87, blurRadius: 16, offset: Offset(2, 4))],
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -61,7 +81,7 @@ class CineWbPanel extends StatelessWidget {
           Segmented(
             options: const ['MANUAL', 'GOOGLE AWB'],
             selected: awbAuto ? 1 : 0,
-            onSelected: (i) => onAwbAutoChanged(i == 1),
+            onSelected: (i) => widget.onAwbAutoChanged(i == 1),
           ),
           const SizedBox(height: 6),
 
@@ -96,10 +116,8 @@ class CineWbPanel extends StatelessWidget {
                     diameterRatio: 2.0,
                     perspective: 0.003,
                     physics: const FixedExtentScrollPhysics(),
-                    controller: FixedExtentScrollController(
-                      initialItem: kelvinStops.indexOf((kelvin / 100).round() * 100).clamp(0, kelvinStops.length - 1),
-                    ),
-                    onSelectedItemChanged: (i) => onKelvinChanged(kelvinStops[i]),
+                    controller: _kelvinController,
+                    onSelectedItemChanged: (i) => widget.onKelvinChanged(kelvinStops[i]),
                     childDelegate: ListWheelChildBuilderDelegate(
                       childCount: kelvinStops.length,
                       builder: (ctx, i) {
@@ -127,7 +145,10 @@ class CineWbPanel extends StatelessWidget {
             // Tint Slider
             Row(
               children: [
-                const Text('G', style: TextStyle(color: Colors.greenAccent, fontSize: 10, fontWeight: FontWeight.bold)),
+                const Text(
+                  'G',
+                  style: TextStyle(color: Colors.greenAccent, fontSize: 10, fontWeight: FontWeight.bold),
+                ),
                 Expanded(
                   child: SliderTheme(
                     data: SliderTheme.of(context).copyWith(
@@ -142,11 +163,14 @@ class CineWbPanel extends StatelessWidget {
                       min: -50,
                       max: 50,
                       divisions: 100,
-                      onChanged: (t) => onTintChanged(t.round()),
+                      onChanged: (t) => widget.onTintChanged(t.round()),
                     ),
                   ),
                 ),
-                const Text('M', style: TextStyle(color: Colors.pinkAccent, fontSize: 10, fontWeight: FontWeight.bold)),
+                const Text(
+                  'M',
+                  style: TextStyle(color: Colors.pinkAccent, fontSize: 10, fontWeight: FontWeight.bold),
+                ),
               ],
             ),
           ],

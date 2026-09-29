@@ -695,7 +695,8 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
 
                       // Live engine telemetry
                       if (s != null)
-                        Text(
+                        Flexible(
+                          child: Text(
                           _recording
                               ? '${s.fps.toStringAsFixed(0)} FPS'
                               : '${s.fps.toStringAsFixed(1)} FPS'
@@ -706,6 +707,9 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                             color: s.cameraDrops + s.framesDropped > 0 ? Colors.orangeAccent : Colors.white54,
                             fontSize: 10,
                             fontFamily: 'monospace',
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
                           ),
                         ),
                       const SizedBox(width: 8),
@@ -828,6 +832,24 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                       active: _activeWheel == OpenWheelType.focus,
                       accentColor: _afLanded ? Colors.greenAccent : null,
                       onTap: (_caps?.minFocusDiopters ?? 0) > 0 ? () => _toggleWheel(OpenWheelType.focus) : null,
+                    ),
+
+                    // AUTO EXPOSURE: centre-weighted with face priority, glides to the result.
+                    // Tap keeps the shutter (moves ISO), hold keeps ISO (moves shutter).
+                    CineControlTile(
+                      label: 'AUTO',
+                      value: 'AE',
+                      subtitle: 'HOLD: ISO',
+                      enabled: _streaming,
+                      accentColor: (s?.exposureRamping ?? false) ? Colors.amber : null,
+                      onTap: () {
+                        _engine.setMetering(0); // centre-weighted, faces first
+                        _autoExpose(keepShutter: true);
+                      },
+                      onLongPress: () {
+                        _engine.setMetering(0);
+                        _autoExpose(keepShutter: false);
+                      },
                     ),
 
                     // OIS toggle
