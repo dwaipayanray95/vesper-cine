@@ -166,6 +166,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   bool _isoSweepRunning = false;
   String _savedSettings = '';
 
+  bool _permissionDenied = false; // camera permission refused: status text offers a retry
   int? _textureId;
   String _statusMessage = 'INITIALIZING SENSOR...';
   EngineStatus? _status;
@@ -210,6 +211,14 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       setState(() => _statusMessage = 'NATIVE ENGINE UNAVAILABLE (ANDROID ONLY)');
       return;
     }
+    // Wait for the camera permission before touching the camera: on first
+    // launch the dialog is still up when we get here.
+    if (!await _engine.requestPermissions()) {
+      if (mounted) setState(() => _statusMessage = 'CAMERA PERMISSION NEEDED — TAP TO ASK AGAIN');
+      _permissionDenied = true;
+      return;
+    }
+    _permissionDenied = false;
     final cam = _engine.enumerateCameras().where((c) => c.supportsRaw10).firstOrNull;
     if (cam == null) {
       setState(() => _statusMessage = 'NO RAW10-CAPABLE CAMERA FOUND');
@@ -1022,13 +1031,16 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                           ),
                         )
                       : Center(
-                          child: Text(
-                            _statusMessage,
-                            style: TextStyle(
-                              color: Colors.white.withValues(alpha: 0.3),
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600,
-                              letterSpacing: 1.5,
+                          child: GestureDetector(
+                            onTap: _permissionDenied ? _start : null,
+                            child: Text(
+                              _statusMessage,
+                              style: TextStyle(
+                                color: Colors.white.withValues(alpha: 0.3),
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                letterSpacing: 1.5,
+                              ),
                             ),
                           ),
                         ),

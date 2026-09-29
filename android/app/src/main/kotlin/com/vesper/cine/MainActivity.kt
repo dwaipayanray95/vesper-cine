@@ -7,7 +7,6 @@ import android.content.pm.PackageManager
 import android.hardware.display.DisplayManager
 import android.net.Uri
 import android.os.Build
-import android.os.Bundle
 import android.provider.MediaStore
 import android.view.Surface
 import io.flutter.embedding.android.FlutterActivity
@@ -59,11 +58,20 @@ class MainActivity : FlutterActivity() {
         super.onPause()
     }
 
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        val missing = arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
-            .filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
-        if (missing.isNotEmpty()) requestPermissions(missing.toTypedArray(), 1001)
+    // Camera/microphone permission is requested from Dart (requestPermissions)
+    // and the camera is only opened after the user has answered; opening it
+    // before the grant failed silently on first launch.
+    private var permissionResult: MethodChannel.Result? = null
+
+    private fun missingPermissions() = arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
+        .filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != 1001) return
+        val r = permissionResult ?: return
+        permissionResult = null
+        r.success(checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -125,6 +133,18 @@ class MainActivity : FlutterActivity() {
                         result.success(true)
                     } catch (e: Exception) {
                         result.error("file", e.message, null)
+                    }
+                }
+                "requestPermissions" -> {
+                    // Resolves true once the camera permission is granted (microphone is optional).
+                    val missing = missingPermissions()
+                    if (missing.isEmpty()) {
+                        result.success(true)
+                    } else if (permissionResult != null) {
+                        result.error("busy", "permission request already in progress", null)
+                    } else {
+                        permissionResult = result
+                        requestPermissions(missing.toTypedArray(), 1001)
                     }
                 }
                 "lockRotation" -> {

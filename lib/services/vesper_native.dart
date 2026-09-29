@@ -528,6 +528,17 @@ class VesperNative {
   /// GPU budget guard: auto-pause alignment / HQ / NR when frames would drop.
   void setBudgetGuard(bool on) => _loaded ? _setBudgetGuard(on ? 1 : 0) : null;
 
+  /// Asks for camera + microphone permission and waits for the answer.
+  /// True when the camera may be used.
+  Future<bool> requestPermissions() async {
+    if (!Platform.isAndroid) return true;
+    try {
+      return await _channel.invokeMethod<bool>('requestPermissions') ?? false;
+    } on PlatformException {
+      return false;
+    }
+  }
+
   /// Locks the current landscape orientation (while recording) or frees both.
   Future<void> lockRotation(bool locked) async {
     if (!Platform.isAndroid) return;
