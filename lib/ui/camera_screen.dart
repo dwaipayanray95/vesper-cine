@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -78,6 +79,8 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   String? _calibrationDir;
   String? _deviceModel;
   String _lastCalibrationSaved = '';
+  File? _settingsFile; // persisted user settings (app-private storage)
+  String _savedSettings = '';
 
   int? _textureId;
   String _statusMessage = 'INITIALIZING SENSOR...';
@@ -131,6 +134,11 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     final info = await _engine.deviceInfo();
     _deviceModel = info?['model'] as String?;
     _calibrationDir = info?['calibrationDir'] as String?;
+    final filesDir = info?['filesDir'] as String?;
+    if (filesDir != null) {
+      _settingsFile = File('$filesDir/vesper_settings.json');
+      _loadSettings();
+    }
     await _loadColorProfile();
     if (!await _openAndStream(createTexture: true)) return;
     _poll = Timer.periodic(const Duration(milliseconds: 250), (_) => _onPoll());
@@ -182,6 +190,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (_cameraId == null) return;
     if (state == AppLifecycleState.paused || state == AppLifecycleState.hidden) {
+      _saveSettings();
       if (_recording && !_stopping) {
         _stopping = true;
         _engine.stopRecording();
@@ -194,6 +203,96 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     } else if (state == AppLifecycleState.resumed && !_streaming) {
       _openAndStream();
     }
+  }
+
+  // --- Persisted settings -------------------------------------------------
+  // Everything the user picks survives an app restart, like other camera apps.
+  // Values are re-validated against the camera in _openAndStream().
+  Map<String, Object> _settingsJson() => {
+    'v': 1,
+    'monitoringMode': _monitoringMode,
+    'baseLutMode': _baseLutMode,
+    'cropMode': _cropMode,
+    'speedMode': _speedMode,
+    'shutterAngle': _shutterAngle,
+    'exposureNs': _exposureNs,
+    'fps': _fps,
+    'iso': _iso,
+    'kelvin': _kelvin,
+    'tint': _tint,
+    'focus': _focus,
+    'ois': _ois,
+    'awbAuto': _awbAuto,
+    'afContinuous': _afContinuous,
+    'faceDetect': _faceDetect,
+    'lensCorrection': _lensCorrection,
+    'hotPixelFix': _hotPixelFix,
+    'temporalNr': _temporalNr,
+    'chromaNr': _chromaNr,
+    'nrAlignment': _nrAlignment,
+    'codec': _codec,
+    'tapLocks': _tapLocks,
+    'tapSetsExposure': _tapSetsExposure,
+    'useProfile': _useProfile,
+    'scopeMode': _scopeMode.index,
+  };
+
+  void _loadSettings() {
+    try {
+      final f = _settingsFile;
+      if (f == null || !f.existsSync()) return;
+      final j = jsonDecode(f.readAsStringSync()) as Map<String, dynamic>;
+      T get<T>(String k, T fallback) {
+        final v = j[k];
+        if (v is T) return v;
+        if (fallback is double && v is num) return v.toDouble() as T;
+        if (fallback is int && v is num) return v.toInt() as T;
+        return fallback;
+      }
+
+      _monitoringMode = get('monitoringMode', _monitoringMode).clamp(0, 4);
+      _baseLutMode = get('baseLutMode', _baseLutMode).clamp(0, 1);
+      _cropMode = get('cropMode', _cropMode).clamp(0, 1);
+      _speedMode = get('speedMode', _speedMode);
+      _shutterAngle = get('shutterAngle', _shutterAngle).clamp(0.5, 360.0);
+      _exposureNs = get('exposureNs', _exposureNs).clamp(1000, 1000000000);
+      _fps = get('fps', _fps);
+      _iso = get('iso', _iso);
+      _kelvin = get('kelvin', _kelvin).clamp(2000, 10000);
+      _tint = get('tint', _tint).clamp(-50, 50);
+      _focus = get('focus', _focus);
+      _ois = get('ois', _ois);
+      _awbAuto = get('awbAuto', _awbAuto);
+      _afContinuous = get('afContinuous', _afContinuous);
+      _faceDetect = get('faceDetect', _faceDetect);
+      _lensCorrection = get('lensCorrection', _lensCorrection);
+      _hotPixelFix = get('hotPixelFix', _hotPixelFix);
+      _temporalNr = get('temporalNr', _temporalNr);
+      _chromaNr = get('chromaNr', _chromaNr);
+      _nrAlignment = get('nrAlignment', _nrAlignment);
+      _codec = get('codec', _codec).clamp(0, 1);
+      _tapLocks = get('tapLocks', _tapLocks);
+      _tapSetsExposure = get('tapSetsExposure', _tapSetsExposure);
+      _useProfile = get('useProfile', _useProfile);
+      _scopeMode = ScopeMode.values[get('scopeMode', _scopeMode.index).clamp(0, ScopeMode.values.length - 1)];
+      _savedSettings = jsonEncode(_settingsJson());
+    } catch (_) {
+      // Corrupt or old file: keep defaults; it's rewritten on the next change.
+    }
+  }
+
+  // Called from the status poll (4x/s) and when the app goes to the background:
+  // writes only when something actually changed.
+  void _saveSettings() {
+    final f = _settingsFile;
+    if (f == null) return;
+    final json = jsonEncode(_settingsJson());
+    if (json == _savedSettings) return;
+    _savedSettings = json;
+    try {
+      final tmp = File('${f.path}.tmp')..writeAsStringSync(json, flush: true);
+      tmp.renameSync(f.path); // atomic: a crash mid-write never loses settings
+    } catch (_) {}
   }
 
   // Chart calibrations ship as assets/color_profiles/*.json (tools/calibration);
@@ -252,6 +351,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   String _angleLabel(double a) => '${a >= 10 ? a.toStringAsFixed(a % 1 == 0 ? 0 : 1) : a.toStringAsFixed(2)}°';
 
   void _onPoll() {
+    _saveSettings();
     final s = _engine.status();
     if (s == null || !mounted) return;
     setState(() {

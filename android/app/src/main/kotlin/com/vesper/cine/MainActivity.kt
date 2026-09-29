@@ -98,7 +98,7 @@ class MainActivity : FlutterActivity() {
                 }
                 "deviceInfo" -> {
                     val dir = java.io.File(getExternalFilesDir(null), "calibration").apply { mkdirs() }
-                    result.success(mapOf("model" to Build.MODEL, "device" to Build.DEVICE, "calibrationDir" to dir.absolutePath))
+                    result.success(mapOf("model" to Build.MODEL, "device" to Build.DEVICE, "calibrationDir" to dir.absolutePath, "filesDir" to filesDir.absolutePath))
                 }
                 "publishCalibration" -> {
                     val base = call.argument<String>("base") ?: ""
