@@ -11,6 +11,7 @@ class CineWbPanel extends StatefulWidget {
   final ValueChanged<int> onTintChanged;
   final ValueChanged<bool> onAwbAutoChanged;
   final VoidCallback onClose;
+  final VoidCallback? onPick; // eyedropper: next viewfinder tap samples WB there
 
   const CineWbPanel({
     super.key,
@@ -21,6 +22,7 @@ class CineWbPanel extends StatefulWidget {
     required this.onTintChanged,
     required this.onAwbAutoChanged,
     required this.onClose,
+    this.onPick,
   });
 
   static final List<int> kelvinStops = [for (var k = 2000; k <= 10000; k += 100) k];
@@ -77,11 +79,34 @@ class _CineWbPanelState extends State<CineWbPanel> {
           ),
           const SizedBox(height: 6),
 
-          // Auto / Manual toggle
-          Segmented(
-            options: const ['MANUAL', 'GOOGLE AWB'],
-            selected: awbAuto ? 1 : 0,
-            onSelected: (i) => widget.onAwbAutoChanged(i == 1),
+          // Auto / Manual toggle + eyedropper
+          Row(
+            children: [
+              Expanded(
+                child: Segmented(
+                  options: const ['MANUAL', 'GOOGLE AWB'],
+                  selected: awbAuto ? 1 : 0,
+                  onSelected: (i) => widget.onAwbAutoChanged(i == 1),
+                ),
+              ),
+              const SizedBox(width: 6),
+              GestureDetector(
+                onTap: widget.onPick,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: Colors.white10,
+                    borderRadius: BorderRadius.circular(4),
+                    border: Border.all(color: widget.onPick == null ? Colors.white12 : Colors.white38),
+                  ),
+                  child: Icon(
+                    Icons.colorize_rounded,
+                    size: 15,
+                    color: widget.onPick == null ? Colors.white24 : Colors.white,
+                  ),
+                ),
+              ),
+            ],
           ),
           const SizedBox(height: 6),
 

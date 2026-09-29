@@ -65,6 +65,8 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   Offset? _focusMark; // last tap-to-focus point (normalised), shown briefly
   int _codec = 0; // 0 HEVC, 1 AV1
   int _aeGen = 0; // bumps per AE request so an older run stops refining
+  bool _wbPickMode = false; // next viewfinder tap picks white balance
+  Offset? _wbPickMark; // where WB was last picked (shown briefly)
   bool _tapLocks = false; // tap: AF then hold (AF-L) instead of tracking (AF-C)
   bool _tapSetsExposure = true; // tap also spot-meters exposure at that point
   bool _profileAvailable = false; // a chart calibration exists for this device/camera
@@ -322,17 +324,29 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     await _engine.resizeViewfinderTexture(w, h);
   }
 
-  void _lockWhiteBalance() {
-    final r = _engine.lockWhiteBalance();
+  // Eyedropper: after PICK in the WB panel, the next viewfinder tap samples
+  // white balance there instead of focusing.
+  Future<void> _pickWhiteBalanceAt(Offset p) async {
+    setState(() {
+      _wbPickMode = false;
+      _wbPickMark = p;
+    });
+    _engine.setAutoWhiteBalance(false);
+    final r = await _engine.pickWhiteBalance(p.dx, p.dy);
+    if (!mounted) return;
+    Future<void>.delayed(const Duration(milliseconds: 1200), () {
+      if (mounted) setState(() => _wbPickMark = null);
+    });
     if (r == null) {
-      _toast("Couldn't meter white balance — fill the centre with something white/grey and brighter");
+      _toast("Couldn't read white balance there — pick something white or grey and well lit");
       return;
     }
     setState(() {
+      _awbAuto = false;
       _kelvin = r.$1.round();
       _tint = r.$2.round();
     });
-    _toast('White balance locked: ${_kelvin}K, tint $_tint');
+    _toast('White balance picked: ${_kelvin}K, tint ${_tint > 0 ? '+' : ''}$_tint');
   }
 
   String _fpsLabel(double f) => f % 1 == 0 ? f.toStringAsFixed(0) : f.toStringAsFixed(f * 1000 % 10 == 0 ? 2 : 3);
@@ -550,7 +564,10 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                         builder: (ctx, box) => GestureDetector(
                           behavior: HitTestBehavior.opaque,
                           onTapUp: (d) {
-                            if (_activeWheel != OpenWheelType.none) {
+                            final p = Offset(d.localPosition.dx / box.maxWidth, d.localPosition.dy / box.maxHeight);
+                            if (_wbPickMode) {
+                              _pickWhiteBalanceAt(p);
+                            } else if (_activeWheel != OpenWheelType.none) {
                               setState(() => _activeWheel = OpenWheelType.none);
                             } else {
                               _tapToFocus(
@@ -558,10 +575,10 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                               );
                             }
                           },
-                          onLongPressStart: (d) => _tapToFocus(
-                            Offset(d.localPosition.dx / box.maxWidth, d.localPosition.dy / box.maxHeight),
-                            lock: true,
-                          ),
+                          onLongPressStart: (d) {
+                            final p = Offset(d.localPosition.dx / box.maxWidth, d.localPosition.dy / box.maxHeight);
+                            _wbPickMode ? _pickWhiteBalanceAt(p) : _tapToFocus(p, lock: true);
+                          },
                           child: Stack(
                             children: [
                               Positioned.fill(
@@ -576,6 +593,35 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                                   child: Container(
                                     decoration: BoxDecoration(border: Border.all(color: Colors.amber, width: 1.5)),
                                   ),
+                                ),
+                              if (_wbPickMode)
+                                Positioned(
+                                  left: 0,
+                                  right: 0,
+                                  top: 12,
+                                  child: Center(
+                                    child: GestureDetector(
+                                      onTap: () => setState(() => _wbPickMode = false),
+                                      child: Container(
+                                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                                        decoration: BoxDecoration(
+                                          color: const Color(0xCC000000),
+                                          borderRadius: BorderRadius.circular(4),
+                                          border: Border.all(color: Colors.amber),
+                                        ),
+                                        child: const Text(
+                                          'TAP SOMETHING WHITE OR GREY TO SET WB  ·  ✕',
+                                          style: TextStyle(color: Colors.amber, fontSize: 10, fontWeight: FontWeight.bold),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              if (_wbPickMark != null)
+                                Positioned(
+                                  left: _wbPickMark!.dx * box.maxWidth - 14,
+                                  top: _wbPickMark!.dy * box.maxHeight - 14,
+                                  child: const Icon(Icons.colorize_rounded, color: Colors.amber, size: 28),
                                 ),
                               if (_focusMark != null)
                                 Positioned(
@@ -834,24 +880,6 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                       onTap: (_caps?.minFocusDiopters ?? 0) > 0 ? () => _toggleWheel(OpenWheelType.focus) : null,
                     ),
 
-                    // AUTO EXPOSURE: centre-weighted with face priority, glides to the result.
-                    // Tap keeps the shutter (moves ISO), hold keeps ISO (moves shutter).
-                    CineControlTile(
-                      label: 'AUTO',
-                      value: 'AE',
-                      subtitle: 'HOLD: ISO',
-                      enabled: _streaming,
-                      accentColor: (s?.exposureRamping ?? false) ? Colors.amber : null,
-                      onTap: () {
-                        _engine.setMetering(0); // centre-weighted, faces first
-                        _autoExpose(keepShutter: true);
-                      },
-                      onLongPress: () {
-                        _engine.setMetering(0);
-                        _autoExpose(keepShutter: false);
-                      },
-                    ),
-
                     // OIS toggle
                     CineControlTile(
                       label: 'STAB',
@@ -864,23 +892,6 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                       },
                     ),
 
-                    // WB Spot Color Picker
-                    GestureDetector(
-                      onTap: _streaming ? _lockWhiteBalance : null,
-                      child: Container(
-                        width: 74,
-                        margin: const EdgeInsets.symmetric(vertical: 2.5),
-                        padding: const EdgeInsets.symmetric(vertical: 5),
-                        decoration: BoxDecoration(
-                          color: const Color(0xE0101216),
-                          borderRadius: BorderRadius.circular(6),
-                          border: Border.all(color: Colors.white12),
-                        ),
-                        child: const Center(
-                          child: Icon(Icons.colorize_rounded, color: Colors.white70, size: 16),
-                        ),
-                      ),
-                    ),
                   ],
                 ),
               ),
@@ -1109,6 +1120,12 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
             if (!_awbAuto) _engine.setKelvinTint(_kelvin, _tint);
           },
           onClose: () => setState(() => _activeWheel = OpenWheelType.none),
+          onPick: _streaming
+              ? () => setState(() {
+                  _activeWheel = OpenWheelType.none;
+                  _wbPickMode = true;
+                })
+              : null,
         );
 
       case OpenWheelType.focus:

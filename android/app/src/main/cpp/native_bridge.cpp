@@ -218,22 +218,54 @@ void setColorLocked(const ColorState& c) { gSettings.color = c; }
 
 // Mean of a 128x128 raw patch at the frame centre, per channel, skipping
 // clipped pixels — what a camera's own AWB statistics block measures.
+float gWbPoint[2] = {0.5f, 0.5f}; // eyedropper sample point, output-normalised (gStateMutex)
+void outputToRawPx(const FrameGeometry& g, float ox, float oy, float& rx, float& ry);
+
+// Raw R/G/B of a small patch around the eyedropper point (frame centre by
+// default), shading-corrected, before white balance. Feeds tap-to-pick WB.
 void meterCentre(const RawFrame& f) {
     const CaptureMetadata& m = *f.meta;
-    const int cfa = gCamera->sensorInfo().cfa;
-    const int x0 = (f.width / 2 - 64) & ~3, y0 = (f.height / 2 - 64) & ~1;
+    const SensorInfo& info = gCamera->sensorInfo();
+    const int cfa = info.cfa;
+    FrameGeometry geo;
+    float px, py;
+    bool lensCorrection;
+    {
+        std::lock_guard<std::mutex> lk(gStateMutex);
+        geo = gGeom;
+        px = gWbPoint[0];
+        py = gWbPoint[1];
+        lensCorrection = gSettings.lensCorrection;
+    }
+    float rx, ry;
+    outputToRawPx(geo, px, py, rx, ry);
+    // The viewfinder is lens-corrected: sample where that point came from on the sensor.
+    if (lensCorrection && info.hasDistortion) distortRaw(info, geo.sensorMap, rx, ry);
+    const int half = std::max(16, f.width / 80) & ~3; // ~2.5% of the frame wide
+    const int x0 = std::clamp(static_cast<int>(rx) - half, 0, std::max(0, f.width - 2 * half)) & ~3;
+    const int y0 = std::clamp(static_cast<int>(ry) - half, 0, std::max(0, f.height - 2 * half)) & ~1;
+    // Per-channel lens shading gain at the patch (the map spans the sensor array).
+    float gain[4] = {1, 1, 1, 1};
+    if (!info.lensShadingApplied && m.shadingCols > 0 && m.shadingRows > 0 &&
+        m.shadingMap.size() >= static_cast<size_t>(m.shadingCols * m.shadingRows * 4)) {
+        float ax = (x0 + half) * geo.sensorMap[0] + geo.sensorMap[2];
+        float ay = (y0 + half) * geo.sensorMap[1] + geo.sensorMap[3];
+        int gx = std::clamp(static_cast<int>(std::lround(ax / std::max(1, info.preWidth) * (m.shadingCols - 1))), 0, m.shadingCols - 1);
+        int gy = std::clamp(static_cast<int>(std::lround(ay / std::max(1, info.preHeight) * (m.shadingRows - 1))), 0, m.shadingRows - 1);
+        for (int c = 0; c < 4; ++c) gain[c] = m.shadingMap[(gy * m.shadingCols + gx) * 4 + c];
+    }
     double sum[3] = {0, 0, 0};
     int count[3] = {0, 0, 0};
-    for (int y = y0; y < y0 + 128; ++y) {
+    for (int y = y0; y < y0 + 2 * half && y < f.height; ++y) {
         const uint8_t* row = f.data + static_cast<size_t>(y) * f.rowStride;
-        for (int x = x0; x < x0 + 128; x += 4) {
+        for (int x = x0; x < x0 + 2 * half && x + 3 < f.width; x += 4) {
             const uint8_t* g = row + (x / 4) * 5;
             if (g + 5 > f.data + f.size) return;
             for (int i = 0; i < 4; ++i) {
                 int dn = (g[i] << 2) | ((g[4] >> (2 * i)) & 3);
                 int site = cfaSite(cfa, x + i, y);
                 if (dn >= m.whiteLevel - 1) continue;
-                double v = (dn - m.blackLevel[site]) / (m.whiteLevel - m.blackLevel[site]);
+                double v = (dn - m.blackLevel[site]) / (m.whiteLevel - m.blackLevel[site]) * gain[site];
                 int ch = site == 0 ? 0 : (site == 3 ? 2 : 1);
                 sum[ch] += v;
                 ++count[ch];
@@ -882,7 +914,16 @@ EXPORT void vesper_set_kelvin_tint(int32_t kelvin, int32_t tint) {
     setColorLocked(gColor.fromKelvinTint(kelvin, tint));
 }
 
-// One-shot white balance off the raw centre patch. Writes the equivalent
+// Eyedropper: sample white balance at an output-normalised point from the next
+// frames. Poll vesper_lock_white_balance until it stops returning -1.
+EXPORT void vesper_pick_white_balance(float ox, float oy) {
+    std::lock_guard<std::mutex> lk(gStateMutex);
+    gWbPoint[0] = std::clamp(ox, 0.0f, 1.0f);
+    gWbPoint[1] = std::clamp(oy, 0.0f, 1.0f);
+    gHaveCentreSample = false;
+}
+
+// One-shot white balance off the raw eyedropper patch (centre by default). Writes the equivalent
 // Kelvin/tint back so the UI dial can follow. Returns 0 on success.
 EXPORT int32_t vesper_lock_white_balance(double* outKelvin, double* outTint) {
     std::lock_guard<std::mutex> lk(gStateMutex);
@@ -890,6 +931,7 @@ EXPORT int32_t vesper_lock_white_balance(double* outKelvin, double* outTint) {
     Vec3 n = gCentreRaw;
     if (n[0] < 0.005f || n[1] < 0.005f || n[2] < 0.005f) return -2; // too dark to trust
     ColorState c = gColor.fromCameraNeutral(n);
+    gSettings.awbAuto = false;
     setColorLocked(c);
     if (outKelvin) *outKelvin = c.kelvin;
     if (outTint) *outTint = c.tint;

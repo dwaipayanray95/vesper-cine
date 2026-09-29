@@ -171,6 +171,7 @@ class VesperNative {
   late final int Function(Pointer<Utf8>, int) _status;
   late final void Function() _close;
   late final void Function(double) _focusPullTo;
+  late final void Function(double, double) _pickWb;
   late final void Function(double, double, int) _focusAt;
   late final void Function(double) _setFocusSpeed;
   late final void Function() _focusLock;
@@ -247,6 +248,9 @@ class VesperNative {
       _close = _lib.lookupFunction<Void Function(), void Function()>('vesper_close');
       _focusAt = _lib.lookupFunction<Void Function(Float, Float, Int32), void Function(double, double, int)>(
         'vesper_focus_at',
+      );
+      _pickWb = _lib.lookupFunction<Void Function(Float, Float), void Function(double, double)>(
+        'vesper_pick_white_balance',
       );
       _focusPullTo = _lib.lookupFunction<Void Function(Float), void Function(double)>('vesper_focus_pull_to');
       _setFocusSpeed = _lib.lookupFunction<Void Function(Float), void Function(double)>('vesper_set_focus_speed');
@@ -436,6 +440,27 @@ class VesperNative {
   /// Hardware PDAF + laser AF at an upright viewfinder point. lock: one scan, then hold (AF-L);
   /// otherwise keep tracking that region (AF-C).
   void focusAt(double x, double y, {required bool lock}) => _loaded ? _focusAt(x, y, lock ? 1 : 0) : null;
+
+  /// Eyedropper: sample white balance at an upright viewfinder point (0..1).
+  /// Returns (kelvin, tint), or null if the patch is too dark or no frame arrived.
+  Future<(double, double)?> pickWhiteBalance(double x, double y) async {
+    if (!_loaded) return null;
+    _pickWb(x, y);
+    for (var i = 0; i < 20; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      final k = calloc<Double>();
+      final t = calloc<Double>();
+      try {
+        final r = _lockWb(k, t);
+        if (r == 0) return (k.value, t.value);
+        if (r != -1) return null; // sampled, but too dark to trust
+      } finally {
+        calloc.free(k);
+        calloc.free(t);
+      }
+    }
+    return null;
+  }
 
   /// Smooth focus rack to a distance in diopters.
   void focusPullTo(double diopters) => _loaded ? _focusPullTo(diopters) : null;
