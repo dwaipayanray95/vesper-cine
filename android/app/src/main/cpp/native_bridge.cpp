@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <iterator>
 #include <chrono>
 #include <condition_variable>
 #include <thread>
@@ -280,6 +281,91 @@ void meterCentre(const RawFrame& f) {
 
 std::atomic<bool> gExposureRamping{false}; // auto-exposure glide in progress
 
+// --- Scopes -----------------------------------------------------------------
+// Luma histogram + waveform of the recorded signal (Apple Log Y', BT.2020
+// weights), computed from a sparse raw grid in output orientation so the
+// waveform's x axis matches the viewfinder. Only while the overlay is shown.
+constexpr int kHistBins = 64, kWaveCols = 128, kWaveBins = 64, kWaveRows = 72;
+std::atomic<bool> gScopesEnabled{false};
+std::mutex gScopeMutex;
+float gHist[kHistBins];                 // normalised to the tallest bin
+float gWave[kWaveCols * kWaveBins];     // fraction of each column's samples per bin
+bool gScopesValid = false;
+
+float appleLogEncode(float x) {
+    const float R0 = -0.05641088f, Rt = 0.01f, c = 47.28711236f;
+    const float beta = 0.00964052f, gamma = 0.08550479f, delta = 0.69336945f;
+    if (x >= Rt) return gamma * std::log2(x + beta) + delta;
+    if (x >= R0) return c * (x - R0) * (x - R0);
+    return 0.0f;
+}
+
+void computeScopes(const RawFrame& f) {
+    const CaptureMetadata& m = *f.meta;
+    const SensorInfo& info = gCamera->sensorInfo();
+    FrameGeometry geo;
+    ColorState color;
+    {
+        std::lock_guard<std::mutex> lk(gStateMutex);
+        geo = gGeom;
+        color = gSettings.color;
+    }
+    const bool shade = !info.lensShadingApplied && m.shadingCols > 0 && m.shadingRows > 0 &&
+                       m.shadingMap.size() >= static_cast<size_t>(m.shadingCols * m.shadingRows * 4);
+    static int hist[kHistBins];
+    static int wave[kWaveCols * kWaveBins];
+    std::fill(std::begin(hist), std::end(hist), 0);
+    std::fill(std::begin(wave), std::end(wave), 0);
+    int colN[kWaveCols] = {};
+    for (int col = 0; col < kWaveCols; ++col) {
+        for (int row = 0; row < kWaveRows; ++row) {
+            float rx, ry;
+            outputToRawPx(geo, (col + 0.5f) / kWaveCols, (row + 0.5f) / kWaveRows, rx, ry);
+            int x = static_cast<int>(rx) & ~1, y = static_cast<int>(ry) & ~1;
+            if (x < 0 || y < 0 || x + 1 >= f.width || y + 1 >= f.height) continue;
+            float gain[4] = {1, 1, 1, 1};
+            if (shade) {
+                float ax = x * geo.sensorMap[0] + geo.sensorMap[2], ay = y * geo.sensorMap[1] + geo.sensorMap[3];
+                int gx = std::clamp(static_cast<int>(ax / std::max(1, info.preWidth) * (m.shadingCols - 1) + 0.5f), 0, m.shadingCols - 1);
+                int gy = std::clamp(static_cast<int>(ay / std::max(1, info.preHeight) * (m.shadingRows - 1) + 0.5f), 0, m.shadingRows - 1);
+                for (int c = 0; c < 4; ++c) gain[c] = m.shadingMap[(gy * m.shadingCols + gx) * 4 + c];
+            }
+            float rgb[3] = {0, 0, 0};
+            for (int k = 0; k < 4; ++k) {
+                int px = x + (k & 1), py = y + (k >> 1);
+                const uint8_t* grp = f.data + static_cast<size_t>(py) * f.rowStride + (px / 4) * 5;
+                if (grp + 5 > f.data + f.size) return;
+                int i = px & 3;
+                int dn = (grp[i] << 2) | ((grp[4] >> (2 * i)) & 3);
+                int site = cfaSite(info.cfa, px, py);
+                float v = std::max(0.0f, (dn - m.blackLevel[site]) / (m.whiteLevel - m.blackLevel[site])) * gain[site];
+                int ch = site == 0 ? 0 : (site == 3 ? 2 : 1);
+                rgb[ch] += ch == 1 ? 0.5f * v : v;
+            }
+            float cam[3];
+            for (int c = 0; c < 3; ++c) cam[c] = std::min(rgb[c] * color.wbGains[c], 1.0f); // highlight clip, as unpack.comp
+            float y2020 = 0;
+            const float w[3] = {0.2627f, 0.6780f, 0.0593f};
+            for (int r = 0; r < 3; ++r) {
+                float lin = color.camToRec2020[r * 3] * cam[0] + color.camToRec2020[r * 3 + 1] * cam[1] + color.camToRec2020[r * 3 + 2] * cam[2];
+                y2020 += w[r] * appleLogEncode(lin);
+            }
+            float code = std::clamp(y2020, 0.0f, 1.0f);
+            ++hist[std::min(kHistBins - 1, static_cast<int>(code * kHistBins))];
+            ++wave[col * kWaveBins + std::min(kWaveBins - 1, static_cast<int>(code * kWaveBins))];
+            ++colN[col];
+        }
+    }
+    int maxBin = 1;
+    for (int b = 0; b < kHistBins; ++b) maxBin = std::max(maxBin, hist[b]);
+    std::lock_guard<std::mutex> lk(gScopeMutex);
+    for (int b = 0; b < kHistBins; ++b) gHist[b] = static_cast<float>(hist[b]) / maxBin;
+    for (int col = 0; col < kWaveCols; ++col)
+        for (int b = 0; b < kWaveBins; ++b)
+            gWave[col * kWaveBins + b] = colN[col] ? static_cast<float>(wave[col * kWaveBins + b]) / colN[col] : 0.0f;
+    gScopesValid = true;
+}
+
 // Whole-frame metering on a sparse grid of 2x2 quads (~12k samples), from
 // raw data before white balance: log-average green for mid-tones and the
 // 99.5th percentile of each quad's brightest channel for highlight clipping.
@@ -485,6 +571,7 @@ void onFrame(const RawFrame& f) {
     feedFocus(frameNs * 1e-9);
     if ((++frameIndex & 3) == 0) meterCentre(f);
     if ((frameIndex & 3) == 2) meterFrame(f);
+    if ((frameIndex & 3) == 3 && gScopesEnabled) computeScopes(f);
 
     Settings s;
     {
@@ -912,6 +999,26 @@ EXPORT void vesper_set_kelvin_tint(int32_t kelvin, int32_t tint) {
     std::lock_guard<std::mutex> lk(gStateMutex);
     gSettings.awbAuto = false;
     setColorLocked(gColor.fromKelvinTint(kelvin, tint));
+}
+
+// Histogram / waveform overlay: computed only while enabled (~6 Hz at 24 fps).
+EXPORT void vesper_set_scopes(int32_t enable) {
+    gScopesEnabled = enable != 0;
+    if (!enable) {
+        std::lock_guard<std::mutex> lk(gScopeMutex);
+        gScopesValid = false;
+    }
+}
+
+// Copies the latest scopes: hist[64] (0..1 of the tallest bin) and
+// wave[128 columns x 64 bins] (column-major, fraction of that column's
+// samples; bin 0 = code value 0). Returns 0, or -1 if none yet.
+EXPORT int32_t vesper_get_scopes(float* hist, float* wave) {
+    std::lock_guard<std::mutex> lk(gScopeMutex);
+    if (!gScopesValid) return -1;
+    if (hist) std::copy(gHist, gHist + kHistBins, hist);
+    if (wave) std::copy(gWave, gWave + kWaveCols * kWaveBins, wave);
+    return 0;
 }
 
 // Eyedropper: sample white balance at an output-normalised point from the next

@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import '../services/vesper_native.dart';
 import 'cine_control_tile.dart';
 import 'focus_panel.dart';
+import 'scopes_overlay.dart';
 import 'settings_sheet.dart';
 import 'wb_panel.dart';
 import 'wheel_dial.dart';
@@ -65,6 +66,8 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   Offset? _focusMark; // last tap-to-focus point (normalised), shown briefly
   int _codec = 0; // 0 HEVC, 1 AV1
   int _aeGen = 0; // bumps per AE request so an older run stops refining
+  ScopeMode _scopeMode = ScopeMode.off;
+  Scopes? _scopes;
   bool _wbPickMode = false; // next viewfinder tap picks white balance
   Offset? _wbPickMark; // where WB was last picked (shown briefly)
   bool _tapLocks = false; // tap: AF then hold (AF-L) instead of tracking (AF-C)
@@ -158,6 +161,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     _engine.setChromaNr(_chromaNr);
     _engine.setNrAlignment(_nrAlignment);
     _engine.useColorProfile(_useProfile);
+    _engine.setScopes(_scopeMode != ScopeMode.off);
     _engine.setFrameRate(_fps);
     _applyShutter();
 
@@ -257,6 +261,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
         _tint = s.tint.round();
       }
       if (_afContinuous || s.focusPulling || s.focusLocked) _focus = s.focusDiopters;
+      if (_scopeMode != ScopeMode.off) _scopes = _engine.scopes() ?? _scopes;
     });
     if (s.calibrationSaved.isNotEmpty && s.calibrationSaved != _lastCalibrationSaved) {
       _lastCalibrationSaved = s.calibrationSaved;
@@ -594,6 +599,12 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                                     decoration: BoxDecoration(border: Border.all(color: Colors.amber, width: 1.5)),
                                   ),
                                 ),
+                              if (_scopeMode != ScopeMode.off)
+                                Positioned(
+                                  right: 8,
+                                  bottom: 8,
+                                  child: ScopesOverlay(scopes: _scopes, mode: _scopeMode),
+                                ),
                               if (_wbPickMode)
                                 Positioned(
                                   left: 0,
@@ -878,6 +889,20 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                       active: _activeWheel == OpenWheelType.focus,
                       accentColor: _afLanded ? Colors.greenAccent : null,
                       onTap: (_caps?.minFocusDiopters ?? 0) > 0 ? () => _toggleWheel(OpenWheelType.focus) : null,
+                    ),
+
+                    // SCOPES: cycles OFF -> HIST -> WAVE -> H + W (overlay, never blocks taps)
+                    CineControlTile(
+                      label: 'SCOPE',
+                      value: _scopeMode.label,
+                      active: _scopeMode != ScopeMode.off,
+                      onTap: () {
+                        setState(() {
+                          _scopeMode = ScopeMode.values[(_scopeMode.index + 1) % ScopeMode.values.length];
+                          if (_scopeMode == ScopeMode.off) _scopes = null;
+                        });
+                        _engine.setScopes(_scopeMode != ScopeMode.off);
+                      },
                     ),
 
                     // OIS toggle

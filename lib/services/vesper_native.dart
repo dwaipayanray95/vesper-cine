@@ -1,3 +1,4 @@
+import 'dart:typed_data';
 import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
@@ -80,6 +81,14 @@ class EngineStatus {
       focusPulling = (j['focusPulling'] as bool?) ?? false,
       exposureRamping = (j['exposureRamping'] as bool?) ?? false,
       focusLocked = (j['focusLocked'] as bool?) ?? false;
+}
+
+/// Luma scopes of the recorded Apple Log signal (see vesper_get_scopes).
+class Scopes {
+  static const histBins = 64, waveCols = 128, waveBins = 64;
+  final Float32List histogram;
+  final Float32List waveform;
+  Scopes(this.histogram, this.waveform);
 }
 
 class RawMode {
@@ -172,6 +181,8 @@ class VesperNative {
   late final void Function() _close;
   late final void Function(double) _focusPullTo;
   late final void Function(double, double) _pickWb;
+  late final void Function(int) _setScopes;
+  late final int Function(Pointer<Float>, Pointer<Float>) _getScopes;
   late final void Function(double, double, int) _focusAt;
   late final void Function(double) _setFocusSpeed;
   late final void Function() _focusLock;
@@ -249,6 +260,11 @@ class VesperNative {
       _focusAt = _lib.lookupFunction<Void Function(Float, Float, Int32), void Function(double, double, int)>(
         'vesper_focus_at',
       );
+      _setScopes = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_scopes');
+      _getScopes = _lib
+          .lookupFunction<Int32 Function(Pointer<Float>, Pointer<Float>), int Function(Pointer<Float>, Pointer<Float>)>(
+            'vesper_get_scopes',
+          );
       _pickWb = _lib.lookupFunction<Void Function(Float, Float), void Function(double, double)>(
         'vesper_pick_white_balance',
       );
@@ -440,6 +456,27 @@ class VesperNative {
   /// Hardware PDAF + laser AF at an upright viewfinder point. lock: one scan, then hold (AF-L);
   /// otherwise keep tracking that region (AF-C).
   void focusAt(double x, double y, {required bool lock}) => _loaded ? _focusAt(x, y, lock ? 1 : 0) : null;
+
+  /// Histogram/waveform computation (off unless an overlay is shown).
+  void setScopes(bool on) => _loaded ? _setScopes(on ? 1 : 0) : null;
+
+  /// Latest scopes: histogram (64 bins, 0..1 of the tallest) and waveform
+  /// (128 columns x 64 bins, column-major, fraction of the column's samples).
+  Scopes? scopes() {
+    if (!_loaded) return null;
+    final h = calloc<Float>(Scopes.histBins);
+    final w = calloc<Float>(Scopes.waveCols * Scopes.waveBins);
+    try {
+      if (_getScopes(h, w) != 0) return null;
+      return Scopes(
+        Float32List.fromList(h.asTypedList(Scopes.histBins)),
+        Float32List.fromList(w.asTypedList(Scopes.waveCols * Scopes.waveBins)),
+      );
+    } finally {
+      calloc.free(h);
+      calloc.free(w);
+    }
+  }
 
   /// Eyedropper: sample white balance at an upright viewfinder point (0..1).
   /// Returns (kelvin, tint), or null if the patch is too dark or no frame arrived.
