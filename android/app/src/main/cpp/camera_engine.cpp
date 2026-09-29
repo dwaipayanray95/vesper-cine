@@ -132,6 +132,8 @@ void CameraEngine::querySensorInfo(const ACameraMetadata* m) {
         s.minIso = e.data.i32[0];
         s.maxIso = e.data.i32[1];
     }
+    if (ACameraMetadata_getConstEntry(m, ACAMERA_SENSOR_MAX_ANALOG_SENSITIVITY, &e) == ACAMERA_OK && e.count >= 1)
+        s.maxAnalogIso = e.data.i32[0];
     if (ACameraMetadata_getConstEntry(m, ACAMERA_LENS_INFO_MINIMUM_FOCUS_DISTANCE, &e) == ACAMERA_OK) s.minFocusDiopters = e.data.f[0];
     s.preWidth = s.activeWidth;
     s.preHeight = s.activeHeight;
@@ -184,10 +186,10 @@ void CameraEngine::querySensorInfo(const ACameraMetadata* m) {
         cal.illuminant2Kelvin = illuminantToKelvin(e.data.u8[0]);
 
     LOGI("Sensor: white=%d black=[%.1f %.1f %.1f %.1f] CFA=%d orient=%d active=%dx%d shadingMap=%dx%d (applied=%d) "
-         "tsRealtime=%d ISO %d-%d minFocus=%.2fD",
+         "tsRealtime=%d ISO %d-%d (analog to %d) minFocus=%.2fD",
          s.whiteLevel, s.blackLevel[0], s.blackLevel[1], s.blackLevel[2], s.blackLevel[3], s.cfa, s.orientation,
          s.activeWidth, s.activeHeight, s.shadingCols, s.shadingRows, s.lensShadingApplied, s.timestampRealtime,
-         s.minIso, s.maxIso, s.minFocusDiopters);
+         s.minIso, s.maxIso, s.maxAnalogIso, s.minFocusDiopters);
     LOGI("Lens: distortion=%d [k1 %.4f k2 %.4f k3 %.4f p1 %.5f p2 %.5f] f=%.1f/%.1f c=%.1f/%.1f pre=%d,%d %dx%d afRegions=%d faces=%d",
          s.hasDistortion, s.distortion[0], s.distortion[1], s.distortion[2], s.distortion[3], s.distortion[4],
          s.intrinsics[0], s.intrinsics[1], s.intrinsics[2], s.intrinsics[3], s.preLeft, s.preTop, s.preWidth, s.preHeight,

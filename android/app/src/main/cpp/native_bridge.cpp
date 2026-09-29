@@ -3,6 +3,7 @@
 #include "camera_engine.h"
 #include "color_science.h"
 #include "focus_controller.h"
+#include "iso_analysis.h"
 #include "recorder.h"
 #include "vulkan_engine.h"
 
@@ -554,6 +555,158 @@ void ensureFocusThread() {
     gFocusThread = std::thread(focusThreadMain);
 }
 
+// --- Native ISO analysis ----------------------------------------------------
+// Dark-frame ISO sweep (lens covered): at each ISO, the dark noise of the green
+// pixels in a central patch; iso_analysis.cpp turns that into base / HCG ISOs.
+struct SweepState {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool collecting = false;
+    int skip = 0;                       // frames to ignore after an ISO change (pipeline latency)
+    int64_t exposureNs = 0;
+    std::vector<IsoSample> frames;      // this step's measurements
+    std::string resultPath, error, outPath, device;
+    bool cancel = false;
+};
+SweepState gSweep;
+std::atomic<float> gSweepProgress{-1.0f}; // -1 idle, 0..1 running
+std::thread gSweepThread;
+
+// Mean and (outlier-trimmed) std of the green pixels in a central 512x512 raw
+// patch, as a fraction of the black..white range.
+bool darkStats(const RawFrame& f, IsoSample& out) {
+    const CaptureMetadata& m = *f.meta;
+    const int cfa = gCamera->sensorInfo().cfa;
+    const int half = std::min({256, f.width / 4, f.height / 4}) & ~3;
+    const int x0 = (f.width / 2 - half) & ~3, y0 = (f.height / 2 - half) & ~1;
+    auto pass = [&](double centre, double limit, double& mean, double& sd) {
+        double sum = 0, sq = 0;
+        long n = 0;
+        for (int y = y0; y < y0 + 2 * half; ++y) {
+            const uint8_t* row = f.data + static_cast<size_t>(y) * f.rowStride;
+            for (int x = x0; x < x0 + 2 * half; x += 4) {
+                const uint8_t* g = row + (x / 4) * 5;
+                if (g + 5 > f.data + f.size) return;
+                for (int i = 0; i < 4; ++i) {
+                    int site = cfaSite(cfa, x + i, y);
+                    if (site != 1 && site != 2) continue;
+                    int dn = (g[i] << 2) | ((g[4] >> (2 * i)) & 3);
+                    double v = (dn - m.blackLevel[site]) / (m.whiteLevel - m.blackLevel[site]);
+                    if (limit > 0 && std::fabs(v - centre) > limit) continue; // hot pixels
+                    sum += v;
+                    sq += v * v;
+                    ++n;
+                }
+            }
+        }
+        if (n < 100) { mean = 0; sd = 0; return; }
+        mean = sum / n;
+        sd = std::sqrt(std::max(0.0, sq / n - mean * mean));
+    };
+    double mean, sd;
+    pass(0, 0, mean, sd);
+    if (!(sd > 0)) return false;
+    pass(mean, 5 * sd, mean, sd);
+    if (!(sd > 0)) return false;
+    out.iso = m.iso;
+    out.mean = mean;
+    out.sigma = sd;
+    return true;
+}
+
+void feedSweep(const RawFrame& f) {
+    std::lock_guard<std::mutex> lk(gSweep.mutex);
+    if (!gSweep.collecting) return;
+    if (gSweep.skip > 0) { --gSweep.skip; return; }
+    if (std::llabs(f.meta->exposureNs - gSweep.exposureNs) > gSweep.exposureNs / 20) return;
+    IsoSample s;
+    if (darkStats(f, s)) gSweep.frames.push_back(s);
+    if (gSweep.frames.size() >= 4) {
+        gSweep.collecting = false;
+        gSweep.cv.notify_all();
+    }
+}
+
+void applyShutter();
+
+void isoSweepMain() {
+    const SensorInfo info = gCamera->sensorInfo();
+    const double frameNs = 1e9 / gCamera->frameRate();
+    const int64_t exposureNs = static_cast<int64_t>(std::min(20e6, frameNs * 0.9));
+    std::vector<int> isos;
+    for (double iso = info.minIso; iso < info.maxIso * 0.98; iso *= std::cbrt(2.0)) isos.push_back(static_cast<int>(std::lround(iso)));
+    isos.push_back(info.maxIso);
+    std::vector<IsoSample> samples;
+    std::string error;
+    for (size_t i = 0; i < isos.size(); ++i) {
+        {
+            std::lock_guard<std::mutex> lk(gSweep.mutex);
+            if (gSweep.cancel) { error = "cancelled"; break; }
+            gSweep.frames.clear();
+            gSweep.exposureNs = exposureNs;
+            gSweep.skip = 5;
+            gSweep.collecting = true;
+        }
+        gCamera->setExposure(exposureNs, isos[i]);
+        std::unique_lock<std::mutex> lk(gSweep.mutex);
+        gSweep.cv.wait_for(lk, std::chrono::seconds(3), [] { return !gSweep.collecting || gSweep.cancel; });
+        gSweep.collecting = false;
+        if (gSweep.frames.size() >= 2) {
+            // Median frame by sigma; the ISO the camera actually applied.
+            auto fr = gSweep.frames;
+            std::sort(fr.begin(), fr.end(), [](const IsoSample& a, const IsoSample& b) { return a.sigma < b.sigma; });
+            IsoSample med = fr[fr.size() / 2];
+            if (samples.empty() || med.iso > samples.back().iso) samples.push_back(med);
+        }
+        lk.unlock();
+        gSweepProgress = static_cast<float>(i + 1) / isos.size();
+    }
+    applyShutter(); // back to the user's exposure
+
+    IsoAnalysis a;
+    if (error.empty()) {
+        a = analyzeIsoSweep(samples, info.maxAnalogIso);
+        if (!a.valid) error = a.error;
+    }
+    std::string path;
+    {
+        std::lock_guard<std::mutex> lk(gSweep.mutex);
+        path = gSweep.outPath;
+    }
+    if (error.empty()) {
+        std::string j = "{\"format\":\"vesper-iso-analysis/1\",\"device\":\"" + jsonEscape(gSweep.device) + "\",\"cameraId\":\"" +
+                        jsonEscape(gCamera->cameraId()) + "\",";
+        char b[256];
+        std::snprintf(b, sizeof(b), "\"minIso\":%d,\"maxIso\":%d,\"maxAnalogIso\":%d,\"exposureNs\":%lld,\"baseIso\":%d,\"hcgIso\":%d,\"digitalFromIso\":%d,",
+                      info.minIso, info.maxIso, info.maxAnalogIso, static_cast<long long>(exposureNs), a.baseIso, a.hcgIso, a.digitalFromIso);
+        j += b;
+        j += "\"nativeIsos\":[";
+        for (size_t i = 0; i < a.nativeIsos.size(); ++i) j += (i ? "," : "") + std::to_string(a.nativeIsos[i]);
+        j += "],\"steps\":[";
+        for (size_t i = 0; i < samples.size(); ++i) {
+            std::snprintf(b, sizeof(b), "%s{\"iso\":%d,\"sigma\":%.6g,\"mean\":%.6g,\"inputNoise\":%.4f}", i ? "," : "", samples[i].iso,
+                          samples[i].sigma, samples[i].mean, a.inputNoise[i]);
+            j += b;
+        }
+        j += "]}";
+        FILE* fp = std::fopen(path.c_str(), "w");
+        if (!fp) {
+            error = "could not write result";
+        } else {
+            std::fputs(j.c_str(), fp);
+            std::fclose(fp);
+        }
+        __android_log_print(ANDROID_LOG_INFO, "Vesper", "ISO analysis: base %d, HCG %d, digital from %d (%zu steps)", a.baseIso, a.hcgIso,
+                            a.digitalFromIso, samples.size());
+    }
+    for (const auto& x : samples)
+        __android_log_print(ANDROID_LOG_INFO, "Vesper", "  ISO %5d dark sigma %.6f mean %.5f", x.iso, x.sigma, x.mean);
+    std::lock_guard<std::mutex> lk(gSweep.mutex);
+    gSweep.error = error;
+    gSweep.resultPath = error.empty() ? path : "";
+    gSweepProgress = -1.0f;
+}
+
 void onFrame(const RawFrame& f) {
     if (!gGpu) return;
     static int frameIndex = 0;
@@ -569,6 +722,7 @@ void onFrame(const RawFrame& f) {
     }
     gLastTimestampNs = f.timestampNs;
     feedFocus(frameNs * 1e-9);
+    if (gSweepProgress >= 0) feedSweep(f);
     if ((++frameIndex & 3) == 0) meterCentre(f);
     if ((frameIndex & 3) == 2) meterFrame(f);
     if ((frameIndex & 3) == 3 && gScopesEnabled) computeScopes(f);
@@ -860,7 +1014,18 @@ EXPORT int32_t vesper_stop_stream() {
     return 0;
 }
 
+// Stops a running ISO sweep and waits for it (it drives the camera).
+void stopIsoSweep() {
+    {
+        std::lock_guard<std::mutex> lk(gSweep.mutex);
+        gSweep.cancel = true;
+        gSweep.cv.notify_all();
+    }
+    if (gSweepThread.joinable()) gSweepThread.join();
+}
+
 EXPORT void vesper_close_camera() {
+    stopIsoSweep();
     if (gRecorder) gRecorder->stop("user");
     if (gCamera) gCamera->closeCamera();
 }
@@ -903,8 +1068,8 @@ EXPORT int32_t vesper_get_capabilities(char* out, int32_t maxLen) {
     if (!gCamera) return -1;
     const SensorInfo& s = gCamera->sensorInfo();
     char buf[256];
-    std::snprintf(buf, sizeof(buf), "{\"minExposureNs\":%lld,\"maxExposureNs\":%lld,\"minIso\":%d,\"maxIso\":%d,\"minFocus\":%.3f,\"modes\":[",
-                  static_cast<long long>(s.minExposureNs), static_cast<long long>(s.maxExposureNs), s.minIso, s.maxIso, s.minFocusDiopters);
+    std::snprintf(buf, sizeof(buf), "{\"minExposureNs\":%lld,\"maxExposureNs\":%lld,\"minIso\":%d,\"maxIso\":%d,\"maxAnalogIso\":%d,\"minFocus\":%.3f,\"modes\":[",
+                  static_cast<long long>(s.minExposureNs), static_cast<long long>(s.maxExposureNs), s.minIso, s.maxIso, s.maxAnalogIso, s.minFocusDiopters);
     std::string json = buf;
     for (size_t i = 0; i < s.rawModes.size(); ++i) {
         std::snprintf(buf, sizeof(buf), "%s{\"w\":%d,\"h\":%d,\"maxFps\":%.2f}", i ? "," : "",
@@ -999,6 +1164,31 @@ EXPORT void vesper_set_kelvin_tint(int32_t kelvin, int32_t tint) {
     std::lock_guard<std::mutex> lk(gStateMutex);
     gSettings.awbAuto = false;
     setColorLocked(gColor.fromKelvinTint(kelvin, tint));
+}
+
+// Native ISO analysis: dark-frame sweep over the ISO range (lens covered, ~15 s).
+// Writes the result JSON to outPath; progress / result / error via status.
+EXPORT int32_t vesper_iso_sweep_start(const char* outPath, const char* deviceModel) {
+    if (!gCamera || !outPath || gSweepProgress >= 0) return -1;
+    if (gSweepThread.joinable()) gSweepThread.join();
+    cancelExposureRamp();
+    {
+        std::lock_guard<std::mutex> lk(gSweep.mutex);
+        gSweep.outPath = outPath;
+        gSweep.device = deviceModel ? deviceModel : "";
+        gSweep.error.clear();
+        gSweep.resultPath.clear();
+        gSweep.cancel = false;
+    }
+    gSweepProgress = 0.0f;
+    gSweepThread = std::thread(isoSweepMain);
+    return 0;
+}
+
+EXPORT void vesper_iso_sweep_cancel() {
+    std::lock_guard<std::mutex> lk(gSweep.mutex);
+    gSweep.cancel = true;
+    gSweep.cv.notify_all();
 }
 
 // Histogram / waveform overlay: computed only while enabled (~6 Hz at 24 fps).
@@ -1291,7 +1481,12 @@ EXPORT int32_t vesper_get_status(char* out, int32_t maxLen) {
     int iso, afState;
     bool awbAuto, profileActive;
     float focusD, face[4];
-    std::string calSaved;
+    std::string calSaved, sweepResult, sweepError;
+    {
+        std::lock_guard<std::mutex> lk(gSweep.mutex);
+        sweepResult = gSweep.resultPath;
+        sweepError = gSweep.error;
+    }
     bool focusSearching, focusLocked;
     {
         std::lock_guard<std::mutex> lk(gFocusMutex);
@@ -1323,7 +1518,7 @@ EXPORT int32_t vesper_get_status(char* out, int32_t maxLen) {
                   "\"framesDropped\":%lld,\"thermal\":%d,\"audio\":%s,\"codec\":\"%s\",\"stopReason\":\"%s\","
                   "\"exposureNs\":%lld,\"iso\":%d,\"awbAuto\":%s,\"afState\":%d,\"focusDiopters\":%.3f,"
                   "\"face\":[%.4f,%.4f,%.4f,%.4f],\"gpuMs\":%.2f,\"alignThrottled\":%s,\"nrThrottled\":%s,\"calibrationSaved\":\"%s\",\"profileActive\":%s,"
-                  "\"focusPulling\":%s,\"exposureRamping\":%s,\"focusLocked\":%s}",
+                  "\"focusPulling\":%s,\"exposureRamping\":%s,\"isoSweep\":%.3f,\"isoSweepResult\":\"%s\",\"isoSweepError\":\"%s\",\"focusLocked\":%s}",
                   gCamera && gCamera->isStreaming() ? "true" : "false", fps, rw, rh, ow, oh, drops, kelvin, tint,
                   r.recording ? "true" : "false", static_cast<long long>(r.durationUs / 1000),
                   static_cast<long long>(r.framesEncoded), static_cast<long long>(r.framesDropped), r.thermalStatus,
@@ -1331,7 +1526,7 @@ EXPORT int32_t vesper_get_status(char* out, int32_t maxLen) {
                   awbAuto ? "true" : "false", afState, focusD, face[0], face[1], face[2], face[3],
                   gGpu ? gGpu->gpuFrameMs() : 0.0, gGpu && gGpu->alignmentThrottled() ? "true" : "false",
                   gGpu && gGpu->noiseReductionThrottled() ? "true" : "false", jsonEscape(calSaved).c_str(),
-                  profileActive ? "true" : "false", focusSearching ? "true" : "false", gExposureRamping ? "true" : "false", focusLocked ? "true" : "false");
+                  profileActive ? "true" : "false", focusSearching ? "true" : "false", gExposureRamping ? "true" : "false", static_cast<double>(gSweepProgress.load()), jsonEscape(sweepResult).c_str(), jsonEscape(sweepError).c_str(), focusLocked ? "true" : "false");
     return writeString(buf, out, maxLen);
 }
 
@@ -1343,6 +1538,7 @@ EXPORT void vesper_close() {
     }
     gFocusCv.notify_all();
     if (gFocusThread.joinable()) gFocusThread.join();
+    stopIsoSweep();
     if (gRecorder) gRecorder->stop("user");
     if (gCamera) gCamera->closeCamera();
     if (gGpu) gGpu->release();

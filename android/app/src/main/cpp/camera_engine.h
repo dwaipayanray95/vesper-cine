@@ -70,6 +70,7 @@ struct SensorInfo {
     bool timestampRealtime = false;    // SENSOR_INFO_TIMESTAMP_SOURCE == REALTIME (CLOCK_BOOTTIME)
     int64_t minExposureNs = 1000, maxExposureNs = 1'000'000'000;
     int32_t minIso = 50, maxIso = 3200;
+    int32_t maxAnalogIso = 0;          // above this the HAL applies digital gain (0 = not reported)
     float minFocusDiopters = 0.0f;     // 0 = fixed focus
     std::vector<RawMode> rawModes;     // RAW10 output sizes, largest first
 };
@@ -124,6 +125,7 @@ public:
     bool openCamera(const std::string& id);
     void closeCamera();
     const SensorInfo& sensorInfo() const { return info_; }
+    const std::string& cameraId() const { return cameraId_; }
 
     // `callback` runs on the image reader's thread, one frame at a time.
     bool startCapture(int32_t width, int32_t height, FrameCallback callback);

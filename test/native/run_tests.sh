@@ -13,7 +13,7 @@ g++ -std=c++20 -O1 -Wall -Wextra -I"$CPP" "$CPP/color_science.cpp" "$ROOT/test/n
 # Gradle NDK build.
 if [ -f /usr/include/vulkan/vulkan.h ]; then
   g++ -std=c++20 -Wall -Wextra -Wno-missing-field-initializers -fsyntax-only -I"$ROOT/test/native/android_stubs" -I"$CPP" "$CPP/vulkan_engine.cpp"
-  for f in camera_engine recorder native_bridge focus_controller; do
+  for f in camera_engine recorder native_bridge focus_controller iso_analysis; do
     g++ -std=c++20 -Wall -Wextra -Wno-missing-field-initializers -Wno-unused-parameter -fsyntax-only -I"$ROOT/test/native/android_stubs" -I"$CPP" "$CPP/$f.cpp"
   done
   echo "native sources type-check against stub NDK headers"
@@ -30,6 +30,10 @@ fi
 # Calibration tool (numpy only).
 python3 "$ROOT/tools/calibration/test_calibration.py" | tail -1
 
-# Focus controller (smooth pulls + contrast AF search).
+# Focus controller (smooth pulls + exposure glide).
 g++ -std=c++20 -O1 -Wall -Wextra -I"$CPP" "$CPP/focus_controller.cpp" "$ROOT/test/native/focus_controller_test.cpp" -o "$OUT/focus_test"
 "$OUT/focus_test"
+
+# ISO analysis (native ISO / HCG detection from a dark-frame sweep).
+g++ -std=c++20 -O1 -Wall -Wextra -I"$CPP" "$CPP/iso_analysis.cpp" "$ROOT/test/native/iso_analysis_test.cpp" -o "$OUT/iso_test"
+"$OUT/iso_test"

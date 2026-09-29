@@ -10,6 +10,7 @@ add_library(vesper_engine SHARED
     camera_engine.cpp
     color_science.cpp
     focus_controller.cpp
+    iso_analysis.cpp
     vulkan_engine.cpp
     recorder.cpp
 )

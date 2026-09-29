@@ -51,6 +51,9 @@ class EngineStatus {
   final bool profileActive; // per-device chart calibration in use
   final bool focusPulling; // smooth manual focus pull running
   final bool exposureRamping; // auto-exposure glide in progress
+  final double isoSweep; // native-ISO analysis progress 0..1, -1 when idle
+  final String isoSweepResult; // result JSON path of the last successful analysis
+  final String isoSweepError;
   final bool focusLocked; // focus held (AF-L)
 
   EngineStatus.fromJson(Map<String, dynamic> j)
@@ -80,6 +83,9 @@ class EngineStatus {
       profileActive = (j['profileActive'] as bool?) ?? false,
       focusPulling = (j['focusPulling'] as bool?) ?? false,
       exposureRamping = (j['exposureRamping'] as bool?) ?? false,
+      isoSweep = (j['isoSweep'] as num?)?.toDouble() ?? -1,
+      isoSweepResult = (j['isoSweepResult'] as String?) ?? '',
+      isoSweepError = (j['isoSweepError'] as String?) ?? '',
       focusLocked = (j['focusLocked'] as bool?) ?? false;
 }
 
@@ -89,6 +95,28 @@ class Scopes {
   final Float32List histogram;
   final Float32List waveform;
   Scopes(this.histogram, this.waveform);
+}
+
+/// Measured gain structure of the sensor (vesper-iso-analysis/1).
+class IsoAnalysis {
+  final int baseIso, hcgIso, digitalFromIso;
+  final List<int> nativeIsos;
+  IsoAnalysis(this.baseIso, this.hcgIso, this.digitalFromIso, this.nativeIsos);
+
+  static IsoAnalysis? fromJson(Map<String, dynamic> j) {
+    if (j['format'] != 'vesper-iso-analysis/1') return null;
+    return IsoAnalysis(
+      j['baseIso'] as int,
+      j['hcgIso'] as int,
+      j['digitalFromIso'] as int,
+      (j['nativeIsos'] as List).cast<int>(),
+    );
+  }
+
+  String get summary =>
+      'Native ISO ${nativeIsos.join(' & ')}'
+      '${hcgIso > 0 ? ' (dual gain)' : ''}'
+      '${digitalFromIso > 0 ? ' · digital gain from $digitalFromIso' : ''}';
 }
 
 class RawMode {
@@ -101,6 +129,7 @@ class RawMode {
 /// Hardware limits of the open camera.
 class CameraCapabilities {
   final int minExposureNs, maxExposureNs, minIso, maxIso;
+  final int maxAnalogIso; // above this the phone uses digital gain (0 = not reported)
   final double minFocusDiopters;
   final List<RawMode> modes;
 
@@ -109,6 +138,7 @@ class CameraCapabilities {
       maxExposureNs = j['maxExposureNs'] as int,
       minIso = j['minIso'] as int,
       maxIso = j['maxIso'] as int,
+      maxAnalogIso = (j['maxAnalogIso'] as int?) ?? 0,
       minFocusDiopters = (j['minFocus'] as num).toDouble(),
       modes = (j['modes'] as List)
           .map((m) => RawMode(m['w'] as int, m['h'] as int, (m['maxFps'] as num).toDouble()))
@@ -182,6 +212,8 @@ class VesperNative {
   late final void Function(double) _focusPullTo;
   late final void Function(double, double) _pickWb;
   late final void Function(int) _setScopes;
+  late final int Function(Pointer<Utf8>, Pointer<Utf8>) _isoSweepStart;
+  late final void Function() _isoSweepCancel;
   late final int Function(Pointer<Float>, Pointer<Float>) _getScopes;
   late final void Function(double, double, int) _focusAt;
   late final void Function(double) _setFocusSpeed;
@@ -260,6 +292,11 @@ class VesperNative {
       _focusAt = _lib.lookupFunction<Void Function(Float, Float, Int32), void Function(double, double, int)>(
         'vesper_focus_at',
       );
+      _isoSweepStart = _lib
+          .lookupFunction<Int32 Function(Pointer<Utf8>, Pointer<Utf8>), int Function(Pointer<Utf8>, Pointer<Utf8>)>(
+            'vesper_iso_sweep_start',
+          );
+      _isoSweepCancel = _lib.lookupFunction<Void Function(), void Function()>('vesper_iso_sweep_cancel');
       _setScopes = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_scopes');
       _getScopes = _lib
           .lookupFunction<Int32 Function(Pointer<Float>, Pointer<Float>), int Function(Pointer<Float>, Pointer<Float>)>(
@@ -456,6 +493,22 @@ class VesperNative {
   /// Hardware PDAF + laser AF at an upright viewfinder point. lock: one scan, then hold (AF-L);
   /// otherwise keep tracking that region (AF-C).
   void focusAt(double x, double y, {required bool lock}) => _loaded ? _focusAt(x, y, lock ? 1 : 0) : null;
+
+  /// Native-ISO analysis: dark-frame sweep over the ISO range (lens covered).
+  /// Progress / result come through [status]. Returns false if it couldn't start.
+  bool startIsoSweep(String outPath, String deviceModel) {
+    if (!_loaded) return false;
+    final p = outPath.toNativeUtf8();
+    final d = deviceModel.toNativeUtf8();
+    try {
+      return _isoSweepStart(p, d) == 0;
+    } finally {
+      calloc.free(p);
+      calloc.free(d);
+    }
+  }
+
+  void cancelIsoSweep() => _loaded ? _isoSweepCancel() : null;
 
   /// Histogram/waveform computation (off unless an overlay is shown).
   void setScopes(bool on) => _loaded ? _setScopes(on ? 1 : 0) : null;

@@ -80,6 +80,9 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   String? _deviceModel;
   String _lastCalibrationSaved = '';
   File? _settingsFile; // persisted user settings (app-private storage)
+  String? _filesDir;
+  IsoAnalysis? _isoAnalysis; // measured native ISOs of this camera (Settings -> Native ISO Analysis)
+  bool _isoSweepRunning = false;
   String _savedSettings = '';
 
   int? _textureId;
@@ -135,7 +138,9 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     _deviceModel = info?['model'] as String?;
     _calibrationDir = info?['calibrationDir'] as String?;
     final filesDir = info?['filesDir'] as String?;
+    _filesDir = filesDir;
     if (filesDir != null) {
+      _loadIsoAnalysis();
       _settingsFile = File('$filesDir/vesper_settings.json');
       _loadSettings();
     }
@@ -203,6 +208,70 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     } else if (state == AppLifecycleState.resumed && !_streaming) {
       _openAndStream();
     }
+  }
+
+  // --- Native ISO analysis ------------------------------------------------
+  String? get _isoAnalysisPath => _filesDir == null ? null : '$_filesDir/vesper_iso_$_cameraId.json';
+
+  void _loadIsoAnalysis() {
+    try {
+      final path = _isoAnalysisPath;
+      if (path == null) return;
+      final f = File(path);
+      if (!f.existsSync()) return;
+      final j = jsonDecode(f.readAsStringSync()) as Map<String, dynamic>;
+      if (j['device'] != _deviceModel || '${j['cameraId']}' != _cameraId) return;
+      _isoAnalysis = IsoAnalysis.fromJson(j);
+    } catch (_) {}
+  }
+
+  Future<void> _startIsoAnalysis() async {
+    if (_recording || !_streaming || _isoAnalysisPath == null) return;
+    final go = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF14171D),
+        title: const Text('Native ISO analysis', style: TextStyle(color: Colors.white, fontSize: 15)),
+        content: const Text(
+          'Cover the lens completely: a lens cap, or a finger pressed flat over the lens with a dark cloth on top. '
+          'Keep the phone still.\n\nThe app steps through every ISO and measures the sensor noise (~15 s). '
+          'Your exposure settings are restored afterwards.',
+          style: TextStyle(color: Colors.white70, fontSize: 12),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('CANCEL')),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('START')),
+        ],
+      ),
+    );
+    if (go != true || !mounted) return;
+    if (_engine.startIsoSweep(_isoAnalysisPath!, _deviceModel ?? 'unknown')) {
+      setState(() => _isoSweepRunning = true);
+    } else {
+      _toast('Could not start the ISO analysis');
+    }
+  }
+
+  void _onIsoSweepFinished(EngineStatus s) {
+    _isoSweepRunning = false;
+    if (s.isoSweepError.isNotEmpty) {
+      if (s.isoSweepError != 'cancelled') _toast('ISO analysis failed: ${s.isoSweepError}');
+      return;
+    }
+    _loadIsoAnalysis();
+    final a = _isoAnalysis;
+    if (a != null) _toast(a.summary);
+  }
+
+  // Sub-label for the ISO dial: native (star), extended low (L), digital gain (D).
+  String? _isoTag(int iso) {
+    final a = _isoAnalysis;
+    final digitalFrom = a?.digitalFromIso ?? 0;
+    final maxAnalog = _caps?.maxAnalogIso ?? 0;
+    if (a != null && a.nativeIsos.contains(iso)) return '★';
+    if ((digitalFrom > 0 && iso >= digitalFrom) || (maxAnalog > 0 && iso > maxAnalog)) return 'D';
+    if (a != null && iso < a.baseIso) return 'L';
+    return null;
   }
 
   // --- Persisted settings -------------------------------------------------
@@ -369,6 +438,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
         if (mounted) _toast(ok ? 'Saved to Downloads/Vesper Calibration' : 'Calibration frame saved (app files only)');
       });
     }
+    if (_isoSweepRunning && s.isoSweep < 0) setState(() => _onIsoSweepFinished(s));
     // The engine stops on its own on thermal/storage limits.
     if (_recording && !_stopping && !s.recording && s.stopReason.isNotEmpty) {
       _finishRecording(s.stopReason);
@@ -472,7 +542,13 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
 
   List<int> _buildIsoList() {
     final minIso = _caps?.minIso ?? 50, maxIso = _caps?.maxIso ?? 3200;
-    return {minIso, ..._isoStops.where((i) => i > minIso && i < maxIso), maxIso}.toList()..sort();
+    return {
+      minIso,
+      ..._isoStops.where((i) => i > minIso && i < maxIso),
+      ...?_isoAnalysis?.nativeIsos.where((i) => i >= minIso && i <= maxIso),
+      maxIso,
+    }.toList()
+      ..sort();
   }
 
   void _openSettings() {
@@ -526,6 +602,13 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
           onTapLocksChanged: (val) => setState(() => _tapLocks = val),
           tapSetsExposure: _tapSetsExposure,
           onTapSetsExposureChanged: (val) => setState(() => _tapSetsExposure = val),
+          isoAnalysisSummary: _isoAnalysis?.summary ?? '',
+          onAnalyzeIso: _streaming && !_recording
+              ? () {
+                  Navigator.of(context).pop();
+                  _startIsoAnalysis();
+                }
+              : null,
           faceDetect: _faceDetect,
           onFaceDetectChanged: (val) {
             setState(() => _faceDetect = val);
@@ -539,7 +622,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   // Tap: hardware AF (PDAF + laser) on the region, either tracking (AF-C) or one
   // scan that the HAL then holds (AF-L). Optionally also spot-meters exposure there.
   void _tapToFocus(Offset p, {bool lock = false}) {
-    if (!_streaming) return;
+    if (!_streaming || _isoSweepRunning) return; // the ISO analysis owns the exposure
     lock = lock || _tapLocks;
     _engine.focusAt(p.dx, p.dy, lock: lock);
     if (lock) HapticFeedback.mediumImpact();
@@ -704,6 +787,31 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                                   right: 8,
                                   bottom: 8,
                                   child: ScopesOverlay(scopes: _scopes, mode: _scopeMode),
+                                ),
+                              if (_isoSweepRunning)
+                                Positioned.fill(
+                                  child: Container(
+                                    color: const Color(0x99000000),
+                                    alignment: Alignment.center,
+                                    child: Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Text(
+                                          'ANALYZING SENSOR ISO… ${(((s?.isoSweep ?? 0).clamp(0.0, 1.0)) * 100).round()}%',
+                                          style: const TextStyle(color: Colors.amber, fontSize: 12, fontWeight: FontWeight.bold),
+                                        ),
+                                        const SizedBox(height: 4),
+                                        const Text(
+                                          'Keep the lens covered and the phone still',
+                                          style: TextStyle(color: Colors.white70, fontSize: 10),
+                                        ),
+                                        TextButton(
+                                          onPressed: _engine.cancelIsoSweep,
+                                          child: const Text('CANCEL', style: TextStyle(color: Colors.white)),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
                                 ),
                               if (_wbPickMode)
                                 Positioned(
@@ -968,6 +1076,12 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                     CineControlTile(
                       label: 'ISO',
                       value: '$_iso',
+                      subtitle: switch (_isoTag(_iso)) {
+                        '★' => '★ NATIVE',
+                        'D' => 'DIGITAL',
+                        'L' => 'EXT LOW',
+                        _ => null,
+                      },
                       active: _activeWheel == OpenWheelType.iso,
                       onTap: () => _toggleWheel(OpenWheelType.iso),
                     ),
@@ -1196,6 +1310,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
           title: 'ISO GAIN',
           values: isoList,
           label: (i) => '$i',
+          subLabel: _isoTag,
           selectedValue: isoList[nearestIso],
           onChanged: (i) {
             setState(() => _iso = i);

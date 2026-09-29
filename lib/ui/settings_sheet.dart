@@ -31,6 +31,8 @@ class SettingsScreen extends StatefulWidget {
   final ValueChanged<bool> onTapSetsExposureChanged;
   final bool faceDetect;
   final ValueChanged<bool> onFaceDetectChanged;
+  final String isoAnalysisSummary; // '' = not analyzed yet
+  final VoidCallback? onAnalyzeIso;
 
   const SettingsScreen({
     super.key,
@@ -60,6 +62,8 @@ class SettingsScreen extends StatefulWidget {
     required this.onTapSetsExposureChanged,
     required this.faceDetect,
     required this.onFaceDetectChanged,
+    this.isoAnalysisSummary = '',
+    this.onAnalyzeIso,
   });
 
   @override
@@ -254,6 +258,31 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   setState(() => chromaNr = _chromaLevels[i]);
                   widget.onChromaNrChanged(_chromaLevels[i]);
                 },
+              ),
+            ),
+
+            const SizedBox(height: 14),
+            const Divider(color: Colors.white12, height: 1),
+            const SizedBox(height: 14),
+
+            // Section: SENSOR
+            _sectionHeader('SENSOR'),
+            _settingRow(
+              'Native ISO Analysis',
+              widget.isoAnalysisSummary.isEmpty
+                  ? 'Measure the sensor\'s native ISOs (lens covered, ~15 s)'
+                  : widget.isoAnalysisSummary,
+              OutlinedButton.icon(
+                icon: const Icon(Icons.grain, size: 14, color: Colors.amber),
+                label: Text(
+                  widget.isoAnalysisSummary.isEmpty ? 'ANALYZE' : 'RE-RUN',
+                  style: const TextStyle(color: Colors.amber, fontSize: 11),
+                ),
+                style: OutlinedButton.styleFrom(
+                  side: const BorderSide(color: Colors.amber),
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                ),
+                onPressed: widget.onAnalyzeIso,
               ),
             ),
 
