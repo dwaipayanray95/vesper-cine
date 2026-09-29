@@ -501,6 +501,26 @@ int main() {
                 step = hi - lo;
                 return std::max(lo - mn, mx - hi);
             };
+            // Sharpening moves into the HQ pass when HQ is on: it must still act.
+            {
+                auto contrast = [&](int level) {
+                    FrameParams p = baseParams(0);
+                    p.flags[3] = 16 | level;
+                    p.noise[2] = 2e-4f; p.noise[3] = 2e-6f;
+                    P010 fr{};
+                    run(e, true, fr); // warm
+                    runFrame(gpu, e, p, nullptr, fr);
+                    int lo = 1023, hi = 0;
+                    for (int x = OUT_W / 2 - 4; x <= OUT_W / 2 + 4; ++x) {
+                        lo = std::min(lo, fr.luma(x, OUT_H / 2));
+                        hi = std::max(hi, fr.luma(x, OUT_H / 2));
+                    }
+                    return hi - lo;
+                };
+                int c0 = contrast(0), c2 = contrast(2);
+                std::printf("  HQ edge contrast: sharpening off %d, medium %d\n", c0, c2);
+                check(c2 > c0 + 10, "sharpening still works with HQ on", c2, c0 + 10);
+            }
             int step0, step1;
             int r0 = ringing(false, step0), r1 = ringing(true, step1);
             std::printf("  edge overshoot: quad %d/%d, HQ %d/%d codes\n", r0, step0, r1, step1);

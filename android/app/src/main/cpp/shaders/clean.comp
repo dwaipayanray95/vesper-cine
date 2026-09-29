@@ -101,7 +101,11 @@ void main() {
             for (int dx = -2; dx <= 2; ++dx) {
                 vec3 n = nb(local, dx, dy);
                 float yn = luma(n);
-                float w = exp(-((yn - y0) * (yn - y0)) / (2.0 * s * s));
+                // (1 - x/4)^4 ~ exp(-x) for the Gaussian range weight, without exp()
+                // (25 per texel), and exactly 0 beyond ~2.8 sigma.
+                float t = max(1.0 - (yn - y0) * (yn - y0) / (8.0 * s * s), 0.0);
+                t *= t;
+                float w = t * t;
                 chromaSum += w * (n - yn);
                 wSum += w;
             }

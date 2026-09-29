@@ -30,6 +30,7 @@ shared ivec2 sCenter;
 shared float sCurF[256];
 shared float sHistF[1156];
 shared float sSadF[25];
+shared float sSadPart[100];
 
 float luma(vec3 c) { return dot(c, vec3(0.25, 0.5, 0.25)); }
 // Compare in a compressed domain so bright areas don't dominate the SAD.
@@ -93,14 +94,18 @@ void main() {
     for (uint i = li; i < 1156u; i += 128u)
         sHistF[i] = enc(luma(imageLoad(history, clamp(qBase + center - 2 + ivec2(i % 34u, i / 34u), ivec2(0), size - 1)).rgb));
     barrier();
-    if (li < 25u) {
-        int ex = int(li % 5u), ey = int(li / 5u); // 0..4 == refinement -2..2
+    // 25 candidates x 4 row bands = 100 threads busy (was 25 threads x 256 steps).
+    if (li < 100u) {
+        uint cand = li >> 2u, band = li & 3u;
+        int ex = int(cand % 5u), ey = int(cand / 5u); // 0..4 == refinement -2..2
         float sad = 0.0;
-        for (int y = 0; y < 16; ++y)
+        for (int y = int(band) * 4; y < int(band) * 4 + 4; ++y)
             for (int x = 0; x < 16; ++x)
                 sad += abs(sCurF[y * 16 + x] - sHistF[(2 * y + ey) * 34 + 2 * x + ex]);
-        sSadF[li] = sad;
+        sSadPart[li] = sad;
     }
+    barrier();
+    if (li < 25u) sSadF[li] = sSadPart[li * 4u] + sSadPart[li * 4u + 1u] + sSadPart[li * 4u + 2u] + sSadPart[li * 4u + 3u];
     barrier();
     if (li == 0u) {
         uint best = 12u;
