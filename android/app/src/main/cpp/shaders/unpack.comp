@@ -121,6 +121,10 @@ void main() {
         float t = smoothstep(0.8, 1.0, m);
         rgb = mix(rgb, vec3(dot(rgb, vec3(0.25, 0.5, 0.25))), t);
 
-        imageStore(quadImage, ivec2(qx, qy), vec4(rgb, clipped ? 1.0 : 0.0));
+        // Alpha: 1 = clipped highlight; otherwise 0.1 x the lens-shading gain
+        // here (< 0.5), so noise reduction can scale its noise model: the
+        // corners are amplified more, so they are noisier.
+        float shadeGain = clamp(0.25 * (sh.x + sh.y + sh.z + sh.w), 1.0, 4.5);
+        imageStore(quadImage, ivec2(qx, qy), vec4(rgb, clipped ? 1.0 : 0.1 * shadeGain));
     }
 }
