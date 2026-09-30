@@ -1279,7 +1279,16 @@ void VulkanEngine::readTimestamps(int slot) {
 
 void VulkanEngine::setFrameBudgetMs(double ms) {
     if (std::fabs(ms - frameBudgetMs_.load()) > 0.5) {
-        // New frame rate: judge the stages afresh right away.
+        // New frame rate: start from everything on, let the load settle
+        // (~1 s), then pause only what this frame rate can't carry. No
+        // decision carries over from the previous rate.
+        if (alignThrottled_ || hqThrottled_ || nrThrottled_)
+            VK_LOGI("Guard: frame rate changed (%.1f -> %.1f ms budget): all stages back on, re-checking", frameBudgetMs_.load(), ms);
+        alignThrottled_ = hqThrottled_ = nrThrottled_ = false;
+        for (bool& r : costReliable_) r = false;
+        measuringStage_ = -1;
+        overBudgetFrames_ = underBudgetFrames_ = 0;
+        graceFrames_ = static_cast<int>(1000.0 / ms); // ~1 s at the new rate
         recoverFrames_ = 24;
         lastRestored_ = -1;
     }
