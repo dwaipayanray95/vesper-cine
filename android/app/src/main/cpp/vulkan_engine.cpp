@@ -412,7 +412,9 @@ void VulkanEngine::presentViewfinder(Slot& s) {
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
                          0, nullptr, 0, nullptr, 1, &toDst);
     const int outW = geom_.outW, outH = geom_.outH;
-    if (swapExtent_.width == static_cast<uint32_t>(outW) && swapExtent_.height == static_cast<uint32_t>(outH)) {
+    const float zs = zoomScale_;
+    const bool zoom = zs > 1.001f && queueHasGraphics_;
+    if (!zoom && swapExtent_.width == static_cast<uint32_t>(outW) && swapExtent_.height == static_cast<uint32_t>(outH)) {
         VkImageCopy region{};
         region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
         region.dstSubresource = region.srcSubresource;
@@ -423,6 +425,12 @@ void VulkanEngine::presentViewfinder(Slot& s) {
         blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
         blit.dstSubresource = blit.srcSubresource;
         blit.srcOffsets[1] = {outW, outH, 1};
+        if (zoom) {
+            // Same mapping as the UI's tap maths: screen p -> frame c + (p - c) / scale.
+            const float cx = zoomCx_, cy = zoomCy_;
+            blit.srcOffsets[0] = {static_cast<int32_t>(cx * (1.0f - 1.0f / zs) * outW), static_cast<int32_t>(cy * (1.0f - 1.0f / zs) * outH), 0};
+            blit.srcOffsets[1] = {static_cast<int32_t>((cx + (1.0f - cx) / zs) * outW), static_cast<int32_t>((cy + (1.0f - cy) / zs) * outH), 1};
+        }
         blit.dstOffsets[1] = {static_cast<int32_t>(swapExtent_.width), static_cast<int32_t>(swapExtent_.height), 1};
         vkCmdBlitImage(cb, vfImage_.image, VK_IMAGE_LAYOUT_GENERAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                        1, &blit, VK_FILTER_LINEAR);

@@ -1256,6 +1256,10 @@ EXPORT void vesper_set_oversampling(int32_t enable) {
 
 // Detail enhancement: 0 off, 1 low, 2 medium, 3 high (noise-aware unsharp mask,
 // applied to recording and viewfinder).
+EXPORT void vesper_set_viewfinder_zoom(float cx, float cy, float scale) {
+    if (gGpu) gGpu->setViewfinderZoom(cx, cy, scale);
+}
+
 EXPORT void vesper_set_sharpening(int32_t level) {
     std::lock_guard<std::mutex> lk(gStateMutex);
     gSettings.sharpening = std::clamp(level, 0, 3);

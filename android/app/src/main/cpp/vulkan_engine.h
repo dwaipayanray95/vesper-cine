@@ -77,6 +77,8 @@ public:
 
     // Camera frame interval; used to keep optional GPU passes within budget.
     void setFrameBudgetMs(double ms) { frameBudgetMs_ = ms; }
+    // Viewfinder magnifier: show 1/scale of the frame around (cx, cy) (normalised).
+    void setViewfinderZoom(float cx, float cy, float scale) { zoomCx_ = cx; zoomCy_ = cy; zoomScale_ = scale; }
     // false: never pause alignment / HQ / NR automatically (frames may drop instead).
     void setBudgetGuard(bool enabled);
     bool oversamplingSupported() const { return hqSupported_; }
@@ -239,6 +241,7 @@ private:
     std::mutex queueMutex_; // vkQueue* calls (queue is externally synchronised)
     VkCommandPool presentPool_ = VK_NULL_HANDLE; // used only by the submit thread
     std::atomic<uint64_t> vfSkipped_{0};
+    std::atomic<float> zoomCx_{0.5f}, zoomCy_{0.5f}, zoomScale_{1.0f};
     std::atomic<uint64_t> vfHitches_{0};
     std::atomic<double> vfMaxGapMs_{0.0};
     std::chrono::steady_clock::time_point lastPresent_{}; // submit thread only

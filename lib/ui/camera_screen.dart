@@ -171,6 +171,32 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   String _benchStep = '';
   bool _permissionDenied = false; // camera permission refused: status text offers a retry
   int? _textureId;
+  final GlobalKey _vfKey = GlobalKey();
+  Rect? _vfRectSent;
+  (bool, Offset)? _zoomSent;
+
+  // Keeps the native viewfinder surface on top of the viewfinder box and
+  // mirrors the magnifier state to the GPU (called after every frame; only
+  // sends when something changed).
+  void _syncViewfinder() {
+    if (!mounted) return;
+    final box = _vfKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box != null && box.hasSize && box.attached) {
+      final dpr = MediaQuery.of(context).devicePixelRatio;
+      final o = box.localToGlobal(Offset.zero) * dpr;
+      final r = Rect.fromLTWH(o.dx.roundToDouble(), o.dy.roundToDouble(),
+          (box.size.width * dpr).roundToDouble(), (box.size.height * dpr).roundToDouble());
+      if (r != _vfRectSent) {
+        _vfRectSent = r;
+        _engine.setViewfinderRect(r.left.toInt(), r.top.toInt(), r.width.toInt(), r.height.toInt());
+      }
+    }
+    final zoom = (_magnify, _magCenter);
+    if (zoom != _zoomSent) {
+      _zoomSent = zoom;
+      _engine.setViewfinderZoom(_magCenter.dx, _magCenter.dy, _magnify ? _magScale : 1.0);
+    }
+  }
   String _statusMessage = 'INITIALIZING SENSOR...';
   EngineStatus? _status;
   RecordingFile? _recordingFile;
@@ -958,8 +984,11 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     final fpsList = _fpsOptions;
     final maxD = _caps?.minFocusDiopters ?? 10.0;
 
+    WidgetsBinding.instance.addPostFrameCallback((_) => _syncViewfinder());
     return Scaffold(
-      backgroundColor: Colors.black,
+      // Transparent: the viewfinder is a native surface underneath the Flutter
+      // UI (the window behind is black), shown through the hole at _vfKey.
+      backgroundColor: Colors.transparent,
       body: GestureDetector(
         behavior: HitTestBehavior.translucent,
         onTap: () {
@@ -975,7 +1004,6 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                 aspectRatio: _cropMode == 0 ? 16 / 9 : 4 / 3,
                 child: Container(
                   decoration: BoxDecoration(
-                    color: const Color(0xFF15181C),
                     border: Border.all(
                       color: _recording ? Colors.redAccent : Colors.white12,
                       width: _recording ? 2.5 : 1.0,
@@ -1005,17 +1033,8 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                             },
                             child: Stack(
                               children: [
-                                Positioned.fill(
-                                  child: ClipRect(
-                                    child: _magnify
-                                        ? Transform.scale(
-                                            scale: _magScale,
-                                            alignment: Alignment(_magCenter.dx * 2 - 1, _magCenter.dy * 2 - 1),
-                                            child: Texture(textureId: _textureId!),
-                                          )
-                                        : Texture(textureId: _textureId!),
-                                  ),
-                                ),
+                                // Native viewfinder shows through here (magnifier applied natively).
+                                Positioned.fill(child: SizedBox.expand(key: _vfKey)),
                                 if (_magnify)
                                   const Positioned(
                                     left: 8,

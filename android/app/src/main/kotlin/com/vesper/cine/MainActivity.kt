@@ -8,18 +8,67 @@ import android.hardware.display.DisplayManager
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
+import android.graphics.Color
+import android.graphics.drawable.ColorDrawable
+import android.os.Bundle
 import android.view.Surface
+import android.view.SurfaceHolder
+import android.view.SurfaceView
+import android.view.ViewGroup
+import android.widget.FrameLayout
 import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.android.RenderMode
+import io.flutter.embedding.android.TransparencyMode
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
-import io.flutter.view.TextureRegistry
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
 class MainActivity : FlutterActivity() {
     private val channelName = "com.vesper.cine/native"
-    private var producer: TextureRegistry.SurfaceProducer? = null
+
+    // The viewfinder is a plain SurfaceView behind the (transparent) Flutter
+    // UI: the GPU engine presents straight to the system compositor, so
+    // preview frames never wait for a Flutter frame (that path showed up as
+    // 85-100 ms gaps). Flutter reports where to put it (setViewfinderRect).
+    private var vfView: SurfaceView? = null
+    private var vfWanted = false // Dart created the viewfinder
+
+    private val vfCallback = object : SurfaceHolder.Callback {
+        override fun surfaceCreated(holder: SurfaceHolder) {
+            if (vfWanted) nativeSetViewfinderSurface(holder.surface)
+        }
+
+        override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+            if (vfWanted) nativeSetViewfinderSurface(holder.surface)
+        }
+
+        override fun surfaceDestroyed(holder: SurfaceHolder) {
+            nativeSetViewfinderSurface(null)
+        }
+    }
+
+    // Flutter draws on its own surface above everything, transparently where
+    // the viewfinder is; the window underneath is black.
+    override fun getRenderMode(): RenderMode = RenderMode.surface
+    override fun getTransparencyMode(): TransparencyMode = TransparencyMode.transparent
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        window.setBackgroundDrawable(ColorDrawable(Color.BLACK))
+        val view = SurfaceView(this)
+        view.holder.addCallback(vfCallback)
+        findViewById<ViewGroup>(android.R.id.content).addView(view, 0, FrameLayout.LayoutParams(1, 1))
+        vfView = view
+    }
+
+    private fun attachViewfinder(width: Int, height: Int) {
+        val holder = vfView?.holder ?: return
+        vfWanted = true
+        holder.setFixedSize(width, height) // buffer = output size: copied 1:1, scaled by the compositor
+        if (holder.surface?.isValid == true) nativeSetViewfinderSurface(holder.surface)
+    }
 
     companion object {
         init {
@@ -79,38 +128,24 @@ class MainActivity : FlutterActivity() {
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName).setMethodCallHandler { call, result ->
             when (call.method) {
                 "createTexture" -> {
-                    val width = call.argument<Int>("width") ?: 1920
-                    val height = call.argument<Int>("height") ?: 1080
-                    val entry = producer ?: flutterEngine.renderer.createSurfaceProducer().also { p ->
-                        // Flutter may tear the Surface down (e.g. app backgrounded) and
-                        // hand out a new one later; the GPU engine must follow it.
-                        p.setCallback(object : TextureRegistry.SurfaceProducer.Callback {
-                            override fun onSurfaceAvailable() {
-                                nativeSetViewfinderSurface(p.surface)
-                            }
-
-                            override fun onSurfaceCleanup() {
-                                nativeSetViewfinderSurface(null)
-                            }
-                        })
-                        producer = p
-                    }
-                    entry.setSize(width, height)
-                    nativeSetViewfinderSurface(entry.surface)
-                    result.success(entry.id())
+                    attachViewfinder(call.argument<Int>("width") ?: 1920, call.argument<Int>("height") ?: 1080)
+                    result.success(0)
                 }
                 "resizeTexture" -> {
-                    val entry = producer
-                    if (entry == null) {
-                        result.success(false)
-                    } else {
-                        entry.setSize(call.argument<Int>("width") ?: 1920, call.argument<Int>("height") ?: 1080)
-                        nativeSetViewfinderSurface(entry.surface)
-                        result.success(true)
-                    }
+                    attachViewfinder(call.argument<Int>("width") ?: 1920, call.argument<Int>("height") ?: 1080)
+                    result.success(true)
                 }
                 "destroyTexture" -> {
                     releaseTexture()
+                    result.success(true)
+                }
+                "setViewfinderRect" -> {
+                    val w = call.argument<Int>("width") ?: 1
+                    val h = call.argument<Int>("height") ?: 1
+                    vfView?.layoutParams = FrameLayout.LayoutParams(maxOf(w, 1), maxOf(h, 1)).apply {
+                        leftMargin = call.argument<Int>("left") ?: 0
+                        topMargin = call.argument<Int>("top") ?: 0
+                    }
                     result.success(true)
                 }
                 "createRecordingFile" -> {
@@ -201,9 +236,8 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun releaseTexture() {
+        vfWanted = false
         nativeSetViewfinderSurface(null)
-        producer?.release()
-        producer = null
     }
 
     override fun onDestroy() {

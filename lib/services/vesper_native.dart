@@ -217,6 +217,7 @@ class VesperNative {
   late final void Function(double, double) _pickWb;
   late final void Function(int) _setScopes;
   late final void Function(int) _setSharpening;
+  late final void Function(double, double, double) _setViewfinderZoom;
   late final void Function(int) _setOversampling;
   late final void Function(int) _setProcessingPaused;
   late final void Function(int, int) _setNativeIsos;
@@ -311,6 +312,8 @@ class VesperNative {
       _setProcessingPaused = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_processing_paused');
       _setOversampling = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_oversampling');
       _setSharpening = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_sharpening');
+      _setViewfinderZoom = _lib.lookupFunction<Void Function(Float, Float, Float), void Function(double, double, double)>(
+          'vesper_set_viewfinder_zoom');
       _setScopes = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_scopes');
       _getScopes = _lib
           .lookupFunction<Int32 Function(Pointer<Float>, Pointer<Float>), int Function(Pointer<Float>, Pointer<Float>)>(
@@ -556,6 +559,17 @@ class VesperNative {
 
   /// Detail enhancement: 0 off, 1 low, 2 medium, 3 high (recording and viewfinder).
   void setSharpening(int level) => _loaded ? _setSharpening(level) : null;
+
+  /// Viewfinder magnifier, done in the GPU copy to the display: shows 1/scale
+  /// of the frame around the normalised point (cx, cy). scale 1 = off.
+  void setViewfinderZoom(double cx, double cy, double scale) => _loaded ? _setViewfinderZoom(cx, cy, scale) : null;
+
+  /// Where the native viewfinder surface sits on screen, in physical pixels
+  /// (it is composited by the system underneath the transparent Flutter UI).
+  Future<void> setViewfinderRect(int left, int top, int width, int height) async {
+    if (!Platform.isAndroid) return;
+    await _channel.invokeMethod('setViewfinderRect', {'left': left, 'top': top, 'width': width, 'height': height});
+  }
 
   /// Histogram/waveform computation (off unless an overlay is shown).
   void setScopes(bool on) => _loaded ? _setScopes(on ? 1 : 0) : null;
