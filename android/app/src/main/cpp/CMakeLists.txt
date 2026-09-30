@@ -17,6 +17,10 @@ add_library(vesper_engine SHARED
 
 target_include_directories(vesper_engine PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(vesper_engine PRIVATE -Wall -Wextra -Wno-missing-field-initializers -Wno-unused-parameter)
+# Always optimise the engine, also in debug/profile APKs (per-frame copy,
+# metering, scopes run on the camera thread). Target options come after the
+# build type's flags, so this -O2 wins over a debug build's -O0.
+target_compile_options(vesper_engine PRIVATE -O2)
 
 target_link_libraries(vesper_engine
     camera2ndk
