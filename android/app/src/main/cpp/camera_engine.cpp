@@ -542,7 +542,10 @@ void CameraEngine::onImageAvailable(AImageReader* reader) {
     if (!streaming_) return;
     std::lock_guard<std::mutex> frameLock(frameMutex_);
     AImage* image = nullptr;
-    if (AImageReader_acquireNextImage(reader, &image) != AMEDIA_OK || !image) return;
+    // Newest frame only: if processing fell behind, older queued frames are
+    // skipped instead of processed late (each one queued adds a frame of
+    // viewfinder lag). Later callbacks for the skipped images find none.
+    if (AImageReader_acquireLatestImage(reader, &image) != AMEDIA_OK || !image) return;
     if (!streaming_) { AImage_delete(image); return; }
 
     RawFrame f;

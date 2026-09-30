@@ -959,7 +959,11 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
             return false;
         }
     }
-    if (vkWaitForFences(device_, 1, &s.fence, VK_TRUE, kFenceTimeoutNs) != VK_SUCCESS) {
+    // At most two frames on the GPU: wait for the one before last, not just
+    // for this slot's previous use (a third queued frame is pure latency).
+    Slot& older = slots_[(idx + kRingSize - 2) % kRingSize];
+    if (vkWaitForFences(device_, 1, &older.fence, VK_TRUE, kFenceTimeoutNs) != VK_SUCCESS ||
+        vkWaitForFences(device_, 1, &s.fence, VK_TRUE, kFenceTimeoutNs) != VK_SUCCESS) {
         ++droppedFrames_;
         nextSlot_ = (nextSlot_ + 1) % kRingSize;
         VK_LOGW("Frame dropped: GPU still busy with slot %d", idx);

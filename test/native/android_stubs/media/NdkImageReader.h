@@ -8,4 +8,5 @@ media_status_t AImageReader_newWithUsage(int32_t, int32_t, int32_t, uint64_t, in
 media_status_t AImageReader_setImageListener(AImageReader*, AImageReader_ImageListener*);
 media_status_t AImageReader_getWindow(AImageReader*, ANativeWindow**);
 media_status_t AImageReader_acquireNextImage(AImageReader*, AImage**);
+media_status_t AImageReader_acquireLatestImage(AImageReader*, AImage**);
 void AImageReader_delete(AImageReader*);
