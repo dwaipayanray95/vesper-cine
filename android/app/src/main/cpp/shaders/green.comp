@@ -14,10 +14,9 @@
 //      the pixel positions around each quad centre) — the discrete form of the
 //      5x5 kernel tuned in gpu_pipeline_test (passband vs moire, Lanczos-2
 //      level negative lobe);
-//   4. optional sharpening (P.flags.w & 15) on that oversampled green, so the
-//      render pass doesn't need its own 9-tap unsharp mask when HQ is on;
-//   5. writes D = G_hq(+sharpening) - G_quad at quad resolution. The render
-//      pass samples D with 5 taps.
+//   4. writes D = G_hq - G_quad at quad resolution. The render pass samples D
+//      with 5 taps. (Sharpening stays in render: folding it in here needed a
+//      one-quad tile border that cost more on the phone GPU than it saved.)
 // 64 threads: good occupancy on mobile GPUs (PowerVR / Mali / Adreno).
 layout(local_size_x = 8, local_size_y = 8) in;
 
@@ -32,18 +31,16 @@ layout(set = 0, binding = 3, r16f) uniform writeonly image2D detailImage;
 #endif
 layout(set = 0, binding = 4, rgba16f) uniform readonly image2D quadImage;
 
-// Tile: 8x8 quads = 16x16 raw px, plus one quad of border for the sharpening
-// blur -> HQ green needed for 10x10 quads = px -2..17 (quad-aligned: -2..18).
-// Filter reach +-3.5 px -> green needed for px -6..21 (28x28);
-// Hamilton-Adams reach +-2 px -> raw px -8..23 (32x32, starts on a RAW10 group).
+// Tile: 8x8 quads = 16x16 raw px. Filter reach +-3.5 px -> green needed for
+// px -4..19 (24x24); Hamilton-Adams reach +-2 px -> raw rows -6..21 (28) and
+// raw columns -8..23 (32: whole RAW10 groups, so loads start on a group).
 const int Q = 8, T = 2 * Q;
-const int GB = 6, GN = T + 2 * GB;      // green: px -6..21 (28)
-const int RB = 8, RN = T + 2 * RB;      // raw:   px -8..23 (32)
-const int HQN = Q + 2;                  // HQ quads incl. 1-quad border (10)
+const int GB = 4, GN = T + 2 * GB;      // green: px -4..19 (24)
+const int RBX = 8, RNX = T + 2 * RBX;   // raw cols: -8..23 (32)
+const int RBY = 6, RNY = T + 2 * RBY;   // raw rows: -6..21 (28)
 const int NT = Q * Q;
-shared float sRaw[RN * RN];             // 1024; later reused for row-filter results (GN x HQN = 280)
-shared float sGreen[GN * GN];           // 784
-shared float sHq[HQN * HQN];            // 100
+shared float sRaw[RNX * RNY];           // 896; later reused for row-filter results (GN x Q = 192)
+shared float sGreen[GN * GN];           // 576
 
 const float K[8] = float[8](-0.024, -0.056, 0.153, 0.427, 0.427, 0.153, -0.056, -0.024);
 
@@ -74,7 +71,7 @@ vec4 shadingAt(vec2 rawPos) {
     return mix(mix(s[0], s[1], f.x), mix(s[2], s[3], f.x), f.y);
 }
 
-float R(int x, int y) { return sRaw[(y + RB) * RN + (x + RB)]; }   // tile-relative raw px
+float R(int x, int y) { return sRaw[(y + RBY) * RNX + (x + RBX)]; } // tile-relative raw px
 float G(int x, int y) { return sGreen[(y + GB) * GN + (x + GB)]; } // tile-relative green
 
 void main() {
@@ -87,10 +84,10 @@ void main() {
     // 1. Raw -> shared, one RAW10 group (4 px, 5 bytes = 2 word reads) per step.
     //    Clamping whole groups / rows at the frame edge keeps the CFA parity
     //    in x; the y clamp only affects the outermost rows.
-    for (int i = lid; i < (RN / 4) * RN; i += NT) {
-        int gx = i % (RN / 4), row = i / (RN / 4);
-        int grp = clamp((org.x - RB) / 4 + gx, 0, groupsPerRow - 1);
-        int y = clamp(org.y - RB + row, 0, P.rawInfo.y - 1);
+    for (int i = lid; i < (RNX / 4) * RNY; i += NT) {
+        int gx = i % (RNX / 4), row = i / (RNX / 4);
+        int grp = clamp((org.x - RBX) / 4 + gx, 0, groupsPerRow - 1);
+        int y = clamp(org.y - RBY + row, 0, P.rawInfo.y - 1);
         uint base = uint(y * P.rawInfo.z + grp * 5);
         uint w0 = raw.words[base >> 2], w1 = raw.words[(base >> 2) + 1u];
         uint sh8 = (base & 3u) * 8u;
@@ -106,7 +103,7 @@ void main() {
             float v = (dn - bl) / (P.wbGains.w - bl);
             float gain = site == 0 ? sh.x * P.wbGains.r
                        : (site == 3 ? sh.w * P.wbGains.b : ((ay & 1) == 0 ? sh.y : sh.z) * P.wbGains.g);
-            sRaw[row * RN + gx * 4 + b] = v * gain;
+            sRaw[row * RNX + gx * 4 + b] = v * gain;
         }
     }
     barrier();
@@ -135,49 +132,21 @@ void main() {
     }
     barrier();
 
-    // 3a. Horizontal filter for HQ quad columns -1..8: quad qx covers px 2qx, 2qx+1;
-    //     taps at px 2qx-3 .. 2qx+4.
-    for (int i = lid; i < GN * HQN; i += NT) {
-        int row = i / HQN, qx = i % HQN - 1;
+    // 3a. Horizontal filter: quad column qx covers px 2qx, 2qx+1; taps at px 2qx-3 .. 2qx+4.
+    for (int i = lid; i < GN * Q; i += NT) {
+        int row = i / Q, qx = i % Q;
         float acc = 0.0;
         for (int k = 0; k < 8; ++k) acc += K[k] * sGreen[row * GN + (2 * qx - 3 + k + GB)];
         sRaw[i] = acc; // raw data is no longer needed
     }
     barrier();
-    // 3b. Vertical filter for HQ quads (-1..8)^2.
-    for (int i = lid; i < HQN * HQN; i += NT) {
-        int qx = i % HQN, qy = i / HQN - 1;
-        float acc = 0.0;
-        for (int k = 0; k < 8; ++k) acc += K[k] * sRaw[(2 * qy - 3 + k + GB) * HQN + qx];
-        sHq[i] = acc;
-    }
-    barrier();
 
+    // 3b. Vertical filter + 4. detail against the quad image.
     ivec2 lq = ivec2(gl_LocalInvocationID.xy);
     ivec2 q = tile * Q + lq;
     if (q.x >= P.quadInfo.x || q.y >= P.quadInfo.y) return;
-    float hq = sHq[(lq.y + 1) * HQN + lq.x + 1];
-
-    // 4. Sharpening on the oversampled green (same strength and noise coring
-    //    as the quad path's sharpen() in render.comp, which is skipped with HQ).
-    int level = P.flags.w & 15;
-    if (level > 0) {
-        float blur = 0.0;
-        for (int j = -1; j <= 1; ++j)
-            for (int i = -1; i <= 1; ++i)
-                blur += (i == 0 ? 2.0 : 1.0) * (j == 0 ? 2.0 : 1.0) * sHq[(lq.y + 1 + j) * HQN + lq.x + 1 + i];
-        blur /= 16.0;
-        float detail = hq - blur;
-        // Noise of (hq - blur): the oversampled green averages ~4 photosites, so
-        // its noise is about half the quad's (0.6 there -> 0.3 here).
-        float sigma = sqrt(max(P.noise.z * max(blur, 0.0) + P.noise.w, 1e-9)) * 0.3;
-        float cored = sign(detail) * max(abs(detail) - 2.0 * sigma, 0.0);
-        // 1.5x the quad path's amounts: the oversampled green is already crisper,
-        // so the same visible strength per level needs a little more gain.
-        float amount = level == 1 ? 0.6 : (level == 2 ? 1.2 : 1.95);
-        hq += amount * cored;
-    }
-
+    float hq = 0.0;
+    for (int k = 0; k < 8; ++k) hq += K[k] * sRaw[(2 * lq.y - 3 + k + GB) * Q + lq.x];
     float gq = imageLoad(quadImage, q).g;
     imageStore(detailImage, q, vec4(hq - gq, 0.0, 0.0, 0.0));
 }

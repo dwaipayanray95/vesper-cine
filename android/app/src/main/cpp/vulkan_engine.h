@@ -9,7 +9,9 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 #define VK_TAG "Vesper_Vulkan"
@@ -129,6 +131,20 @@ private:
     bool ensureResources(const Geometry& g);
     void destroyResources();
     void drainAll();
+    // Submission + presentation run on their own thread so the camera thread
+    // never blocks in the driver (vkQueueSubmit/vkQueuePresentKHR can take
+    // tens of ms on mobile GPUs when the queue is busy).
+    struct SubmitJob {
+        VkCommandBuffer cb = VK_NULL_HANDLE;
+        VkFence fence = VK_NULL_HANDLE;
+        uint32_t imageIndex = UINT32_MAX;
+        VkSemaphore acquireSem = VK_NULL_HANDLE;
+        VkSemaphore renderDone = VK_NULL_HANDLE;
+    };
+    void submitLoop();
+    void startSubmitThread();
+    void stopSubmitThread();
+    void flushSubmits(); // waits until every queued job has been submitted
 
     bool createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, bool hostCached, Buffer& out);
     void destroyBuffer(Buffer& b);
@@ -204,12 +220,21 @@ private:
     std::vector<VkSemaphore> swapRenderDone_;
     VkExtent2D swapExtent_{};
     bool swapRB_ = false;
-    bool swapchainStale_ = false;
+    std::atomic<bool> swapchainStale_{false};
     bool cpuFallback_ = false;
 
     std::mutex encoderMutex_;
     std::condition_variable encoderCv_;
 
+    bool motionValid_ = false;
+    uint32_t alignTick_ = 0;
+    std::thread submitThread_;
+    std::mutex submitMutex_;
+    std::condition_variable submitCv_;
+    std::deque<SubmitJob> submitJobs_;
+    bool submitBusy_ = false, submitStop_ = false;
+    std::mutex queueMutex_; // vkQueue* calls (queue is externally synchronised)
+    std::mutex swapMutex_;  // acquire (camera thread) vs present (submit thread)
     std::mutex frameMutex_; // serialises processFrame against release()
     bool initialized_ = false;
     uint64_t frameCount_ = 0;

@@ -501,7 +501,7 @@ int main() {
                 step = hi - lo;
                 return std::max(lo - mn, mx - hi);
             };
-            // Sharpening moves into the HQ pass when HQ is on: it must still act.
+            // Sharpening must still act with HQ on.
             {
                 auto contrast = [&](int level) {
                     FrameParams p = baseParams(0);
@@ -510,15 +510,15 @@ int main() {
                     P010 fr{};
                     run(e, true, fr); // warm
                     runFrame(gpu, e, p, nullptr, fr);
-                    int lo = 1023, hi = 0;
-                    for (int x = OUT_W / 2 - 4; x <= OUT_W / 2 + 4; ++x) {
-                        lo = std::min(lo, fr.luma(x, OUT_H / 2));
-                        hi = std::max(hi, fr.luma(x, OUT_H / 2));
-                    }
-                    return hi - lo;
+                    // Steepest step across the edge (HQ's own slight undershoot
+                    // already sets the min/max range, so measure the slope).
+                    int step = 0;
+                    for (int x = OUT_W / 2 - 4; x < OUT_W / 2 + 4; ++x)
+                        step = std::max(step, fr.luma(x + 1, OUT_H / 2) - fr.luma(x, OUT_H / 2));
+                    return step;
                 };
                 int c0 = contrast(0), c2 = contrast(2);
-                std::printf("  HQ edge contrast: sharpening off %d, medium %d\n", c0, c2);
+                std::printf("  HQ edge slope: sharpening off %d, medium %d\n", c0, c2);
                 check(c2 > c0 + 10, "sharpening still works with HQ on", c2, c0 + 10);
             }
             int step0, step1;

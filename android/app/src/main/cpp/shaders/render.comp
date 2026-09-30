@@ -213,8 +213,7 @@ void main() {
         vec2 rawPos = distort(rawPosFor(o));
         vec4 cam = sampleCamera(rawPos);
         cam.rgb = oversampleLuma(cam.rgb, rawPos, cam.a);
-        // With HQ on, sharpening is already part of the oversampled detail (green.comp).
-        if ((P.flags.w & 16) == 0) cam.rgb = sharpen(cam.rgb, rawPos);
+        cam.rgb = sharpen(cam.rgb, rawPos);
         vec3 lin = toRec2020(cam.rgb);
         vec3 logv = vec3(appleLog(lin.r), appleLog(lin.g), appleLog(lin.b));
 

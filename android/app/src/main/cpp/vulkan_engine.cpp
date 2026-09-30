@@ -292,6 +292,7 @@ void VulkanEngine::release() {
         return;
     }
     drainAll();
+    stopSubmitThread();
     destroySwapchain();
     {
         std::lock_guard<std::mutex> wl(windowMutex_);
@@ -355,7 +356,79 @@ void VulkanEngine::drainAll() {
             return true;
         });
     }
+    flushSubmits();
+    std::lock_guard<std::mutex> q(queueMutex_);
     vkQueueWaitIdle(queue_);
+}
+
+void VulkanEngine::startSubmitThread() {
+    if (submitThread_.joinable()) return;
+    submitStop_ = false;
+    submitThread_ = std::thread([this] { submitLoop(); });
+}
+
+void VulkanEngine::stopSubmitThread() {
+    if (!submitThread_.joinable()) return;
+    {
+        std::lock_guard<std::mutex> lk(submitMutex_);
+        submitStop_ = true;
+    }
+    submitCv_.notify_all();
+    submitThread_.join();
+}
+
+void VulkanEngine::flushSubmits() {
+    std::unique_lock<std::mutex> lk(submitMutex_);
+    submitCv_.wait(lk, [&] { return (submitJobs_.empty() && !submitBusy_) || !submitThread_.joinable(); });
+}
+
+void VulkanEngine::submitLoop() {
+    for (;;) {
+        SubmitJob job;
+        {
+            std::unique_lock<std::mutex> lk(submitMutex_);
+            submitCv_.wait(lk, [&] { return submitStop_ || !submitJobs_.empty(); });
+            if (submitJobs_.empty()) return; // stop requested and nothing left
+            job = submitJobs_.front();
+            submitJobs_.pop_front();
+            submitBusy_ = true;
+        }
+        VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        si.commandBufferCount = 1;
+        si.pCommandBuffers = &job.cb;
+        const bool present = job.imageIndex != UINT32_MAX;
+        if (present) {
+            si.waitSemaphoreCount = 1;
+            si.pWaitSemaphores = &job.acquireSem;
+            si.pWaitDstStageMask = &waitStage;
+            si.signalSemaphoreCount = 1;
+            si.pSignalSemaphores = &job.renderDone;
+        }
+        {
+            std::lock_guard<std::mutex> q(queueMutex_);
+            if (vkQueueSubmit(queue_, 1, &si, job.fence) != VK_SUCCESS) {
+                VK_LOGE("vkQueueSubmit failed");
+                VkSubmitInfo empty{VK_STRUCTURE_TYPE_SUBMIT_INFO}; // still signal the fence so the slot isn't wedged
+                vkQueueSubmit(queue_, 0, &empty, job.fence);
+            } else if (present) {
+                std::lock_guard<std::mutex> sw(swapMutex_);
+                VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+                pi.waitSemaphoreCount = 1;
+                pi.pWaitSemaphores = &job.renderDone;
+                pi.swapchainCount = 1;
+                pi.pSwapchains = &swapchain_;
+                pi.pImageIndices = &job.imageIndex;
+                VkResult pr = vkQueuePresentKHR(queue_, &pi);
+                if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_ERROR_SURFACE_LOST_KHR) swapchainStale_ = true;
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lk(submitMutex_);
+            submitBusy_ = false;
+        }
+        submitCv_.notify_all();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -529,8 +602,12 @@ bool VulkanEngine::ensureResources(const Geometry& g) {
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     si.commandBufferCount = 1;
     si.pCommandBuffers = &cb;
-    vkQueueSubmit(queue_, 1, &si, VK_NULL_HANDLE);
-    vkQueueWaitIdle(queue_);
+    flushSubmits();
+    {
+        std::lock_guard<std::mutex> q(queueMutex_);
+        vkQueueSubmit(queue_, 1, &si, VK_NULL_HANDLE);
+        vkQueueWaitIdle(queue_);
+    }
 
     geom_ = g;
     graceFrames_ = 48; // first ~2 s after (re)allocation don't count towards the budget guard
@@ -644,7 +721,11 @@ void VulkanEngine::applyPendingWindow() {
         pendingWindow_ = nullptr;
         windowChanged_ = false;
     }
-    vkQueueWaitIdle(queue_);
+    flushSubmits();
+    {
+        std::lock_guard<std::mutex> q(queueMutex_);
+        vkQueueWaitIdle(queue_);
+    }
     for (auto& s : slots_) s.vfReadbackPending = false;
     destroySwapchain();
     if (window_) ANativeWindow_release(window_);
@@ -729,7 +810,11 @@ bool VulkanEngine::createSwapchain() {
 
 void VulkanEngine::destroySwapchain() {
     if (!device_) return;
-    if (swapchain_ || surface_) vkQueueWaitIdle(queue_);
+    if (swapchain_ || surface_) {
+        flushSubmits();
+        std::lock_guard<std::mutex> q(queueMutex_);
+        vkQueueWaitIdle(queue_);
+    }
     for (auto sem : swapRenderDone_) if (sem) vkDestroySemaphore(device_, sem, nullptr);
     swapRenderDone_.clear();
     swapImages_.clear();
@@ -768,6 +853,7 @@ void VulkanEngine::presentCpuFallback(Slot& s) {
 bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
     std::lock_guard<std::mutex> lock(frameMutex_);
     if (!initialized_ || !in.raw) return false;
+    startSubmitThread();
     auto t0 = Clock::now();
 
     Geometry g;
@@ -823,14 +909,21 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
     if (!hqSupported_ || hqThrottled_) params.flags[3] &= ~16;
     const bool hq = (params.flags[3] & 16) != 0;
     params.cleanFlags[2] = temporal && historyValid_ ? 1 : 0;
-    const bool align = params.cleanFlags[2] != 0 && params.cleanFlags[3] != 0 && !alignThrottled_;
-    if (!align) params.cleanFlags[3] = 0;
+    const bool wantAlign = params.cleanFlags[2] != 0 && params.cleanFlags[3] != 0 && !alignThrottled_;
+    if (!wantAlign) params.cleanFlags[3] = 0;
+    // The motion search runs every other frame; in between, clean reuses the
+    // previous motion field (motion changes little over 1/24 s) — halves its cost.
+    const bool align = wantAlign && (!motionValid_ || (++alignTick_ & 1) == 0);
+    motionValid_ = wantAlign;
     std::memcpy(s.params.mapped, &params, sizeof(params));
     auto tCopy = Clock::now();
 
     // Viewfinder target for this frame (never block the camera on the display).
     uint32_t imageIndex = UINT32_MAX;
-    if (swapchain_ && window_) {
+    // try_lock: if the submit thread is mid-present, skip the viewfinder for
+    // this frame rather than wait.
+    std::unique_lock<std::mutex> swapLock(swapMutex_, std::try_to_lock);
+    if (swapchain_ && window_ && swapLock.owns_lock()) {
         VkResult ar = vkAcquireNextImageKHR(device_, swapchain_, 0, s.acquireSem, VK_NULL_HANDLE, &imageIndex);
         if (ar == VK_ERROR_OUT_OF_DATE_KHR || ar == VK_ERROR_SURFACE_LOST_KHR) {
             swapchainStale_ = true;
@@ -839,6 +932,8 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
             imageIndex = UINT32_MAX; // VK_NOT_READY / VK_TIMEOUT: skip the viewfinder this frame
         }
     }
+
+    if (swapLock.owns_lock()) swapLock.unlock();
 
     VkCommandBuffer cb = s.cmd;
     vkResetCommandBuffer(cb, 0);
@@ -981,31 +1076,17 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
     vkEndCommandBuffer(cb);
 
     vkResetFences(device_, 1, &s.fence);
-    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-    si.commandBufferCount = 1;
-    si.pCommandBuffers = &cb;
-    if (imageIndex != UINT32_MAX) {
-        si.waitSemaphoreCount = 1;
-        si.pWaitSemaphores = &s.acquireSem;
-        si.pWaitDstStageMask = &waitStage;
-        si.signalSemaphoreCount = 1;
-        si.pSignalSemaphores = &swapRenderDone_[imageIndex];
+    {
+        SubmitJob job;
+        job.cb = cb;
+        job.fence = s.fence;
+        job.imageIndex = imageIndex;
+        job.acquireSem = s.acquireSem;
+        if (imageIndex != UINT32_MAX) job.renderDone = swapRenderDone_[imageIndex];
+        std::lock_guard<std::mutex> lk(submitMutex_);
+        submitJobs_.push_back(job);
     }
-    if (vkQueueSubmit(queue_, 1, &si, s.fence) != VK_SUCCESS) {
-        VK_LOGE("vkQueueSubmit failed");
-        return false;
-    }
-    if (imageIndex != UINT32_MAX) {
-        VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
-        pi.waitSemaphoreCount = 1;
-        pi.pWaitSemaphores = &swapRenderDone_[imageIndex];
-        pi.swapchainCount = 1;
-        pi.pSwapchains = &swapchain_;
-        pi.pImageIndices = &imageIndex;
-        VkResult pr = vkQueuePresentKHR(queue_, &pi);
-        if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_ERROR_SURFACE_LOST_KHR) swapchainStale_ = true;
-    }
+    submitCv_.notify_one();
 
     if (encoderSlot) {
         std::lock_guard<std::mutex> lk(encoderMutex_);
@@ -1018,7 +1099,7 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
     accCopyMs_ += std::chrono::duration<double, std::milli>(tCopy - tWait).count();
     accSubmitMs_ += msSince(tCopy);
     if (++frameCount_ % 120 == 0) {
-        VK_LOGI("Frame %llu: avg wait %.2fms, upload %.2fms, record+submit %.2fms, dropped %llu, vf=%s",
+        VK_LOGI("Frame %llu: avg wait %.2fms, upload %.2fms, record+queue %.2fms, dropped %llu, vf=%s",
                 static_cast<unsigned long long>(frameCount_), accWaitMs_ / 120, accCopyMs_ / 120, accSubmitMs_ / 120,
                 static_cast<unsigned long long>(droppedFrames_),
                 swapchain_ ? "swapchain" : (cpuFallback_ ? "cpu-fallback" : "none"));
