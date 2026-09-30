@@ -220,6 +220,9 @@ class VesperNative {
   late final void Function(int) _setScopes;
   late final void Function(int) _setSharpening;
   late final void Function(double, double, double) _setViewfinderZoom;
+  late final int Function(Pointer<Utf8>, int) _getLog;
+  late final void Function() _clearLog;
+  late final void Function(Pointer<Utf8>, Pointer<Utf8>) _logLine;
   late final void Function(int) _setOversampling;
   late final void Function(int) _setProcessingPaused;
   late final void Function(int, int) _setNativeIsos;
@@ -316,6 +319,10 @@ class VesperNative {
       _setSharpening = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_sharpening');
       _setViewfinderZoom = _lib.lookupFunction<Void Function(Float, Float, Float), void Function(double, double, double)>(
           'vesper_set_viewfinder_zoom');
+      _getLog = _lib.lookupFunction<Int32 Function(Pointer<Utf8>, Int32), int Function(Pointer<Utf8>, int)>('vesper_get_log');
+      _clearLog = _lib.lookupFunction<Void Function(), void Function()>('vesper_clear_log');
+      _logLine = _lib.lookupFunction<Void Function(Pointer<Utf8>, Pointer<Utf8>), void Function(Pointer<Utf8>, Pointer<Utf8>)>(
+          'vesper_log_line');
       _setScopes = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_scopes');
       _getScopes = _lib
           .lookupFunction<Int32 Function(Pointer<Float>, Pointer<Float>), int Function(Pointer<Float>, Pointer<Float>)>(
@@ -565,6 +572,38 @@ class VesperNative {
   /// Viewfinder magnifier, done in the GPU copy to the display: shows 1/scale
   /// of the frame around the normalised point (cx, cy). scale 1 = off.
   void setViewfinderZoom(double cx, double cy, double scale) => _loaded ? _setViewfinderZoom(cx, cy, scale) : null;
+
+  /// In-app log since launch (native engine + lines added with [log]).
+  String appLog() {
+    if (!_loaded) return '';
+    var size = 1 << 20;
+    for (var attempt = 0; attempt < 2; ++attempt) {
+      final buf = calloc<Uint8>(size).cast<Utf8>();
+      try {
+        final n = _getLog(buf, size);
+        if (n >= 0) return buf.toDartString(length: n);
+        size = -n + 4096; // grew meanwhile: retry with the size it asked for
+      } finally {
+        calloc.free(buf);
+      }
+    }
+    return '';
+  }
+
+  void clearAppLog() => _loaded ? _clearLog() : null;
+
+  /// Adds a line to the in-app log (and logcat).
+  void log(String message, {String tag = 'Vesper_UI'}) {
+    if (!_loaded) return;
+    final t = tag.toNativeUtf8();
+    final m = message.toNativeUtf8();
+    try {
+      _logLine(t, m);
+    } finally {
+      calloc.free(t);
+      calloc.free(m);
+    }
+  }
 
   /// Where the native viewfinder surface sits on screen, in physical pixels
   /// (it is composited by the system underneath the transparent Flutter UI).

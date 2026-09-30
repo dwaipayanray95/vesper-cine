@@ -1,6 +1,7 @@
 // C ABI used by Dart FFI (lib/services/vesper_native.dart) plus the one JNI
 // entry point MainActivity uses to hand over the viewfinder Surface.
 #include "camera_engine.h"
+#include "app_log.h"
 #include "color_science.h"
 #include "focus_controller.h"
 #include "iso_analysis.h"
@@ -126,7 +127,7 @@ void dumpCalibrationFrame(const RawFrame& f, const std::string& base, const std:
     const CaptureMetadata& m = *f.meta;
     const SensorInfo& info = gCamera->sensorInfo();
     FILE* rf = std::fopen((base + ".raw10").c_str(), "wb");
-    if (!rf) { __android_log_print(ANDROID_LOG_ERROR, "Vesper", "calibration dump: cannot write %s", base.c_str()); return; }
+    if (!rf) { vesperLog(ANDROID_LOG_ERROR, "Vesper", "calibration dump: cannot write %s", base.c_str()); return; }
     std::fwrite(f.data, 1, std::min(static_cast<size_t>(f.rowStride) * f.height, f.size), rf);
     std::fclose(rf);
     Mat3 fmNow = gColor.forwardMatrixFor(s.color.kelvin);
@@ -152,7 +153,7 @@ void dumpCalibrationFrame(const RawFrame& f, const std::string& base, const std:
     if (!jf) return;
     std::fwrite(j.data(), 1, j.size(), jf);
     std::fclose(jf);
-    __android_log_print(ANDROID_LOG_INFO, "Vesper", "Calibration frame saved: %s (.raw10/.json)", base.c_str());
+    vesperLog(ANDROID_LOG_INFO, "Vesper", "Calibration frame saved: %s (.raw10/.json)", base.c_str());
 }
 Vec3 gAwbNeutral{0, 0, 0};
 
@@ -703,11 +704,11 @@ void isoSweepMain() {
             std::fputs(j.c_str(), fp);
             std::fclose(fp);
         }
-        __android_log_print(ANDROID_LOG_INFO, "Vesper", "ISO analysis: base %d, HCG %d, digital from %d (%zu steps)", a.baseIso, a.hcgIso,
+        vesperLog(ANDROID_LOG_INFO, "Vesper", "ISO analysis: base %d, HCG %d, digital from %d (%zu steps)", a.baseIso, a.hcgIso,
                             a.digitalFromIso, samples.size());
     }
     for (const auto& x : samples)
-        __android_log_print(ANDROID_LOG_INFO, "Vesper", "  ISO %5d dark sigma %.6f mean %.5f", x.iso, x.sigma, x.mean);
+        vesperLog(ANDROID_LOG_INFO, "Vesper", "  ISO %5d dark sigma %.6f mean %.5f", x.iso, x.sigma, x.mean);
     std::lock_guard<std::mutex> lk(gSweep.mutex);
     gSweep.error = error;
     gSweep.resultPath = error.empty() ? path : "";
@@ -953,7 +954,7 @@ extern "C" {
 
 EXPORT int32_t vesper_init() {
     bool ok = ensureInit();
-    __android_log_print(ANDROID_LOG_INFO, "Vesper", "vesper_init: %d", ok);
+    vesperLog(ANDROID_LOG_INFO, "Vesper", "vesper_init: %d", ok);
     return ok ? 0 : -1;
 }
 
@@ -1026,7 +1027,7 @@ int32_t restartStreamIfNeeded(bool force) {
     if (!force && gCamera->isStreaming() && gCamera->streamWidth() == mode.width && gCamera->streamHeight() == mode.height) return 0;
     gLastTimestampNs = 0;
     bool ok = gCamera->startCapture(mode.width, mode.height, onFrame);
-    __android_log_print(ANDROID_LOG_INFO, "Vesper", "Stream mode %dx%d (max %.1f fps) for crop %d @ %.3f fps: %d",
+    vesperLog(ANDROID_LOG_INFO, "Vesper", "Stream mode %dx%d (max %.1f fps) for crop %d @ %.3f fps: %d",
                         mode.width, mode.height, mode.maxFps(), crop, gCamera->frameRate(), ok);
     return ok ? 0 : -1;
 }
@@ -1201,7 +1202,7 @@ EXPORT int32_t vesper_auto_expose(int32_t priority, int64_t* outExposureNs, int3
     }
     if (outExposureNs) *outExposureNs = ns;
     if (outIso) *outIso = isoI;
-    __android_log_print(ANDROID_LOG_INFO, "Vesper", "Auto-expose (%s): meanG=%.4f p99.5=%.3f x%.3f -> %.3fms ISO %d",
+    vesperLog(ANDROID_LOG_INFO, "Vesper", "Auto-expose (%s): meanG=%.4f p99.5=%.3f x%.3f -> %.3fms ISO %d",
                         m.spot ? "spot" : (m.faceValid ? "face" : "centre"),
                         std::exp(m.faceValid ? m.faceLogMeanG : m.logMeanG), m.p995, scale, ns / 1e6, isoI);
     return 0;
@@ -1266,6 +1267,34 @@ EXPORT void vesper_set_oversampling(int32_t enable) {
 
 // Detail enhancement: 0 off, 1 low, 2 medium, 3 high (noise-aware unsharp mask,
 // applied to recording and viewfinder).
+// In-app log (developer "App log" screen). Writes the buffered lines, oldest
+// first, newline-separated; returns the length, or -(needed bytes) if maxLen
+// is too small.
+EXPORT int32_t vesper_get_log(char* out, int32_t maxLen) {
+    auto& log = vesper::appLog();
+    std::string text;
+    {
+        std::lock_guard<std::mutex> lk(log.mutex);
+        if (log.dropped) text += "... " + std::to_string(log.dropped) + " older lines dropped\n";
+        for (const auto& l : log.lines) { text += l; text += '\n'; }
+    }
+    if (!out || text.size() + 1 > static_cast<size_t>(maxLen)) return -static_cast<int32_t>(text.size() + 1);
+    std::memcpy(out, text.c_str(), text.size() + 1);
+    return static_cast<int32_t>(text.size());
+}
+
+EXPORT void vesper_clear_log() {
+    auto& log = vesper::appLog();
+    std::lock_guard<std::mutex> lk(log.mutex);
+    log.lines.clear();
+    log.dropped = 0;
+}
+
+// Lets the Dart side add its own lines (benchmark results, UI events).
+EXPORT void vesper_log_line(const char* tag, const char* message) {
+    vesperLog(ANDROID_LOG_INFO, tag ? tag : "Vesper_UI", "%s", message ? message : "");
+}
+
 EXPORT void vesper_set_viewfinder_zoom(float cx, float cy, float scale) {
     if (gGpu) gGpu->setViewfinderZoom(cx, cy, scale);
 }
@@ -1316,7 +1345,7 @@ EXPORT int32_t vesper_lock_white_balance(double* outKelvin, double* outTint) {
     setColorLocked(c);
     if (outKelvin) *outKelvin = c.kelvin;
     if (outTint) *outTint = c.tint;
-    __android_log_print(ANDROID_LOG_INFO, "Vesper", "WB lock: raw neutral %.4f %.4f %.4f -> %.0fK tint %.1f, gains R%.3f B%.3f",
+    vesperLog(ANDROID_LOG_INFO, "Vesper", "WB lock: raw neutral %.4f %.4f %.4f -> %.0fK tint %.1f, gains R%.3f B%.3f",
                         n[0], n[1], n[2], c.kelvin, c.tint, c.wbGains[0], c.wbGains[2]);
     return 0;
 }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "color_science.h"
+#include "app_log.h"
 
 #include <camera/NdkCameraManager.h>
 #include <camera/NdkCameraDevice.h>
@@ -22,9 +23,9 @@
 #include <vector>
 
 #define CAM_TAG "Vesper_Camera"
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, CAM_TAG, __VA_ARGS__)
-#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, CAM_TAG, __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, CAM_TAG, __VA_ARGS__)
+#define LOGI(...) vesperLog(ANDROID_LOG_INFO, CAM_TAG, __VA_ARGS__)
+#define LOGW(...) vesperLog(ANDROID_LOG_WARN, CAM_TAG, __VA_ARGS__)
+#define LOGE(...) vesperLog(ANDROID_LOG_ERROR, CAM_TAG, __VA_ARGS__)
 
 namespace vesper {
 

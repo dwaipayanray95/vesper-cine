@@ -380,7 +380,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
           '${name.padRight(22)} ${ms.toStringAsFixed(1).padLeft(5)} ms'
           '${i > 0 ? '  (+${(ms - base).toStringAsFixed(1)})' : ''}${drops > 0 ? '  $drops drops' : ''}';
       results.add(line);
-      debugPrint('VesperBench: $line');
+      _engine.log(line, tag: 'VesperBench');
     }
     // Restore the user's settings.
     _engine.setOversampling(_oversampling);

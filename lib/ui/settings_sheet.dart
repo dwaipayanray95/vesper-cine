@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../build_flags.dart';
+import 'app_log_screen.dart';
 import 'value_picker.dart';
 
 /// Full-screen cinema settings page.
@@ -303,6 +304,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                   onPressed: widget.onRunGpuBenchmark,
                   child: const Text('RUN', style: TextStyle(color: Colors.amber, fontSize: 11)),
+                ),
+              ),
+            if (kDevTools)
+              _settingRow(
+                'App log (dev)',
+                'Engine log since launch: GPU, guard, camera, recorder. Copy it to share',
+                OutlinedButton(
+                  style: OutlinedButton.styleFrom(
+                    side: const BorderSide(color: Colors.amber),
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  ),
+                  onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const AppLogScreen())),
+                  child: const Text('OPEN', style: TextStyle(color: Colors.amber, fontSize: 11)),
                 ),
               ),
             _settingRow(

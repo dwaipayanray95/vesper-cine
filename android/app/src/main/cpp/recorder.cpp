@@ -1,4 +1,5 @@
 #include "recorder.h"
+#include "app_log.h"
 #include "vulkan_engine.h"
 
 #include <android/log.h>
@@ -10,9 +11,9 @@
 #include <ctime>
 
 #define REC_TAG "Vesper_Recorder"
-#define RLOGI(...) __android_log_print(ANDROID_LOG_INFO, REC_TAG, __VA_ARGS__)
-#define RLOGW(...) __android_log_print(ANDROID_LOG_WARN, REC_TAG, __VA_ARGS__)
-#define RLOGE(...) __android_log_print(ANDROID_LOG_ERROR, REC_TAG, __VA_ARGS__)
+#define RLOGI(...) vesperLog(ANDROID_LOG_INFO, REC_TAG, __VA_ARGS__)
+#define RLOGW(...) vesperLog(ANDROID_LOG_WARN, REC_TAG, __VA_ARGS__)
+#define RLOGE(...) vesperLog(ANDROID_LOG_ERROR, REC_TAG, __VA_ARGS__)
 
 namespace vesper {
 

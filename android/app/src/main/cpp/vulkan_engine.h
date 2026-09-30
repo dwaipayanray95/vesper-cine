@@ -2,6 +2,7 @@
 
 #define VK_USE_PLATFORM_ANDROID_KHR 1
 #include <vulkan/vulkan.h>
+#include "app_log.h"
 #include <android/native_window.h>
 #include <android/log.h>
 
@@ -16,9 +17,9 @@
 #include <vector>
 
 #define VK_TAG "Vesper_Vulkan"
-#define VK_LOGI(...) __android_log_print(ANDROID_LOG_INFO, VK_TAG, __VA_ARGS__)
-#define VK_LOGW(...) __android_log_print(ANDROID_LOG_WARN, VK_TAG, __VA_ARGS__)
-#define VK_LOGE(...) __android_log_print(ANDROID_LOG_ERROR, VK_TAG, __VA_ARGS__)
+#define VK_LOGI(...) vesperLog(ANDROID_LOG_INFO, VK_TAG, __VA_ARGS__)
+#define VK_LOGW(...) vesperLog(ANDROID_LOG_WARN, VK_TAG, __VA_ARGS__)
+#define VK_LOGE(...) vesperLog(ANDROID_LOG_ERROR, VK_TAG, __VA_ARGS__)
 
 namespace vesper {
 
