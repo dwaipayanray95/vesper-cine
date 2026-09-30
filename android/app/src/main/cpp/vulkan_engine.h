@@ -76,7 +76,9 @@ public:
     bool processFrame(const FrameInput& in, int* encoderSlot);
 
     // Camera frame interval; used to keep optional GPU passes within budget.
-    void setFrameBudgetMs(double ms) { frameBudgetMs_ = ms; }
+    void setFrameBudgetMs(double ms);
+    // GPU over budget with nothing left to pause: frames will drop at this frame rate.
+    bool overloaded() const { return overloaded_; }
     // Next present starts a fresh pacing measurement (after a pause, not a hitch).
     void resetPacing() { pacingReset_ = true; }
     // Viewfinder magnifier: show 1/scale of the frame around (cx, cy) (normalised).
@@ -202,7 +204,12 @@ private:
     bool guardEnabled_ = true;
     int graceFrames_ = 0;       // ignore the first frames after (re)allocation: always slow
     int underBudgetFrames_ = 0;
-    int recoverFrames_ = 120;   // under-budget frames needed before re-enabling a stage (doubles on flapping)
+    std::atomic<bool> overloaded_{false};
+    bool recordingNow_ = false;
+    double stageCostMs_[3] = {6.0, 12.0, 6.0}; // measured when paused (initial guesses)
+    int measuringStage_ = -1, lastRestored_ = -1;
+    double costBeforeMs_ = 0;
+    int recoverFrames_ = 24;   // under-budget frames needed before re-enabling a stage (doubles on flapping)
     bool historyValid_ = false;
 
     // GPU timing: kStamps timestamps per slot (start, unpack, align, clean, end).

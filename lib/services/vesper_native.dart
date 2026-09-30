@@ -57,6 +57,7 @@ class EngineStatus {
   final String isoSweepResult; // result JSON path of the last successful analysis
   final String isoSweepError;
   final bool focusLocked; // focus held (AF-L)
+  final bool gpuOverloaded; // GPU over budget with nothing left to pause: this frame rate drops frames
 
   EngineStatus.fromJson(Map<String, dynamic> j)
     : streaming = j['streaming'] as bool,
@@ -90,7 +91,8 @@ class EngineStatus {
       isoSweep = (j['isoSweep'] as num?)?.toDouble() ?? -1,
       isoSweepResult = (j['isoSweepResult'] as String?) ?? '',
       isoSweepError = (j['isoSweepError'] as String?) ?? '',
-      focusLocked = (j['focusLocked'] as bool?) ?? false;
+      focusLocked = (j['focusLocked'] as bool?) ?? false,
+      gpuOverloaded = (j['gpuOverloaded'] as bool?) ?? false;
 }
 
 /// Luma scopes of the recorded Apple Log signal (see vesper_get_scopes).

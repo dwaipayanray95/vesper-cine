@@ -9,6 +9,7 @@
 #include "shaders/green_rgba_spv.h"
 
 #include <algorithm>
+#include <cmath>
 #include <chrono>
 #include <cstring>
 
@@ -1003,6 +1004,7 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
         return false;
     }
     auto tWait = Clock::now();
+    recordingNow_ = encoderSlot != nullptr;
     readTimestamps(idx);
     presentCpuFallback(s);
 
@@ -1193,39 +1195,71 @@ void VulkanEngine::readTimestamps(int slot) {
     ++timedFrames_;
     const double frameMs = (t[kStamps - 1] - t[0]) * timestampPeriodNs_ * 1e-6;
     gpuFrameMs_ = gpuFrameMs_ == 0 ? frameMs : 0.9 * gpuFrameMs_ + 0.1 * frameMs;
-    // Sustained >85% of the frame interval means we are about to drop frames:
-    // alignment is the optional, most expensive pass, so it goes first.
-    if (!guardEnabled_) return;
-    if (graceFrames_ > 0) { --graceFrames_; overBudgetFrames_ = underBudgetFrames_ = 0; return; }
-    // Sustained >85% of the frame interval means we are about to drop frames:
-    // pause the optional passes, cheapest-to-lose first (alignment, then HQ
-    // oversampling, then NR). Sustained headroom (<65%) brings them back in
-    // reverse order; a stage that flaps waits twice as long each time.
-    overBudgetFrames_ = gpuFrameMs_ > 0.85 * frameBudgetMs_ ? overBudgetFrames_ + 1 : 0;
-    underBudgetFrames_ = gpuFrameMs_ < 0.65 * frameBudgetMs_ ? underBudgetFrames_ + 1 : 0;
-    if (overBudgetFrames_ > 30) {
-        overBudgetFrames_ = underBudgetFrames_ = 0;
-        if (!alignThrottled_) {
-            alignThrottled_ = true;
-            VK_LOGW("GPU %.1fms over %.1fms budget: temporal NR alignment paused", gpuFrameMs_, frameBudgetMs_.load());
-        } else if (hqSupported_ && !hqThrottled_) {
-            hqThrottled_ = true;
-            VK_LOGW("GPU %.1fms still over %.1fms budget: HQ oversampling paused", gpuFrameMs_, frameBudgetMs_.load());
-        } else if (!nrThrottled_) {
-            nrThrottled_ = true;
-            VK_LOGW("GPU %.1fms still over %.1fms budget: temporal and chroma NR paused", gpuFrameMs_, frameBudgetMs_.load());
+    // Frame rate not sustainable: over budget with every optional stage the
+    // guard may pause already paused (or the guard off). Shown as a warning.
+    // The guard is on when enabled in Settings, and always while recording
+    // (a clip must never silently lose frames).
+    const bool guard = guardEnabled_ || recordingNow_;
+    const bool allPaused = alignThrottled_ && nrThrottled_ && (hqThrottled_ || !hqSupported_);
+    overloaded_ = gpuFrameMs_ > 0.97 * frameBudgetMs_ && (!guard || allPaused);
+    if (!guard) {
+        if (alignThrottled_ || hqThrottled_ || nrThrottled_) {
+            alignThrottled_ = hqThrottled_ = nrThrottled_ = false; // recording ended, guard is OFF
+            graceFrames_ = 24;
         }
-        graceFrames_ = 24; // let the timing settle before judging the new load
-    } else if (underBudgetFrames_ > recoverFrames_ && (alignThrottled_ || hqThrottled_ || nrThrottled_)) {
-        underBudgetFrames_ = 0;
-        if (nrThrottled_) nrThrottled_ = false;
-        else if (hqThrottled_) hqThrottled_ = false;
-        else alignThrottled_ = false;
-        recoverFrames_ = std::min(recoverFrames_ * 2, 24 * 120); // back off if it flaps (max ~2 min)
-        graceFrames_ = 24;
-        VK_LOGI("GPU %.1fms has headroom: re-enabled a paused stage (align %d hq %d nr %d)", gpuFrameMs_,
-                !alignThrottled_, !hqThrottled_, !nrThrottled_);
+        return;
     }
+    if (graceFrames_ > 0) {
+        overBudgetFrames_ = underBudgetFrames_ = 0;
+        if (--graceFrames_ == 0 && measuringStage_ >= 0) {
+            // The stage just paused cost (load before) - (load after).
+            stageCostMs_[measuringStage_] = std::max(0.5, costBeforeMs_ - gpuFrameMs_);
+            VK_LOGI("Guard: paused stage %d saved %.1f ms", measuringStage_, stageCostMs_[measuringStage_]);
+            measuringStage_ = -1;
+        }
+        return;
+    }
+    // Sustained >85% of the frame interval means we are about to drop frames:
+    // pause optional stages, cheapest-to-lose first (alignment, HQ, NR).
+    // A paused stage comes back as soon as its measured cost fits under 80%
+    // of the budget again (so a stage that fits is never left off); one that
+    // then overflows again waits longer before the next try.
+    const double budget = frameBudgetMs_;
+    overBudgetFrames_ = gpuFrameMs_ > 0.85 * budget ? overBudgetFrames_ + 1 : 0;
+    int next = nrThrottled_ ? 2 : (hqThrottled_ ? 1 : (alignThrottled_ ? 0 : -1)); // next stage to restore
+    const bool fits = next >= 0 && gpuFrameMs_ + stageCostMs_[next] < 0.80 * budget;
+    underBudgetFrames_ = fits ? underBudgetFrames_ + 1 : 0;
+    if (overBudgetFrames_ > 12) {
+        overBudgetFrames_ = underBudgetFrames_ = 0;
+        int stage = -1;
+        if (!alignThrottled_) { alignThrottled_ = true; stage = 0; }
+        else if (hqSupported_ && !hqThrottled_) { hqThrottled_ = true; stage = 1; }
+        else if (!nrThrottled_) { nrThrottled_ = true; stage = 2; }
+        if (stage >= 0) {
+            VK_LOGW("GPU %.1fms over %.1fms budget: paused stage %d (0 align, 1 HQ, 2 NR)", gpuFrameMs_, budget, stage);
+            if (stage == lastRestored_) recoverFrames_ = std::min(recoverFrames_ * 2, 24 * 60); // flapping: back off
+            measuringStage_ = stage;
+            costBeforeMs_ = gpuFrameMs_;
+            graceFrames_ = 24; // let the timing settle, then measure what the pause saved
+        }
+    } else if (fits && underBudgetFrames_ > recoverFrames_) {
+        underBudgetFrames_ = 0;
+        if (next == 2) nrThrottled_ = false;
+        else if (next == 1) hqThrottled_ = false;
+        else alignThrottled_ = false;
+        lastRestored_ = next;
+        graceFrames_ = 24;
+        VK_LOGI("GPU %.1fms + %.1fms fits the %.1fms budget: re-enabled stage %d", gpuFrameMs_, stageCostMs_[next], budget, next);
+    }
+}
+
+void VulkanEngine::setFrameBudgetMs(double ms) {
+    if (std::fabs(ms - frameBudgetMs_.load()) > 0.5) {
+        // New frame rate: judge the stages afresh right away.
+        recoverFrames_ = 24;
+        lastRestored_ = -1;
+    }
+    frameBudgetMs_ = ms;
 }
 
 void VulkanEngine::setBudgetGuard(bool enabled) {

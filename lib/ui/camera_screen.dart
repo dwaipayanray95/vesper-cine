@@ -199,6 +199,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   }
   String _statusMessage = 'INITIALIZING SENSOR...';
   EngineStatus? _status;
+  bool _overloadWarned = false;
   RecordingFile? _recordingFile;
   bool _stopping = false;
   Timer? _poll;
@@ -636,6 +637,13 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     if (_settingsOpen) return; // viewfinder hidden: don't rebuild the camera screen
     final s = _engine.status();
     if (s == null || !mounted) return;
+    // While recording the GPU guard is always on; if even that can't hold
+    // the frame rate, say so once per clip instead of silently dropping.
+    if (_recording && s.gpuOverloaded && !_overloadWarned) {
+      _overloadWarned = true;
+      _toast('${_fps.round()} fps can\'t be sustained with these settings: frames are dropping. '
+        'Lower the frame rate or turn off HQ / noise reduction.');
+    }
     setState(() {
       _status = s;
       if (s.awbAuto) {
@@ -675,6 +683,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     }
     setState(() => _recordingFile = file);
     _engine.lockRotation(true); // a clip never flips orientation mid-take
+    _overloadWarned = false;
   }
 
   Future<void> _finishRecording(String reason) async {
@@ -869,6 +878,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     }
     if (_temporalNr > 0 && _nrAlignment && s.alignThrottled) parts.add('ALIGN PAUSED');
     if ((_temporalNr > 0 || _chromaNr > 0) && s.nrThrottled) parts.add('NR PAUSED');
+    if (s.gpuOverloaded) parts.add('FPS NOT SUSTAINABLE');
     final drops = s.cameraDrops + s.framesDropped;
     if (drops > 0) parts.add('$drops DROP');
     return parts.join(' · ');
