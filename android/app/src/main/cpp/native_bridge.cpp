@@ -720,7 +720,13 @@ std::atomic<bool> gProcessingPaused{false};
 
 void onFrame(const RawFrame& f) {
     if (!gGpu) return;
-    if (gProcessingPaused && !(gRecorder && gRecorder->isRecording())) return;
+    if (gProcessingPaused && !(gRecorder && gRecorder->isRecording())) {
+        // Paused (Settings open): no frames are expected, so restart the drop
+        // and viewfinder-pacing measurements instead of counting the pause.
+        gLastTimestampNs = 0;
+        gGpu->resetPacing();
+        return;
+    }
     static int frameIndex = 0;
     const SensorInfo& info = gCamera->sensorInfo();
     const CaptureMetadata& meta = *f.meta;
@@ -1233,7 +1239,11 @@ EXPORT void vesper_iso_sweep_cancel() {
 }
 
 // Pause / resume per-frame processing (viewfinder freezes; recording is never paused).
-EXPORT void vesper_set_processing_paused(int32_t paused) { gProcessingPaused = paused != 0; }
+EXPORT void vesper_set_processing_paused(int32_t paused) {
+    // Opening Settings starts the DROP counter afresh (never mid-recording).
+    if (paused && !(gRecorder && gRecorder->isRecording())) gCameraDrops = 0;
+    gProcessingPaused = paused != 0;
+}
 
 // Measured native ISOs for the clean auto-exposure (0 = unknown).
 EXPORT void vesper_set_native_isos(int32_t baseIso, int32_t hcgIso) {

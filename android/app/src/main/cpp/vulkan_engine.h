@@ -77,6 +77,8 @@ public:
 
     // Camera frame interval; used to keep optional GPU passes within budget.
     void setFrameBudgetMs(double ms) { frameBudgetMs_ = ms; }
+    // Next present starts a fresh pacing measurement (after a pause, not a hitch).
+    void resetPacing() { pacingReset_ = true; }
     // Viewfinder magnifier: show 1/scale of the frame around (cx, cy) (normalised).
     void setViewfinderZoom(float cx, float cy, float scale) { zoomCx_ = cx; zoomCy_ = cy; zoomScale_ = scale; }
     // false: never pause alignment / HQ / NR automatically (frames may drop instead).
@@ -247,6 +249,7 @@ private:
     std::atomic<uint64_t> vfSkipped_{0};
     std::atomic<float> zoomCx_{0.5f}, zoomCy_{0.5f}, zoomScale_{1.0f};
     std::atomic<uint64_t> vfHitches_{0};
+    std::atomic<bool> pacingReset_{false};
     std::atomic<double> vfMaxGapMs_{0.0};
     std::chrono::steady_clock::time_point lastPresent_{}; // submit thread only
     double maxWaitMs_ = 0;

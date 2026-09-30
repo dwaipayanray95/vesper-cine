@@ -490,6 +490,7 @@ void VulkanEngine::presentViewfinder(Slot& s) {
     if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_ERROR_SURFACE_LOST_KHR) swapchainStale_ = true;
     // Present pacing: a gap well over one camera frame is a visible hitch.
     auto now = Clock::now();
+    if (pacingReset_.exchange(false)) lastPresent_ = {};
     if (lastPresent_.time_since_epoch().count() != 0) {
         double gap = std::chrono::duration<double, std::milli>(now - lastPresent_).count();
         if (gap > 1.5 * frameBudgetMs_.load()) ++vfHitches_;
