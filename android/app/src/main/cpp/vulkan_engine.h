@@ -208,6 +208,8 @@ private:
     std::atomic<bool> overloaded_{false};
     bool recordingNow_ = false;
     double stageCostMs_[3] = {6.0, 12.0, 6.0}; // measured when paused (initial guesses)
+    bool costReliable_[3] = {false, false, false}; // measured by a restore (under budget)
+    bool measuringRestore_ = false;
     int measuringStage_ = -1, lastRestored_ = -1;
     double costBeforeMs_ = 0;
     int recoverFrames_ = 24;   // under-budget frames needed before re-enabling a stage (doubles on flapping)

@@ -1216,9 +1216,19 @@ void VulkanEngine::readTimestamps(int slot) {
     if (graceFrames_ > 0) {
         overBudgetFrames_ = underBudgetFrames_ = 0;
         if (--graceFrames_ == 0 && measuringStage_ >= 0) {
-            // The stage just paused cost (load before) - (load after).
-            stageCostMs_[measuringStage_] = std::max(0.5, costBeforeMs_ - gpuFrameMs_);
-            VK_LOGI("Guard: paused stage %d saved %.1f ms", measuringStage_, stageCostMs_[measuringStage_]);
+            const int k = measuringStage_;
+            if (measuringRestore_) {
+                // Restored under budget: (load after) - (load before) is the stage's real cost.
+                stageCostMs_[k] = std::max(0.5, gpuFrameMs_ - costBeforeMs_);
+                costReliable_[k] = true;
+                VK_LOGI("Guard: re-enabled stage %d costs %.1f ms", k, stageCostMs_[k]);
+            } else {
+                // Saving measured while overloaded: the frame time is inflated
+                // then, so it only stands in until a restore measures it.
+                const double saved = std::max(0.5, costBeforeMs_ - gpuFrameMs_);
+                if (!costReliable_[k]) stageCostMs_[k] = saved;
+                VK_LOGI("Guard: paused stage %d saved %.1f ms", k, saved);
+            }
             measuringStage_ = -1;
         }
         return;
@@ -1234,7 +1244,8 @@ void VulkanEngine::readTimestamps(int slot) {
     overBudgetFrames_ = gpuFrameMs_ > 0.85 * budget ? overBudgetFrames_ + 1 : 0;
     int next = nrThrottled_ ? 2 : (hqThrottled_ ? 1 : (alignThrottled_ ? 0 : -1)); // next stage to restore
     const bool fitsByCost = next >= 0 && gpuFrameMs_ + stageCostMs_[next] < 0.85 * budget - 0.5;
-    const bool headroom = next >= 0 && gpuFrameMs_ < 0.75 * budget;
+    // Trial when the cost is only an (inflated) pause estimate and there is room below the pause line.
+    const bool headroom = next >= 0 && !costReliable_[next] && gpuFrameMs_ < 0.85 * budget - 1.5;
     underBudgetFrames_ = (fitsByCost || headroom) ? underBudgetFrames_ + 1 : 0;
     const bool fits = fitsByCost ? underBudgetFrames_ > recoverFrames_
                                  : (headroom && underBudgetFrames_ > 3 * recoverFrames_);
@@ -1248,6 +1259,7 @@ void VulkanEngine::readTimestamps(int slot) {
             VK_LOGW("GPU %.1fms over %.1fms budget: paused stage %d (0 align, 1 HQ, 2 NR)", gpuFrameMs_, budget, stage);
             if (stage == lastRestored_) recoverFrames_ = std::min(recoverFrames_ * 2, 24 * 60); // flapping: back off
             measuringStage_ = stage;
+            measuringRestore_ = false;
             costBeforeMs_ = gpuFrameMs_;
             graceFrames_ = 24; // let the timing settle, then measure what the pause saved
         }
@@ -1257,6 +1269,9 @@ void VulkanEngine::readTimestamps(int slot) {
         else if (next == 1) hqThrottled_ = false;
         else alignThrottled_ = false;
         lastRestored_ = next;
+        measuringStage_ = next;
+        measuringRestore_ = true;
+        costBeforeMs_ = gpuFrameMs_;
         graceFrames_ = 24;
         VK_LOGI("GPU %.1fms + %.1fms fits the %.1fms budget: re-enabled stage %d", gpuFrameMs_, stageCostMs_[next], budget, next);
     }
