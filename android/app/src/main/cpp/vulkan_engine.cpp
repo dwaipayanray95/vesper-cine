@@ -153,6 +153,7 @@ bool VulkanEngine::createInstanceAndDevice() {
     pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     pci.queueFamilyIndex = queueFamily_;
     if (vkCreateCommandPool(device_, &pci, nullptr, &cmdPool_) != VK_SUCCESS) return false;
+    if (vkCreateCommandPool(device_, &pci, nullptr, &presentPool_) != VK_SUCCESS) return false;
 
     for (auto& s : slots_) {
         VkCommandBufferAllocateInfo cai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
@@ -160,9 +161,12 @@ bool VulkanEngine::createInstanceAndDevice() {
         cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
         cai.commandBufferCount = 1;
         if (vkAllocateCommandBuffers(device_, &cai, &s.cmd) != VK_SUCCESS) return false;
+        cai.commandPool = presentPool_;
+        if (vkAllocateCommandBuffers(device_, &cai, &s.presentCmd) != VK_SUCCESS) return false;
         VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
         fci.flags = VK_FENCE_CREATE_SIGNALED_BIT;
         if (vkCreateFence(device_, &fci, nullptr, &s.fence) != VK_SUCCESS) return false;
+        if (vkCreateFence(device_, &fci, nullptr, &s.presentFence) != VK_SUCCESS) return false;
         VkSemaphoreCreateInfo sci{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
         if (vkCreateSemaphore(device_, &sci, nullptr, &s.acquireSem) != VK_SUCCESS) return false;
     }
@@ -303,6 +307,7 @@ void VulkanEngine::release() {
     destroyResources();
     for (auto& s : slots_) {
         if (s.fence) vkDestroyFence(device_, s.fence, nullptr);
+        if (s.presentFence) vkDestroyFence(device_, s.presentFence, nullptr);
         if (s.acquireSem) vkDestroySemaphore(device_, s.acquireSem, nullptr);
         s = Slot{};
     }
@@ -330,6 +335,8 @@ void VulkanEngine::release() {
     if (renderLayout_) vkDestroyDescriptorSetLayout(device_, renderLayout_, nullptr);
     if (descPool_) vkDestroyDescriptorPool(device_, descPool_, nullptr);
     if (cmdPool_) vkDestroyCommandPool(device_, cmdPool_, nullptr);
+    if (presentPool_) vkDestroyCommandPool(device_, presentPool_, nullptr);
+    presentPool_ = VK_NULL_HANDLE;
     if (queryPool_) vkDestroyQueryPool(device_, queryPool_, nullptr);
     queryPool_ = VK_NULL_HANDLE;
     vkDestroyDevice(device_, nullptr);
@@ -382,6 +389,77 @@ void VulkanEngine::flushSubmits() {
     submitCv_.wait(lk, [&] { return (submitJobs_.empty() && !submitBusy_) || !submitThread_.joinable(); });
 }
 
+// Submit thread: acquire a swapchain image (may wait for the display), copy
+// the frame's viewfinder image into it and present. Runs after the frame's
+// compute submit, so queue order makes the viewfinder image ready.
+void VulkanEngine::presentViewfinder(Slot& s) {
+    if (!swapchain_ || swapchainStale_) { ++vfSkipped_; return; }
+    // The slot's previous copy must be done before its command buffer / semaphore are reused.
+    if (vkWaitForFences(device_, 1, &s.presentFence, VK_TRUE, kFenceTimeoutNs) != VK_SUCCESS) { ++vfSkipped_; return; }
+    uint32_t imageIndex = 0;
+    VkResult ar = vkAcquireNextImageKHR(device_, swapchain_, 100000000ull, s.acquireSem, VK_NULL_HANDLE, &imageIndex);
+    if (ar == VK_ERROR_OUT_OF_DATE_KHR || ar == VK_ERROR_SURFACE_LOST_KHR) { swapchainStale_ = true; ++vfSkipped_; return; }
+    if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) { ++vfSkipped_; return; }
+
+    VkCommandBuffer cb = s.presentCmd;
+    vkResetCommandBuffer(cb, 0);
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cb, &bi);
+    VkImage dst = swapImages_[imageIndex];
+    VkImageMemoryBarrier toDst = imageBarrier(dst, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
+                                              VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                         0, nullptr, 0, nullptr, 1, &toDst);
+    const int outW = geom_.outW, outH = geom_.outH;
+    if (swapExtent_.width == static_cast<uint32_t>(outW) && swapExtent_.height == static_cast<uint32_t>(outH)) {
+        VkImageCopy region{};
+        region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.dstSubresource = region.srcSubresource;
+        region.extent = {swapExtent_.width, swapExtent_.height, 1};
+        vkCmdCopyImage(cb, vfImage_.image, VK_IMAGE_LAYOUT_GENERAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    } else {
+        VkImageBlit blit{};
+        blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        blit.dstSubresource = blit.srcSubresource;
+        blit.srcOffsets[1] = {outW, outH, 1};
+        blit.dstOffsets[1] = {static_cast<int32_t>(swapExtent_.width), static_cast<int32_t>(swapExtent_.height), 1};
+        vkCmdBlitImage(cb, vfImage_.image, VK_IMAGE_LAYOUT_GENERAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                       1, &blit, VK_FILTER_LINEAR);
+    }
+    VkImageMemoryBarrier toPresent = imageBarrier(dst, VK_ACCESS_TRANSFER_WRITE_BIT, 0,
+                                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0,
+                         0, nullptr, 0, nullptr, 1, &toPresent);
+    vkEndCommandBuffer(cb);
+
+    vkResetFences(device_, 1, &s.presentFence);
+    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.waitSemaphoreCount = 1;
+    si.pWaitSemaphores = &s.acquireSem;
+    si.pWaitDstStageMask = &waitStage;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cb;
+    si.signalSemaphoreCount = 1;
+    si.pSignalSemaphores = &swapRenderDone_[imageIndex];
+    std::lock_guard<std::mutex> q(queueMutex_);
+    if (vkQueueSubmit(queue_, 1, &si, s.presentFence) != VK_SUCCESS) {
+        VkSubmitInfo empty{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        vkQueueSubmit(queue_, 0, &empty, s.presentFence);
+        ++vfSkipped_;
+        return;
+    }
+    VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+    pi.waitSemaphoreCount = 1;
+    pi.pWaitSemaphores = &swapRenderDone_[imageIndex];
+    pi.swapchainCount = 1;
+    pi.pSwapchains = &swapchain_;
+    pi.pImageIndices = &imageIndex;
+    VkResult pr = vkQueuePresentKHR(queue_, &pi);
+    if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_ERROR_SURFACE_LOST_KHR) swapchainStale_ = true;
+}
+
 void VulkanEngine::submitLoop() {
     for (;;) {
         SubmitJob job;
@@ -394,35 +472,19 @@ void VulkanEngine::submitLoop() {
             submitBusy_ = true;
         }
         VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-        VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
         si.commandBufferCount = 1;
         si.pCommandBuffers = &job.cb;
-        const bool present = job.imageIndex != UINT32_MAX;
-        if (present) {
-            si.waitSemaphoreCount = 1;
-            si.pWaitSemaphores = &job.acquireSem;
-            si.pWaitDstStageMask = &waitStage;
-            si.signalSemaphoreCount = 1;
-            si.pSignalSemaphores = &job.renderDone;
-        }
+        bool ok;
         {
             std::lock_guard<std::mutex> q(queueMutex_);
-            if (vkQueueSubmit(queue_, 1, &si, job.fence) != VK_SUCCESS) {
+            ok = vkQueueSubmit(queue_, 1, &si, job.fence) == VK_SUCCESS;
+            if (!ok) {
                 VK_LOGE("vkQueueSubmit failed");
                 VkSubmitInfo empty{VK_STRUCTURE_TYPE_SUBMIT_INFO}; // still signal the fence so the slot isn't wedged
                 vkQueueSubmit(queue_, 0, &empty, job.fence);
-            } else if (present) {
-                std::lock_guard<std::mutex> sw(swapMutex_);
-                VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
-                pi.waitSemaphoreCount = 1;
-                pi.pWaitSemaphores = &job.renderDone;
-                pi.swapchainCount = 1;
-                pi.pSwapchains = &swapchain_;
-                pi.pImageIndices = &job.imageIndex;
-                VkResult pr = vkQueuePresentKHR(queue_, &pi);
-                if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_ERROR_SURFACE_LOST_KHR) swapchainStale_ = true;
             }
         }
+        if (ok && job.present) presentViewfinder(slots_[job.slot]);
         {
             std::lock_guard<std::mutex> lk(submitMutex_);
             submitBusy_ = false;
@@ -918,23 +980,6 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
     std::memcpy(s.params.mapped, &params, sizeof(params));
     auto tCopy = Clock::now();
 
-    // Viewfinder target for this frame (never block the camera on the display).
-    uint32_t imageIndex = UINT32_MAX;
-    // try_lock: if the submit thread is mid-present, skip the viewfinder for
-    // this frame rather than wait.
-    std::unique_lock<std::mutex> swapLock(swapMutex_, std::try_to_lock);
-    if (swapchain_ && window_ && swapLock.owns_lock()) {
-        VkResult ar = vkAcquireNextImageKHR(device_, swapchain_, 0, s.acquireSem, VK_NULL_HANDLE, &imageIndex);
-        if (ar == VK_ERROR_OUT_OF_DATE_KHR || ar == VK_ERROR_SURFACE_LOST_KHR) {
-            swapchainStale_ = true;
-            imageIndex = UINT32_MAX;
-        } else if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) {
-            imageIndex = UINT32_MAX; // VK_NOT_READY / VK_TIMEOUT: skip the viewfinder this frame
-        }
-    }
-
-    if (swapLock.owns_lock()) swapLock.unlock();
-
     VkCommandBuffer cb = s.cmd;
     vkResetCommandBuffer(cb, 0);
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -1031,31 +1076,8 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
                                                     VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
         vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
                              0, nullptr, 0, nullptr, 1, &vfReady);
-        if (imageIndex != UINT32_MAX) {
-            VkImage dst = swapImages_[imageIndex];
-            VkImageMemoryBarrier toDst = imageBarrier(dst, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
-                                                      VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-                                 0, nullptr, 0, nullptr, 1, &toDst);
-            if (swapExtent_.width == static_cast<uint32_t>(g.outW) && swapExtent_.height == static_cast<uint32_t>(g.outH)) {
-                VkImageCopy region{};
-                region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-                region.dstSubresource = region.srcSubresource;
-                region.extent = {swapExtent_.width, swapExtent_.height, 1};
-                vkCmdCopyImage(cb, vfImage_.image, VK_IMAGE_LAYOUT_GENERAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-            } else {
-                VkImageBlit blit{};
-                blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-                blit.dstSubresource = blit.srcSubresource;
-                blit.srcOffsets[1] = {g.outW, g.outH, 1};
-                blit.dstOffsets[1] = {static_cast<int32_t>(swapExtent_.width), static_cast<int32_t>(swapExtent_.height), 1};
-                vkCmdBlitImage(cb, vfImage_.image, VK_IMAGE_LAYOUT_GENERAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                               1, &blit, VK_FILTER_LINEAR);
-            }
-            VkImageMemoryBarrier toPresent = imageBarrier(dst, VK_ACCESS_TRANSFER_WRITE_BIT, 0,
-                                                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
-            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0,
-                                 0, nullptr, 0, nullptr, 1, &toPresent);
+        if (swapchain_) {
+            // Copied to the swapchain on the submit thread (presentViewfinder).
         } else if (cpuFallback_) {
             VkBufferImageCopy region{};
             region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
@@ -1080,9 +1102,8 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
         SubmitJob job;
         job.cb = cb;
         job.fence = s.fence;
-        job.imageIndex = imageIndex;
-        job.acquireSem = s.acquireSem;
-        if (imageIndex != UINT32_MAX) job.renderDone = swapRenderDone_[imageIndex];
+        job.slot = idx;
+        job.present = swapchain_ && window_ && !swapchainStale_;
         std::lock_guard<std::mutex> lk(submitMutex_);
         submitJobs_.push_back(job);
     }
@@ -1099,9 +1120,9 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
     accCopyMs_ += std::chrono::duration<double, std::milli>(tCopy - tWait).count();
     accSubmitMs_ += msSince(tCopy);
     if (++frameCount_ % 120 == 0) {
-        VK_LOGI("Frame %llu: avg wait %.2fms, upload %.2fms, record+queue %.2fms, dropped %llu, vf=%s",
+        VK_LOGI("Frame %llu: avg wait %.2fms, upload %.2fms, record+queue %.2fms, dropped %llu, vf skipped %llu, vf=%s",
                 static_cast<unsigned long long>(frameCount_), accWaitMs_ / 120, accCopyMs_ / 120, accSubmitMs_ / 120,
-                static_cast<unsigned long long>(droppedFrames_),
+                static_cast<unsigned long long>(droppedFrames_), static_cast<unsigned long long>(vfSkipped_.load()),
                 swapchain_ ? "swapchain" : (cpuFallback_ ? "cpu-fallback" : "none"));
         if (timedFrames_ > 0) {
             VK_LOGI("GPU per frame: unpack %.2fms, align %.2fms, clean %.2fms, render+present %.2fms = %.2fms (budget %.1fms)%s",

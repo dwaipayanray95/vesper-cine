@@ -112,6 +112,8 @@ private:
         VkCommandBuffer cmd = VK_NULL_HANDLE;
         VkFence fence = VK_NULL_HANDLE;
         VkSemaphore acquireSem = VK_NULL_HANDLE;
+        VkCommandBuffer presentCmd = VK_NULL_HANDLE; // viewfinder copy, recorded on the submit thread
+        VkFence presentFence = VK_NULL_HANDLE;
         VkDescriptorSet unpackSet = VK_NULL_HANDLE;
         VkDescriptorSet cleanSet = VK_NULL_HANDLE;
         VkDescriptorSet alignSet = VK_NULL_HANDLE;
@@ -137,10 +139,10 @@ private:
     struct SubmitJob {
         VkCommandBuffer cb = VK_NULL_HANDLE;
         VkFence fence = VK_NULL_HANDLE;
-        uint32_t imageIndex = UINT32_MAX;
-        VkSemaphore acquireSem = VK_NULL_HANDLE;
-        VkSemaphore renderDone = VK_NULL_HANDLE;
+        int slot = -1;
+        bool present = false; // copy the viewfinder image to the swapchain and present it
     };
+    void presentViewfinder(Slot& s);
     void submitLoop();
     void startSubmitThread();
     void stopSubmitThread();
@@ -234,7 +236,8 @@ private:
     std::deque<SubmitJob> submitJobs_;
     bool submitBusy_ = false, submitStop_ = false;
     std::mutex queueMutex_; // vkQueue* calls (queue is externally synchronised)
-    std::mutex swapMutex_;  // acquire (camera thread) vs present (submit thread)
+    VkCommandPool presentPool_ = VK_NULL_HANDLE; // used only by the submit thread
+    std::atomic<uint64_t> vfSkipped_{0};
     std::mutex frameMutex_; // serialises processFrame against release()
     bool initialized_ = false;
     uint64_t frameCount_ = 0;
