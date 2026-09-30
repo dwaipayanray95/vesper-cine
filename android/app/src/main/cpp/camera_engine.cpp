@@ -241,7 +241,7 @@ bool CameraEngine::startCapture(int32_t width, int32_t height, FrameCallback cal
     callback_ = std::move(callback);
 
     if (AImageReader_newWithUsage(width, height, AIMAGE_FORMAT_RAW10, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN,
-                                  /*maxImages=*/5, &reader_) != AMEDIA_OK || !reader_) {
+                                  /*maxImages=*/8, &reader_) != AMEDIA_OK || !reader_) {
         LOGE("AImageReader RAW10 %dx%d failed", width, height);
         reader_ = nullptr;
         return false;

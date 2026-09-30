@@ -1,5 +1,16 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
+#ifdef HQ_FP16
+// 16-bit variant (GPUs with shaderFloat16): shared tiles and the demosaic /
+// filter arithmetic in half precision — half the shared memory and faster
+// ALU on mobile GPUs. Values are 0..~1 linear light from 10-bit data (fp16
+// keeps 11 significant bits at every level); the detail is still computed and
+// stored as the difference against the quad green in 32-bit.
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#define HF float16_t
+#else
+#define HF float
+#endif
 // HQ (oversampled) luma detail, computed per 16x16-quad tile in shared memory.
 //
 // The quad image keeps one green per 2x2 site (the mean of Gr and Gb), which
@@ -41,11 +52,11 @@ const int GB = 4, GN = T + 2 * GB;      // green: px -4..35 (40)
 const int RBX = 8, RNX = T + 2 * RBX;   // raw cols: -8..39 (48)
 const int RBY = 6, RNY = T + 2 * RBY;   // raw rows: -6..37 (44)
 const int NT = Q * Q;
-shared float sRaw[RNX * RNY];           // 2112; later reused for row-filter results (GN x Q = 640)
-shared float sGreen[GN * GN];           // 1600
+shared HF sRaw[RNX * RNY];           // 2112; later reused for row-filter results (GN x Q = 640)
+shared HF sGreen[GN * GN];           // 1600
 shared vec4 sShade;
 
-const float K[8] = float[8](-0.024, -0.056, 0.153, 0.427, 0.427, 0.153, -0.056, -0.024);
+const HF K[8] = HF[8](HF(-0.024), HF(-0.056), HF(0.153), HF(0.427), HF(0.427), HF(0.153), HF(-0.056), HF(-0.024));
 
 uint rawByte(uint offset) {
     return (raw.words[offset >> 2] >> ((offset & 3u) * 8u)) & 0xFFu;
@@ -74,8 +85,8 @@ vec4 shadingAt(vec2 rawPos) {
     return mix(mix(s[0], s[1], f.x), mix(s[2], s[3], f.x), f.y);
 }
 
-float R(int x, int y) { return sRaw[(y + RBY) * RNX + (x + RBX)]; } // tile-relative raw px
-float G(int x, int y) { return sGreen[(y + GB) * GN + (x + GB)]; } // tile-relative green
+HF R(int x, int y) { return sRaw[(y + RBY) * RNX + (x + RBX)]; } // tile-relative raw px
+HF G(int x, int y) { return sGreen[(y + GB) * GN + (x + GB)]; } // tile-relative green
 
 void main() {
     const ivec2 tile = ivec2(gl_WorkGroupID.xy);
@@ -108,7 +119,7 @@ void main() {
             float v = (dn - bl) / (P.wbGains.w - bl);
             float gain = site == 0 ? sh.x * P.wbGains.r
                        : (site == 3 ? sh.w * P.wbGains.b : ((ay & 1) == 0 ? sh.y : sh.z) * P.wbGains.g);
-            sRaw[row * RNX + gx * 4 + b] = v * gain;
+            sRaw[row * RNX + gx * 4 + b] = HF(v * gain);
         }
     }
     barrier();
@@ -117,20 +128,20 @@ void main() {
     for (int i = lid; i < GN * GN; i += NT) {
         int x = i % GN - GB, y = i / GN - GB;
         int site = cfaSite((org.x + x) & 1, (org.y + y) & 1);
-        float g;
+        HF g;
         if (site == 1 || site == 2) {
             g = R(x, y);
         } else {
-            float c = R(x, y);
-            float gl = R(x - 1, y), gr = R(x + 1, y), gu = R(x, y - 1), gd = R(x, y + 1);
-            float lapH = 2.0 * c - R(x - 2, y) - R(x + 2, y);
-            float lapV = 2.0 * c - R(x, y - 2) - R(x, y + 2);
-            float dH = abs(gl - gr) + abs(lapH);
-            float dV = abs(gu - gd) + abs(lapV);
-            float gH = 0.5 * (gl + gr) + 0.25 * lapH;
-            float gV = 0.5 * (gu + gd) + 0.25 * lapV;
-            g = dH < dV ? gH : (dV < dH ? gV : 0.5 * (gH + gV));
-            float lo = min(min(gl, gr), min(gu, gd)), hi = max(max(gl, gr), max(gu, gd));
+            HF c = R(x, y);
+            HF gl = R(x - 1, y), gr = R(x + 1, y), gu = R(x, y - 1), gd = R(x, y + 1);
+            HF lapH = HF(2.0) * c - R(x - 2, y) - R(x + 2, y);
+            HF lapV = HF(2.0) * c - R(x, y - 2) - R(x, y + 2);
+            HF dH = abs(gl - gr) + abs(lapH);
+            HF dV = abs(gu - gd) + abs(lapV);
+            HF gH = HF(0.5) * (gl + gr) + HF(0.25) * lapH;
+            HF gV = HF(0.5) * (gu + gd) + HF(0.25) * lapV;
+            g = dH < dV ? gH : (dV < dH ? gV : HF(0.5) * (gH + gV));
+            HF lo = min(min(gl, gr), min(gu, gd)), hi = max(max(gl, gr), max(gu, gd));
             g = clamp(g, lo, hi); // no overshoot: edges stay halo-free
         }
         sGreen[i] = g;
@@ -140,7 +151,7 @@ void main() {
     // 3a. Horizontal filter: quad column qx covers px 2qx, 2qx+1; taps at px 2qx-3 .. 2qx+4.
     for (int i = lid; i < GN * Q; i += NT) {
         int row = i / Q, qx = i % Q;
-        float acc = 0.0;
+        HF acc = HF(0.0);
         for (int k = 0; k < 8; ++k) acc += K[k] * sGreen[row * GN + (2 * qx - 3 + k + GB)];
         sRaw[i] = acc; // raw data is no longer needed
     }
@@ -150,8 +161,9 @@ void main() {
     ivec2 lq = ivec2(gl_LocalInvocationID.xy);
     ivec2 q = tile * Q + lq;
     if (q.x >= P.quadInfo.x || q.y >= P.quadInfo.y) return;
-    float hq = 0.0;
-    for (int k = 0; k < 8; ++k) hq += K[k] * sRaw[(2 * lq.y - 3 + k + GB) * Q + lq.x];
+    HF hqh = HF(0.0);
+    for (int k = 0; k < 8; ++k) hqh += K[k] * sRaw[(2 * lq.y - 3 + k + GB) * Q + lq.x];
+    float hq = float(hqh);
     float gq = imageLoad(quadImage, q).g;
     imageStore(detailImage, q, vec4(hq - gq, 0.0, 0.0, 0.0));
 }

@@ -3,6 +3,8 @@
 #include "shaders/render_spv.h"
 #include "shaders/clean_spv.h"
 #include "shaders/align_spv.h"
+#include "shaders/green_fp16_spv.h"
+#include "shaders/green_rgba_fp16_spv.h"
 #include "shaders/green_spv.h"
 #include "shaders/green_rgba_spv.h"
 
@@ -129,6 +131,21 @@ bool VulkanEngine::createInstanceAndDevice() {
     std::vector<const char*> devEnabled;
     if (haveSwapchainExt_) devEnabled.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
 
+    // 16-bit shader arithmetic (faster HQ pass) when the GPU supports it.
+    VkPhysicalDeviceShaderFloat16Int8FeaturesKHR f16{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES_KHR};
+    if (hasExtension(devExts, VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME)) {
+        VkPhysicalDeviceFeatures2 feats{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+        feats.pNext = &f16;
+        vkGetPhysicalDeviceFeatures2(physical_, &feats);
+        fp16_ = f16.shaderFloat16 == VK_TRUE;
+    }
+    if (fp16_) {
+        devEnabled.push_back(VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME);
+        f16 = VkPhysicalDeviceShaderFloat16Int8FeaturesKHR{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES_KHR};
+        f16.shaderFloat16 = VK_TRUE;
+    }
+    VK_LOGI("16-bit shader arithmetic: %s", fp16_ ? "yes" : "no");
+
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qci{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
     qci.queueFamilyIndex = queueFamily_;
@@ -139,6 +156,7 @@ bool VulkanEngine::createInstanceAndDevice() {
     dci.pQueueCreateInfos = &qci;
     dci.enabledExtensionCount = static_cast<uint32_t>(devEnabled.size());
     dci.ppEnabledExtensionNames = devEnabled.data();
+    if (fp16_) dci.pNext = &f16;
     if (vkCreateDevice(physical_, &dci, nullptr, &device_) != VK_SUCCESS) return false;
     vkGetDeviceQueue(device_, queueFamily_, 0, &queue_);
 
@@ -223,13 +241,13 @@ bool VulkanEngine::createPipelines() {
     }
 
     VkDescriptorPoolSize sizes[] = {
-        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 5 * kRingSize},
-        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 5 * kRingSize},
-        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 13 * kRingSize},
-        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3 * kRingSize},
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 10 * kRingSize},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 10 * kRingSize},
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 26 * kRingSize},
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 6 * kRingSize},
     };
     VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    dpi.maxSets = 5 * kRingSize;
+    dpi.maxSets = 8 * kRingSize; // unpack + green, and render/clean/align per ping-pong parity
     dpi.poolSizeCount = 4;
     dpi.pPoolSizes = sizes;
     if (vkCreateDescriptorPool(device_, &dpi, nullptr, &descPool_) != VK_SUCCESS) return false;
@@ -239,12 +257,14 @@ bool VulkanEngine::createPipelines() {
         ai.descriptorSetCount = 1;
         ai.pSetLayouts = &unpackLayout_;
         if (vkAllocateDescriptorSets(device_, &ai, &s.unpackSet) != VK_SUCCESS) return false;
-        ai.pSetLayouts = &renderLayout_;
-        if (vkAllocateDescriptorSets(device_, &ai, &s.renderSet) != VK_SUCCESS) return false;
-        ai.pSetLayouts = &cleanLayout_;
-        if (vkAllocateDescriptorSets(device_, &ai, &s.cleanSet) != VK_SUCCESS) return false;
-        ai.pSetLayouts = &alignLayout_;
-        if (vkAllocateDescriptorSets(device_, &ai, &s.alignSet) != VK_SUCCESS) return false;
+        for (int par = 0; par < 2; ++par) {
+            ai.pSetLayouts = &renderLayout_;
+            if (vkAllocateDescriptorSets(device_, &ai, &s.renderSets[par]) != VK_SUCCESS) return false;
+            ai.pSetLayouts = &cleanLayout_;
+            if (vkAllocateDescriptorSets(device_, &ai, &s.cleanSets[par]) != VK_SUCCESS) return false;
+            ai.pSetLayouts = &alignLayout_;
+            if (vkAllocateDescriptorSets(device_, &ai, &s.alignSets[par]) != VK_SUCCESS) return false;
+        }
         ai.pSetLayouts = &greenLayout_;
         if (vkAllocateDescriptorSets(device_, &ai, &s.greenSet) != VK_SUCCESS) return false;
     }
@@ -285,8 +305,10 @@ bool VulkanEngine::createPipelines() {
            makePipe(kAlignSpv, sizeof(kAlignSpv), alignLayout_, alignPipeLayout_, alignPipe_, sizeof(int32_t)) &&
            makePipe(kRenderSpv, sizeof(kRenderSpv), renderLayout_, renderPipeLayout_, renderPipe_) &&
            (hqFormat_ == VK_FORMAT_R16_SFLOAT
-                ? makePipe(kGreenSpv, sizeof(kGreenSpv), greenLayout_, greenPipeLayout_, greenPipe_)
-                : makePipe(kGreenRgbaSpv, sizeof(kGreenRgbaSpv), greenLayout_, greenPipeLayout_, greenPipe_));
+                ? (fp16_ ? makePipe(kGreenFp16Spv, sizeof(kGreenFp16Spv), greenLayout_, greenPipeLayout_, greenPipe_)
+                         : makePipe(kGreenSpv, sizeof(kGreenSpv), greenLayout_, greenPipeLayout_, greenPipe_))
+                : (fp16_ ? makePipe(kGreenRgbaFp16Spv, sizeof(kGreenRgbaFp16Spv), greenLayout_, greenPipeLayout_, greenPipe_)
+                         : makePipe(kGreenRgbaSpv, sizeof(kGreenRgbaSpv), greenLayout_, greenPipeLayout_, greenPipe_)));
 }
 
 void VulkanEngine::release() {
@@ -646,9 +668,9 @@ bool VulkanEngine::ensureResources(const Geometry& g) {
                      hqSupported_ ? hqFormat_ : VK_FORMAT_R16G16B16A16_SFLOAT,
                      VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, greenImage_) ||
         !createImage(quadW, quadH, VK_FORMAT_R16G16B16A16_SFLOAT,
-                     VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, cleanImage_) ||
+                     VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, cleanImage_) ||
         !createImage(quadW, quadH, VK_FORMAT_R16G16B16A16_SFLOAT,
-                     VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, historyImage_) ||
+                     VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, historyImage_) ||
         !createImage((quadW + 3) / 4, (quadH + 3) / 4, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT, curLowImage_) ||
         !createImage((quadW + 3) / 4, (quadH + 3) / 4, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT, histLowImage_) ||
         !createImage((quadW + 31) / 32, (quadH + 31) / 32, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT, motionImage_) ||
@@ -697,15 +719,25 @@ bool VulkanEngine::ensureResources(const Geometry& g) {
     return true;
 }
 
+// Temporal NR ping-pongs between two quad-size images (no per-frame history
+// copy): on parity p, clean writes pingPong(p) and reads pingPong(1 - p) as
+// history; render samples pingPong(p). Each slot has a set pair per parity.
 void VulkanEngine::writeDescriptors(Slot& s) {
+    for (int par = 0; par < 2; ++par) writeDescriptors(s, par);
+}
+
+void VulkanEngine::writeDescriptors(Slot& s, int par) {
+    const Image& target = pingPong(par);
+    const Image& prev = pingPong(par ^ 1);
+    const VkDescriptorSet renderSet = s.renderSets[par], cleanSet = s.cleanSets[par], alignSet = s.alignSets[par];
     VkDescriptorBufferInfo params{s.params.buffer, 0, VK_WHOLE_SIZE};
     VkDescriptorBufferInfo raw{s.raw.buffer, 0, VK_WHOLE_SIZE};
     VkDescriptorBufferInfo shading{s.shading.buffer, 0, VK_WHOLE_SIZE};
     VkDescriptorBufferInfo p010{s.p010.buffer, 0, VK_WHOLE_SIZE};
     VkDescriptorImageInfo quadStorage{VK_NULL_HANDLE, quadImage_.view, VK_IMAGE_LAYOUT_GENERAL};
-    VkDescriptorImageInfo cleanStorage{VK_NULL_HANDLE, cleanImage_.view, VK_IMAGE_LAYOUT_GENERAL};
-    VkDescriptorImageInfo historyStorage{VK_NULL_HANDLE, historyImage_.view, VK_IMAGE_LAYOUT_GENERAL};
-    VkDescriptorImageInfo quadSampled{sampler_, cleanImage_.view, VK_IMAGE_LAYOUT_GENERAL};
+    VkDescriptorImageInfo cleanStorage{VK_NULL_HANDLE, target.view, VK_IMAGE_LAYOUT_GENERAL};
+    VkDescriptorImageInfo historyStorage{VK_NULL_HANDLE, prev.view, VK_IMAGE_LAYOUT_GENERAL};
+    VkDescriptorImageInfo quadSampled{sampler_, target.view, VK_IMAGE_LAYOUT_GENERAL};
     VkDescriptorImageInfo curLow{VK_NULL_HANDLE, curLowImage_.view, VK_IMAGE_LAYOUT_GENERAL};
     VkDescriptorImageInfo histLow{VK_NULL_HANDLE, histLowImage_.view, VK_IMAGE_LAYOUT_GENERAL};
     VkDescriptorImageInfo motion{VK_NULL_HANDLE, motionImage_.view, VK_IMAGE_LAYOUT_GENERAL};
@@ -728,27 +760,27 @@ void VulkanEngine::writeDescriptors(Slot& s) {
         w(s.greenSet, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER),
         w(s.greenSet, 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER),
         w(s.greenSet, 3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE),
-        w(s.renderSet, 4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER),
-        w(s.renderSet, 5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER),
+        w(renderSet, 4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER),
+        w(renderSet, 5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER),
         w(s.unpackSet, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER),
         w(s.unpackSet, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER),
         w(s.unpackSet, 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER),
         w(s.unpackSet, 3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE),
-        w(s.renderSet, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER),
-        w(s.renderSet, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER),
-        w(s.renderSet, 2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE),
-        w(s.renderSet, 3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER),
-        w(s.cleanSet, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER),
-        w(s.cleanSet, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE),
-        w(s.cleanSet, 2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE),
-        w(s.cleanSet, 3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE),
-        w(s.cleanSet, 4, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE),
-        w(s.alignSet, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER),
-        w(s.alignSet, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE),
-        w(s.alignSet, 2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE),
-        w(s.alignSet, 3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE),
-        w(s.alignSet, 4, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE),
-        w(s.alignSet, 5, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE),
+        w(renderSet, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER),
+        w(renderSet, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER),
+        w(renderSet, 2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE),
+        w(renderSet, 3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER),
+        w(cleanSet, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER),
+        w(cleanSet, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE),
+        w(cleanSet, 2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE),
+        w(cleanSet, 3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE),
+        w(cleanSet, 4, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE),
+        w(alignSet, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER),
+        w(alignSet, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE),
+        w(alignSet, 2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE),
+        w(alignSet, 3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE),
+        w(alignSet, 4, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE),
+        w(alignSet, 5, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE),
     };
     writes[0].pImageInfo = &quadStorage;
     writes[1].pBufferInfo = &params;
@@ -1043,7 +1075,7 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
         // Motion field: 1/4-res luma of current + history, then a per-tile search.
         const uint32_t qw = static_cast<uint32_t>(g.rawW / 2), qh = static_cast<uint32_t>(g.rawH / 2);
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, alignPipe_);
-        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, alignPipeLayout_, 0, 1, &s.alignSet, 0, nullptr);
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, alignPipeLayout_, 0, 1, &s.alignSets[pingParity_], 0, nullptr);
         int32_t mode = 0;
         vkCmdPushConstants(cb, alignPipeLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(mode), &mode);
         vkCmdDispatch(cb, ((qw + 3) / 4 + 15) / 16, ((qh + 3) / 4 + 7) / 8, 1);
@@ -1061,32 +1093,19 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
 
     if (queryPool_) vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool_, q0 + 2);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cleanPipe_);
-    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cleanPipeLayout_, 0, 1, &s.cleanSet, 0, nullptr);
+    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cleanPipeLayout_, 0, 1, &s.cleanSets[pingParity_], 0, nullptr);
     vkCmdDispatch(cb, static_cast<uint32_t>((g.rawW / 2 + 15) / 16), static_cast<uint32_t>((g.rawH / 2 + 7) / 8), 1);
 
-    VkImageMemoryBarrier cleanReady = imageBarrier(cleanImage_.image, VK_ACCESS_SHADER_WRITE_BIT,
-                                                   VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT,
-                                                   VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
-    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+    VkImageMemoryBarrier cleanReady = imageBarrier(pingPong(pingParity_).image, VK_ACCESS_SHADER_WRITE_BIT,
+                                                   VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
                          0, nullptr, 0, nullptr, 1, &cleanReady);
-    if (temporal) {
-        // This frame's result becomes next frame's history.
-        VkImageMemoryBarrier histWrite = imageBarrier(historyImage_.image, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
-                                                      VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
-        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-                             0, nullptr, 0, nullptr, 1, &histWrite);
-        VkImageCopy region{};
-        region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-        region.dstSubresource = region.srcSubresource;
-        region.extent = {static_cast<uint32_t>(g.rawW / 2), static_cast<uint32_t>(g.rawH / 2), 1};
-        vkCmdCopyImage(cb, cleanImage_.image, VK_IMAGE_LAYOUT_GENERAL, historyImage_.image, VK_IMAGE_LAYOUT_GENERAL, 1, &region);
-    }
+    // This frame's result is next frame's history: just flip the parity (no copy).
     historyValid_ = temporal;
 
     if (queryPool_) vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool_, q0 + 3);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, renderPipe_);
-    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, renderPipeLayout_, 0, 1, &s.renderSet, 0, nullptr);
+    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, renderPipeLayout_, 0, 1, &s.renderSets[pingParity_], 0, nullptr);
     vkCmdDispatch(cb, static_cast<uint32_t>((g.outW / 2 + 7) / 8), static_cast<uint32_t>((g.outH / 2 + 7) / 8), 1);
 
     if (window_) {
@@ -1133,6 +1152,7 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
         *encoderSlot = idx;
     }
     nextSlot_ = (nextSlot_ + 1) % kRingSize;
+    pingParity_ ^= 1; // this frame's clean output is the next frame's history
 
     const double waitMs = std::chrono::duration<double, std::milli>(tWait - t0).count();
     accWaitMs_ += waitMs;

@@ -118,9 +118,9 @@ private:
         VkCommandBuffer presentCmd = VK_NULL_HANDLE; // viewfinder copy, recorded on the submit thread
         VkFence presentFence = VK_NULL_HANDLE;
         VkDescriptorSet unpackSet = VK_NULL_HANDLE;
-        VkDescriptorSet cleanSet = VK_NULL_HANDLE;
-        VkDescriptorSet alignSet = VK_NULL_HANDLE;
-        VkDescriptorSet renderSet = VK_NULL_HANDLE;
+        VkDescriptorSet cleanSets[2] = {};  // per ping-pong parity
+        VkDescriptorSet alignSets[2] = {};
+        VkDescriptorSet renderSets[2] = {};
         VkDescriptorSet greenSet = VK_NULL_HANDLE;
         bool vfReadbackPending = false;
         bool encoderHold = false; // guarded by encoderMutex_
@@ -157,6 +157,8 @@ private:
     void destroyImage(Image& img);
     int32_t findMemoryType(uint32_t bits, VkMemoryPropertyFlags required, VkMemoryPropertyFlags preferred);
     void writeDescriptors(Slot& s);
+    void writeDescriptors(Slot& s, int par);
+    const Image& pingPong(int par) const { return par ? historyImage_ : cleanImage_; }
 
     void applyPendingWindow();
     bool createSwapchain();
@@ -186,7 +188,9 @@ private:
     VkSampler sampler_ = VK_NULL_HANDLE;
 
     Slot slots_[kRingSize];
-    Image quadImage_, cleanImage_, historyImage_, vfImage_;
+    Image quadImage_, cleanImage_, historyImage_, vfImage_; // clean/history: temporal NR ping-pong pair
+    int pingParity_ = 0;
+    bool fp16_ = false; // shaderFloat16 enabled: HQ pass uses the 16-bit variant
     Image curLowImage_, histLowImage_, motionImage_; // tile alignment (align.comp)
     Image greenImage_;                              // full-res green (green.comp), HQ oversampling
     bool hqSupported_ = false;                      // a storage + linearly filterable format for greenImage_
