@@ -458,6 +458,15 @@ void VulkanEngine::presentViewfinder(Slot& s) {
     pi.pImageIndices = &imageIndex;
     VkResult pr = vkQueuePresentKHR(queue_, &pi);
     if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_ERROR_SURFACE_LOST_KHR) swapchainStale_ = true;
+    // Present pacing: a gap well over one camera frame is a visible hitch.
+    auto now = Clock::now();
+    if (lastPresent_.time_since_epoch().count() != 0) {
+        double gap = std::chrono::duration<double, std::milli>(now - lastPresent_).count();
+        if (gap > 1.5 * frameBudgetMs_.load()) ++vfHitches_;
+        double prev = vfMaxGapMs_.load();
+        if (gap > prev) vfMaxGapMs_ = gap;
+    }
+    lastPresent_ = now;
 }
 
 void VulkanEngine::submitLoop() {
@@ -829,13 +838,10 @@ bool VulkanEngine::createSwapchain() {
         return false;
     }
 
-    // FIFO is always available; MAILBOX avoids ever back-pressuring the camera.
-    uint32_t pmc = 0;
-    vkGetPhysicalDeviceSurfacePresentModesKHR(physical_, surface_, &pmc, nullptr);
-    std::vector<VkPresentModeKHR> modes(pmc);
-    vkGetPhysicalDeviceSurfacePresentModesKHR(physical_, surface_, &pmc, modes.data());
+    // FIFO: every frame is shown (MAILBOX silently replaced frames that
+    // finished within one display refresh, which read as skipped motion).
+    // Presentation runs on the submit thread, so FIFO never blocks the camera.
     VkPresentModeKHR mode = VK_PRESENT_MODE_FIFO_KHR;
-    for (auto m : modes) if (m == VK_PRESENT_MODE_MAILBOX_KHR) mode = m;
 
     VkSwapchainCreateInfoKHR ci{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
     ci.surface = surface_;
@@ -1116,23 +1122,27 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
     }
     nextSlot_ = (nextSlot_ + 1) % kRingSize;
 
-    accWaitMs_ += std::chrono::duration<double, std::milli>(tWait - t0).count();
+    const double waitMs = std::chrono::duration<double, std::milli>(tWait - t0).count();
+    accWaitMs_ += waitMs;
+    maxWaitMs_ = std::max(maxWaitMs_, waitMs);
     accCopyMs_ += std::chrono::duration<double, std::milli>(tCopy - tWait).count();
     accSubmitMs_ += msSince(tCopy);
     if (++frameCount_ % 120 == 0) {
-        VK_LOGI("Frame %llu: avg wait %.2fms, upload %.2fms, record+queue %.2fms, dropped %llu, vf skipped %llu, vf=%s",
-                static_cast<unsigned long long>(frameCount_), accWaitMs_ / 120, accCopyMs_ / 120, accSubmitMs_ / 120,
+        VK_LOGI("Frame %llu: avg wait %.2fms, upload %.2fms, record+queue %.2fms (max wait %.1fms), dropped %llu, vf skipped %llu, vf hitches %llu (max gap %.1fms), vf=%s",
+                static_cast<unsigned long long>(frameCount_), accWaitMs_ / 120, accCopyMs_ / 120, accSubmitMs_ / 120, maxWaitMs_,
                 static_cast<unsigned long long>(droppedFrames_), static_cast<unsigned long long>(vfSkipped_.load()),
+                static_cast<unsigned long long>(vfHitches_.exchange(0)), vfMaxGapMs_.exchange(0.0),
                 swapchain_ ? "swapchain" : (cpuFallback_ ? "cpu-fallback" : "none"));
         if (timedFrames_ > 0) {
             VK_LOGI("GPU per frame: unpack %.2fms, align %.2fms, clean %.2fms, render+present %.2fms = %.2fms (budget %.1fms)%s",
                     passMs_[0] / timedFrames_, passMs_[1] / timedFrames_, passMs_[2] / timedFrames_, passMs_[3] / timedFrames_,
-                    gpuFrameMs_, frameBudgetMs_,
+                    gpuFrameMs_, frameBudgetMs_.load(),
                     nrThrottled_ ? ", NR throttled" : (alignThrottled_ ? ", alignment throttled" : ""));
             for (double& m : passMs_) m = 0;
             timedFrames_ = 0;
         }
         accWaitMs_ = accCopyMs_ = accSubmitMs_ = 0;
+        maxWaitMs_ = 0;
     }
     return true;
 }
@@ -1164,13 +1174,13 @@ void VulkanEngine::readTimestamps(int slot) {
         overBudgetFrames_ = underBudgetFrames_ = 0;
         if (!alignThrottled_) {
             alignThrottled_ = true;
-            VK_LOGW("GPU %.1fms over %.1fms budget: temporal NR alignment paused", gpuFrameMs_, frameBudgetMs_);
+            VK_LOGW("GPU %.1fms over %.1fms budget: temporal NR alignment paused", gpuFrameMs_, frameBudgetMs_.load());
         } else if (hqSupported_ && !hqThrottled_) {
             hqThrottled_ = true;
-            VK_LOGW("GPU %.1fms still over %.1fms budget: HQ oversampling paused", gpuFrameMs_, frameBudgetMs_);
+            VK_LOGW("GPU %.1fms still over %.1fms budget: HQ oversampling paused", gpuFrameMs_, frameBudgetMs_.load());
         } else if (!nrThrottled_) {
             nrThrottled_ = true;
-            VK_LOGW("GPU %.1fms still over %.1fms budget: temporal and chroma NR paused", gpuFrameMs_, frameBudgetMs_);
+            VK_LOGW("GPU %.1fms still over %.1fms budget: temporal and chroma NR paused", gpuFrameMs_, frameBudgetMs_.load());
         }
         graceFrames_ = 24; // let the timing settle before judging the new load
     } else if (underBudgetFrames_ > recoverFrames_ && (alignThrottled_ || hqThrottled_ || nrThrottled_)) {

@@ -6,6 +6,7 @@
 #include <android/log.h>
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -203,7 +204,7 @@ private:
     double passMs_[kStamps - 1] = {};
     int timedFrames_ = 0;
     double gpuFrameMs_ = 0;
-    double frameBudgetMs_ = 41.7;
+    std::atomic<double> frameBudgetMs_{41.7};
     int overBudgetFrames_ = 0;
     bool alignThrottled_ = false;
     bool nrThrottled_ = false;
@@ -238,6 +239,10 @@ private:
     std::mutex queueMutex_; // vkQueue* calls (queue is externally synchronised)
     VkCommandPool presentPool_ = VK_NULL_HANDLE; // used only by the submit thread
     std::atomic<uint64_t> vfSkipped_{0};
+    std::atomic<uint64_t> vfHitches_{0};
+    std::atomic<double> vfMaxGapMs_{0.0};
+    std::chrono::steady_clock::time_point lastPresent_{}; // submit thread only
+    double maxWaitMs_ = 0;
     std::mutex frameMutex_; // serialises processFrame against release()
     bool initialized_ = false;
     uint64_t frameCount_ = 0;

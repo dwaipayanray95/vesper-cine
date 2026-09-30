@@ -733,6 +733,17 @@ void onFrame(const RawFrame& f) {
         gMeasuredFps = 0.9 * gMeasuredFps + 0.1 * (1e9 / std::max(gap, 1.0));
     }
     gLastTimestampNs = f.timestampNs;
+    {
+        // Sensor-side drops (frames the camera never delivered), per ~5 s.
+        static int64_t lastDrops = 0;
+        static int logTick = 0;
+        if (++logTick % 120 == 0) {
+            int64_t d = gCameraDrops;
+            LOGI("Camera: %.2f fps measured, %lld sensor drops in last 120 frames", gMeasuredFps,
+                 static_cast<long long>(d - lastDrops));
+            lastDrops = d;
+        }
+    }
     feedFocus(frameNs * 1e-9);
     if (gSweepProgress >= 0) feedSweep(f);
     if ((++frameIndex & 3) == 0) meterCentre(f);
