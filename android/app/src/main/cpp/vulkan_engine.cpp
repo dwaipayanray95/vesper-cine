@@ -1028,10 +1028,10 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
                          0, nullptr, 0, nullptr, 1, &quadReady);
     if (hq) {
-        // HQ luma detail per 8x8-quad tile (raw + quad image -> detail image).
+        // HQ luma detail per 16x16-quad tile (raw + quad image -> detail image).
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, greenPipe_);
         vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, greenPipeLayout_, 0, 1, &s.greenSet, 0, nullptr);
-        vkCmdDispatch(cb, static_cast<uint32_t>((g.rawW / 2 + 7) / 8), static_cast<uint32_t>((g.rawH / 2 + 7) / 8), 1);
+        vkCmdDispatch(cb, static_cast<uint32_t>((g.rawW / 2 + 15) / 16), static_cast<uint32_t>((g.rawH / 2 + 15) / 16), 1);
         VkImageMemoryBarrier detailReady = imageBarrier(greenImage_.image, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
                                                         VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
         vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,

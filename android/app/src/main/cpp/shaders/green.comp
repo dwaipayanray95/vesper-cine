@@ -1,6 +1,6 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
-// HQ (oversampled) luma detail, computed per 8x8-quad tile in shared memory.
+// HQ (oversampled) luma detail, computed per 16x16-quad tile in shared memory.
 //
 // The quad image keeps one green per 2x2 site (the mean of Gr and Gb), which
 // throws away about half of the sensor's luma resolution. This pass:
@@ -17,8 +17,10 @@
 //   4. writes D = G_hq - G_quad at quad resolution. The render pass samples D
 //      with 5 taps. (Sharpening stays in render: folding it in here needed a
 //      one-quad tile border that cost more on the phone GPU than it saved.)
-// 64 threads: good occupancy on mobile GPUs (PowerVR / Mali / Adreno).
-layout(local_size_x = 8, local_size_y = 8) in;
+// 16x16-quad tiles (256 threads): the halo each tile must also load and
+// demosaic is ~half the relative size of an 8x8 tile's (green 1.56x vs 2.25x
+// the output area, raw 2.1x vs 3.5x), which was most of this pass's cost.
+layout(local_size_x = 16, local_size_y = 16) in;
 
 #include "frame_params.glsl"
 
@@ -31,16 +33,16 @@ layout(set = 0, binding = 3, r16f) uniform writeonly image2D detailImage;
 #endif
 layout(set = 0, binding = 4, rgba16f) uniform readonly image2D quadImage;
 
-// Tile: 8x8 quads = 16x16 raw px. Filter reach +-3.5 px -> green needed for
-// px -4..19 (24x24); Hamilton-Adams reach +-2 px -> raw rows -6..21 (28) and
-// raw columns -8..23 (32: whole RAW10 groups, so loads start on a group).
-const int Q = 8, T = 2 * Q;
-const int GB = 4, GN = T + 2 * GB;      // green: px -4..19 (24)
-const int RBX = 8, RNX = T + 2 * RBX;   // raw cols: -8..23 (32)
-const int RBY = 6, RNY = T + 2 * RBY;   // raw rows: -6..21 (28)
+// Tile: 16x16 quads = 32x32 raw px. Filter reach +-3.5 px -> green needed for
+// px -4..35 (40x40); Hamilton-Adams reach +-2 px -> raw rows -6..37 (44) and
+// raw columns -8..39 (48: whole RAW10 groups, so loads start on a group).
+const int Q = 16, T = 2 * Q;
+const int GB = 4, GN = T + 2 * GB;      // green: px -4..35 (40)
+const int RBX = 8, RNX = T + 2 * RBX;   // raw cols: -8..39 (48)
+const int RBY = 6, RNY = T + 2 * RBY;   // raw rows: -6..37 (44)
 const int NT = Q * Q;
-shared float sRaw[RNX * RNY];           // 896; later reused for row-filter results (GN x Q = 192)
-shared float sGreen[GN * GN];           // 576
+shared float sRaw[RNX * RNY];           // 2112; later reused for row-filter results (GN x Q = 640)
+shared float sGreen[GN * GN];           // 1600
 shared vec4 sShade;
 
 const float K[8] = float[8](-0.024, -0.056, 0.153, 0.427, 0.427, 0.153, -0.056, -0.024);
@@ -77,8 +79,8 @@ float G(int x, int y) { return sGreen[(y + GB) * GN + (x + GB)]; } // tile-relat
 
 void main() {
     const ivec2 tile = ivec2(gl_WorkGroupID.xy);
-    const ivec2 org = tile * T;                     // tile origin, raw px (multiple of 16)
-    const int lid = int(gl_LocalInvocationIndex);   // 0..63
+    const ivec2 org = tile * T;                     // tile origin, raw px (multiple of 32)
+    const int lid = int(gl_LocalInvocationIndex);   // 0..255
     if (lid == 0) sShade = shadingAt(vec2(org) + vec2(T * 0.5)); // once per tile, not per thread
     barrier();
     const vec4 sh = sShade;
