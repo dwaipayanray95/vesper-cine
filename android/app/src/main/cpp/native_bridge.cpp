@@ -746,6 +746,7 @@ void onFrame(const RawFrame& f) {
         static int logTick = 0;
         if (++logTick % 120 == 0) {
             int64_t d = gCameraDrops;
+            if (d < lastDrops) lastDrops = 0; // counter was reset (Settings opened)
             LOGI("Camera: %.2f fps measured, %lld sensor drops in last 120 frames", gMeasuredFps,
                  static_cast<long long>(d - lastDrops));
             lastDrops = d;

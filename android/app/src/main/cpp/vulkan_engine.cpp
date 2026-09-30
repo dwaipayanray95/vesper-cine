@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <string>
 #include <chrono>
 #include <cstring>
 
@@ -1169,10 +1170,13 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
                 static_cast<unsigned long long>(vfHitches_.exchange(0)), vfMaxGapMs_.exchange(0.0),
                 swapchain_ ? "swapchain" : (cpuFallback_ ? "cpu-fallback" : "none"));
         if (timedFrames_ > 0) {
-            VK_LOGI("GPU per frame: unpack %.2fms, align %.2fms, clean %.2fms, render+present %.2fms = %.2fms (budget %.1fms)%s",
+            std::string paused;
+            if (alignThrottled_) paused += " align";
+            if (hqThrottled_) paused += " HQ";
+            if (nrThrottled_) paused += " NR";
+            VK_LOGI("GPU per frame: unpack %.2fms, align %.2fms, clean %.2fms, render+present %.2fms = %.2fms (budget %.1fms)%s%s",
                     passMs_[0] / timedFrames_, passMs_[1] / timedFrames_, passMs_[2] / timedFrames_, passMs_[3] / timedFrames_,
-                    gpuFrameMs_, frameBudgetMs_.load(),
-                    nrThrottled_ ? ", NR throttled" : (alignThrottled_ ? ", alignment throttled" : ""));
+                    gpuFrameMs_, frameBudgetMs_.load(), paused.empty() ? "" : ", guard paused:", paused.c_str());
             for (double& m : passMs_) m = 0;
             timedFrames_ = 0;
         }
@@ -1221,14 +1225,19 @@ void VulkanEngine::readTimestamps(int slot) {
     }
     // Sustained >85% of the frame interval means we are about to drop frames:
     // pause optional stages, cheapest-to-lose first (alignment, HQ, NR).
-    // A paused stage comes back as soon as its measured cost fits under 80%
-    // of the budget again (so a stage that fits is never left off); one that
-    // then overflows again waits longer before the next try.
+    // A paused stage comes back after ~1 s when its measured cost fits under
+    // the pause threshold, or — since a cost measured while overloaded (or
+    // at another frame rate) tends to be too high — as a trial after ~3 s
+    // whenever there is clear headroom. If a restored stage overflows again
+    // it is paused (and re-measured) and the next try waits twice as long.
     const double budget = frameBudgetMs_;
     overBudgetFrames_ = gpuFrameMs_ > 0.85 * budget ? overBudgetFrames_ + 1 : 0;
     int next = nrThrottled_ ? 2 : (hqThrottled_ ? 1 : (alignThrottled_ ? 0 : -1)); // next stage to restore
-    const bool fits = next >= 0 && gpuFrameMs_ + stageCostMs_[next] < 0.80 * budget;
-    underBudgetFrames_ = fits ? underBudgetFrames_ + 1 : 0;
+    const bool fitsByCost = next >= 0 && gpuFrameMs_ + stageCostMs_[next] < 0.85 * budget - 0.5;
+    const bool headroom = next >= 0 && gpuFrameMs_ < 0.75 * budget;
+    underBudgetFrames_ = (fitsByCost || headroom) ? underBudgetFrames_ + 1 : 0;
+    const bool fits = fitsByCost ? underBudgetFrames_ > recoverFrames_
+                                 : (headroom && underBudgetFrames_ > 3 * recoverFrames_);
     if (overBudgetFrames_ > 12) {
         overBudgetFrames_ = underBudgetFrames_ = 0;
         int stage = -1;
@@ -1242,7 +1251,7 @@ void VulkanEngine::readTimestamps(int slot) {
             costBeforeMs_ = gpuFrameMs_;
             graceFrames_ = 24; // let the timing settle, then measure what the pause saved
         }
-    } else if (fits && underBudgetFrames_ > recoverFrames_) {
+    } else if (fits) {
         underBudgetFrames_ = 0;
         if (next == 2) nrThrottled_ = false;
         else if (next == 1) hqThrottled_ = false;
