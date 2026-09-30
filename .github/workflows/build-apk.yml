@@ -56,6 +56,19 @@ jobs:
       - name: Accept Android SDK licenses
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
 
+      # Pre-install the pinned CMake (android/app/src/main/cpp/CMakeLists.txt)
+      # with retries. Letting Gradle auto-download it mid-build failed once with
+      # a truncated download ("Archive is not a ZIP archive"), killing the run.
+      - name: Install CMake 3.22.1 (with retries)
+        run: |
+          for i in 1 2 3 4; do
+            "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "cmake;3.22.1" && exit 0
+            echo "sdkmanager failed (attempt $i), removing partial download and retrying..."
+            rm -rf "$ANDROID_HOME/cmake/3.22.1" "$ANDROID_HOME/.temp"
+            sleep $((i * 5))
+          done
+          exit 1
+
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
