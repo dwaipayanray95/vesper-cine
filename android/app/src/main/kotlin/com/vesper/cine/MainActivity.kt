@@ -63,10 +63,16 @@ class MainActivity : FlutterActivity() {
         vfView = view
     }
 
+    // Buffer size = the on-screen box in physical pixels once Flutter has
+    // reported it (the GPU scales the frame with filtering). Letting the
+    // compositor shrink a 1920x1080 buffer aliased fine noise into swirls.
+    private var vfBoxW = 0
+    private var vfBoxH = 0
+
     private fun attachViewfinder(width: Int, height: Int) {
         val holder = vfView?.holder ?: return
         vfWanted = true
-        holder.setFixedSize(width, height) // buffer = output size: copied 1:1, scaled by the compositor
+        if (vfBoxW > 0 && vfBoxH > 0) holder.setFixedSize(vfBoxW, vfBoxH) else holder.setFixedSize(width, height)
         if (holder.surface?.isValid == true) nativeSetViewfinderSurface(holder.surface)
     }
 
@@ -145,6 +151,11 @@ class MainActivity : FlutterActivity() {
                     vfView?.layoutParams = FrameLayout.LayoutParams(maxOf(w, 1), maxOf(h, 1)).apply {
                         leftMargin = call.argument<Int>("left") ?: 0
                         topMargin = call.argument<Int>("top") ?: 0
+                    }
+                    if (w > 1 && h > 1 && (w != vfBoxW || h != vfBoxH)) {
+                        vfBoxW = w
+                        vfBoxH = h
+                        if (vfWanted) vfView?.holder?.setFixedSize(w, h) // surfaceChanged re-attaches the engine
                     }
                     result.success(true)
                 }
