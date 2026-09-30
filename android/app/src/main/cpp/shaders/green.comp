@@ -41,6 +41,7 @@ const int RBY = 6, RNY = T + 2 * RBY;   // raw rows: -6..21 (28)
 const int NT = Q * Q;
 shared float sRaw[RNX * RNY];           // 896; later reused for row-filter results (GN x Q = 192)
 shared float sGreen[GN * GN];           // 576
+shared vec4 sShade;
 
 const float K[8] = float[8](-0.024, -0.056, 0.153, 0.427, 0.427, 0.153, -0.056, -0.024);
 
@@ -78,7 +79,9 @@ void main() {
     const ivec2 tile = ivec2(gl_WorkGroupID.xy);
     const ivec2 org = tile * T;                     // tile origin, raw px (multiple of 16)
     const int lid = int(gl_LocalInvocationIndex);   // 0..63
-    const vec4 sh = shadingAt(vec2(org) + vec2(T * 0.5));
+    if (lid == 0) sShade = shadingAt(vec2(org) + vec2(T * 0.5)); // once per tile, not per thread
+    barrier();
+    const vec4 sh = sShade;
     const int groupsPerRow = (P.rawInfo.x + 3) / 4;
 
     // 1. Raw -> shared, one RAW10 group (4 px, 5 bytes = 2 word reads) per step.

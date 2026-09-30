@@ -49,19 +49,36 @@ vec4 shadingAt(vec2 rawPos) {
     return mix(mix(s[0], s[1], f.x), mix(s[2], s[3], f.x), f.y);
 }
 
+// The shading map varies over hundreds of pixels, so it is evaluated at the
+// workgroup's four corners only (instead of 16 buffer reads per quad) and
+// interpolated linearly inside the 64x16 px block — exact while the block lies
+// inside one map cell, sub-0.1% off where it straddles a cell edge.
+shared vec4 sShade[4];
+
 void main() {
     int group = int(gl_GlobalInvocationID.x);   // one RAW10 5-byte group = 4 px = 2 quads
     int qy = int(gl_GlobalInvocationID.y);
+    const vec2 blockOrg = vec2(gl_WorkGroupID.xy) * vec2(64.0, 16.0) + 1.0; // centre of the first quad
+    const vec2 blockSpan = vec2(62.0, 14.0);                              // to the centre of the last
+    if (gl_LocalInvocationIndex < 4u) {
+        uint k = gl_LocalInvocationIndex;
+        sShade[k] = shadingAt(blockOrg + blockSpan * vec2(k & 1u, k >> 1u));
+    }
+    barrier();
     if (group * 4 >= P.rawInfo.x || qy >= P.quadInfo.y) return;
 
     float white = P.wbGains.w;
     float dn[2][4];
     bool sat[2][4];
     for (int row = 0; row < 2; ++row) {
+        // 5 bytes from two word reads.
         uint base = uint((qy * 2 + row) * P.rawInfo.z + group * 5);
-        uint lsb = rawByte(base + 4u);
+        uint w0 = raw.words[base >> 2], w1 = raw.words[(base >> 2) + 1u];
+        uint sh8 = (base & 3u) * 8u;
+        uint lo = sh8 == 0u ? w0 : ((w0 >> sh8) | (w1 << (32u - sh8)));
+        uint lsb = (sh8 == 0u ? w1 : (w1 >> sh8)) & 0xFFu;
         for (int i = 0; i < 4; ++i) {
-            float v = float((rawByte(base + uint(i)) << 2) | ((lsb >> (2 * i)) & 3u));
+            float v = float((((lo >> (8u * uint(i))) & 0xFFu) << 2) | ((lsb >> (2 * i)) & 3u));
             dn[row][i] = v;
             sat[row][i] = v >= white - 1.0;
         }
@@ -70,7 +87,8 @@ void main() {
     for (int q = 0; q < 2; ++q) {
         int qx = group * 2 + q;
         if (qx >= P.quadInfo.x) break;
-        vec4 sh = shadingAt(vec2(qx * 2 + 1, qy * 2 + 1));
+        vec2 f = clamp((vec2(qx * 2 + 1, qy * 2 + 1) - blockOrg) / blockSpan, vec2(0.0), vec2(1.0));
+        vec4 sh = mix(mix(sShade[0], sShade[1], f.x), mix(sShade[2], sShade[3], f.x), f.y);
 
         vec3 sum = vec3(0.0);
         float greenShadeMin = 1e9;
