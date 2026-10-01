@@ -194,7 +194,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
             ),
             Expanded(
+              // Keyed by category: each one gets a fresh list that opens at the top
+              // (one shared list kept the previous category's scroll position).
               child: ListView(
+                key: ValueKey('settings-category-$sel'),
                 padding: const EdgeInsets.fromLTRB(26, 18, 26, 24),
                 children: [
                   Row(

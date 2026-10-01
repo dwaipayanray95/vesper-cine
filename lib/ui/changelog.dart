@@ -7,6 +7,7 @@ class ChangelogEntry {
 }
 
 const changelog = <ChangelogEntry>[
+  ChangelogEntry('0.11.2', ['Settings: each category opens scrolled to the top']),
   ChangelogEntry('0.11.0', [
     'New Settings layout: categories on the left, their settings on the right',
     'Info tab: version, changelog, how-to and FAQ',
