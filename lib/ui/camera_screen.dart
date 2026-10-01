@@ -338,17 +338,20 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
 
   // --- GPU benchmark (developer tool) --------------------------------------
   // Measures the GPU time of each optional pass on this phone: every feature
-  // alone, then all together, with the budget guard off. Settings are
+  // alone, then all together, with the budget guard off. Then an A/B of the
+  // current shaders against the previous ones (new, previous, new again, so a
+  // slow drift such as the phone warming up cancels out). Settings are
   // restored afterwards. Results are shown and printed to logcat (VesperBench).
   Future<void> _runGpuBenchmark() async {
     if (_benchmarking || !_streaming || _recording) return;
     setState(() => _benchmarking = true);
-    void apply({bool hq = false, int sharp = 0, double tnr = 0, double cnr = 0, bool align = false}) {
+    void apply({bool hq = false, int sharp = 0, double tnr = 0, double cnr = 0, bool align = false, bool prev = false}) {
       _engine.setOversampling(hq);
       _engine.setSharpening(sharp);
       _engine.setTemporalNr(tnr);
       _engine.setChromaNr(cnr);
       _engine.setNrAlignment(align);
+      _engine.setPreviousShaders(prev);
     }
 
     _engine.setBudgetGuard(false);
@@ -360,8 +363,11 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       ('Temporal NR', () => apply(tnr: 0.7)),
       ('Temporal NR + align', () => apply(tnr: 0.7, align: true)),
       ('Everything on', () => apply(hq: true, sharp: 1, tnr: 0.7, cnr: 0.5, align: true)),
+      ('All on, prev. shaders', () => apply(hq: true, sharp: 1, tnr: 0.7, cnr: 0.5, align: true, prev: true)),
+      ('Everything on (again)', () => apply(hq: true, sharp: 1, tnr: 0.7, cnr: 0.5, align: true)),
     ];
     final results = <String>[];
+    final measured = <String, double>{};
     double? base;
     for (var i = 0; i < configs.length && mounted; i++) {
       final (name, set) = configs[i];
@@ -375,6 +381,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
         sum += _engine.status()?.gpuMs ?? 0;
       }
       final ms = sum / 8;
+      measured[name] = ms;
       final drops = (_engine.status()?.cameraDrops ?? 0) - drops0;
       base ??= ms;
       final line =
@@ -383,6 +390,15 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       results.add(line);
       _engine.log(line, tag: 'VesperBench');
     }
+    final prevMs = measured['All on, prev. shaders'];
+    final newA = measured['Everything on'], newB = measured['Everything on (again)'];
+    if (prevMs != null && newA != null && newB != null) {
+      final saved = prevMs - (newA + newB) / 2;
+      final line = 'A/B: new shaders ${saved >= 0 ? 'save' : 'cost'} ${saved.abs().toStringAsFixed(1)} ms per frame';
+      results.add(line);
+      _engine.log(line, tag: 'VesperBench');
+    }
+    _engine.setPreviousShaders(false);
     // Restore the user's settings.
     _engine.setOversampling(_oversampling);
     _engine.setSharpening(_sharpening);

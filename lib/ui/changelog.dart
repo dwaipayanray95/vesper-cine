@@ -7,6 +7,10 @@ class ChangelogEntry {
 }
 
 const changelog = <ChangelogEntry>[
+  ChangelogEntry('0.11.3', [
+    'Faster HQ oversampling and sharpening on the GPU (identical image)',
+    'GPU Benchmark (developer builds) ends with an A/B: new vs previous shaders',
+  ]),
   ChangelogEntry('0.11.2', ['Settings: each category opens scrolled to the top']),
   ChangelogEntry('0.11.0', [
     'New Settings layout: categories on the left, their settings on the right',

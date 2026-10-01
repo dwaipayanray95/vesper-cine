@@ -555,6 +555,31 @@ int main() {
         std::printf("  frame time (lavapipe): HQ off %.1f ms, HQ on %.1f ms (+%.0f%%)\n", off, on, 100 * (on / off - 1));
     }
 
+    // 10. Benchmark A/B: the previous shaders (compile_shaders.sh *_prev) must
+    //     run, and the printed difference shows what the current optimisation
+    //     changes in the recording (0 = bit-identical).
+    {
+        FrameParams ap = baseParams(0);
+        ap.flags[3] = 16 | 1;
+        ap.cleanFlags[0] = 1; ap.cleanFlags[1] = 1; ap.cleanFlags[3] = 1;
+        ap.noise[0] = 0.7f; ap.noise[1] = 0.5f; ap.noise[2] = 2e-4f; ap.noise[3] = 2e-6f;
+        auto runSeq = [&](bool prev, std::vector<uint16_t>& out) {
+            gpu.setPreviousShaders(prev);
+            P010 fr{};
+            bool ok = runFrame(gpu, raw, baseParams(0), nullptr, fr); // temporal NR off: both runs start without history
+            for (unsigned i = 0; i < 4; ++i) ok = runFrame(gpu, makeNoisyRaw10(TestScene(), 40 + i), ap, nullptr, fr) && ok;
+            out.assign(fr.y, fr.y + OUT_W * OUT_H * 3 / 2);
+            return ok;
+        };
+        std::vector<uint16_t> cur, prev;
+        bool ok = runSeq(false, cur) && runSeq(true, prev);
+        gpu.setPreviousShaders(false);
+        int maxDiff = 0;
+        for (size_t i = 0; i < cur.size(); ++i) maxDiff = std::max(maxDiff, std::abs((cur[i] >> 6) - (prev[i] >> 6)));
+        std::printf("  A/B previous shaders: max difference %d codes (everything on)\n", maxDiff);
+        check(ok, "previous shaders (benchmark A/B) run", ok, 1);
+    }
+
     // 7. Ring: many frames in a row must all complete (fence/slot reuse).
     for (int i = 0; i < 12; ++i) {
         if (!runFrame(gpu, raw, baseParams(0), nullptr, f)) { std::puts("FAIL ring reuse"); ++failures; break; }

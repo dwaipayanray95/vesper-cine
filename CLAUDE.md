@@ -23,6 +23,7 @@ For user-visible changes also add an entry to `lib/ui/changelog.dart` (shown in 
 - APKs come from GitHub Actions (**Build arm64 APK**, manual `workflow_dispatch`: build_mode, dev_tools). Pushing does not build — if a log looks like an old version, check which commit the latest run used.
 - Ask for logs from **Settings › Developer › App log › Copy** (in-app ring buffer, all native log lines since launch). Native logging goes through `vesperLog` (`app_log.h`); new log lines should use the existing `LOGI`/`VK_LOGI`/… macros.
 - Profile builds are the test builds (release-speed UI/GPU, dev tools visible).
+- **GPU optimisation A/B:** wrap the old version of changed shader code in `#ifdef VESPER_PREV` and keep the `*_prev` variants in `compile_shaders.sh` (render, green R16F fp32/fp16). The GPU Benchmark ends with "Everything on → previous shaders → again" and prints `A/B: new shaders save X ms`; the GPU test prints the max P010 difference (0 = bit-identical). Once a result is confirmed on the phone, delete the `VESPER_PREV` code (keep the `*_prev` plumbing for the next experiment).
 
 ## Layout
 - `android/app/src/main/cpp/` — native engine: `camera_engine` (Camera2 NDK), `vulkan_engine` (GPU pipeline, submit thread, guard), `shaders/` (unpack, green, align, clean, render), `color_science`, `recorder`, `focus_controller`, `iso_analysis`, `app_log.h`. `native_bridge.cpp` holds the `vesper_*` C exports, `onFrame` and the status JSON.

@@ -1259,6 +1259,12 @@ EXPORT void vesper_set_budget_guard(int32_t enable) {
     if (gGpu) gGpu->setBudgetGuard(enable != 0);
 }
 
+// GPU benchmark A/B (developer tool): 1 = run the shaders as they were before
+// the current optimisation, 0 = the current ones.
+EXPORT void vesper_set_previous_shaders(int32_t enable) {
+    if (gGpu) gGpu->setPreviousShaders(enable != 0);
+}
+
 // HQ oversampling: luma rebuilt from the full-resolution sensor and
 // area-downsampled to the output (sharper, less moire); off = quad-only path.
 EXPORT void vesper_set_oversampling(int32_t enable) {

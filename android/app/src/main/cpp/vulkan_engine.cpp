@@ -7,6 +7,9 @@
 #include "shaders/green_rgba_fp16_spv.h"
 #include "shaders/green_spv.h"
 #include "shaders/green_rgba_spv.h"
+#include "shaders/render_prev_spv.h"
+#include "shaders/green_prev_spv.h"
+#include "shaders/green_fp16_prev_spv.h"
 
 #include <algorithm>
 #include <cmath>
@@ -279,6 +282,7 @@ bool VulkanEngine::createPipelines() {
     sci.maxLod = 0.0f;
     if (vkCreateSampler(device_, &sci, nullptr, &sampler_) != VK_SUCCESS) return false;
 
+    // `layout` is created unless it already exists (A/B variants share their pass's layout).
     auto makePipe = [&](const uint32_t* code, size_t bytes, VkDescriptorSetLayout set,
                         VkPipelineLayout& layout, VkPipeline& pipe, uint32_t pushBytes = 0) {
         VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
@@ -289,7 +293,7 @@ bool VulkanEngine::createPipelines() {
             pli.pushConstantRangeCount = 1;
             pli.pPushConstantRanges = &push;
         }
-        if (vkCreatePipelineLayout(device_, &pli, nullptr, &layout) != VK_SUCCESS) return false;
+        if (!layout && vkCreatePipelineLayout(device_, &pli, nullptr, &layout) != VK_SUCCESS) return false;
         VkShaderModule mod = makeModule(device_, code, bytes);
         if (!mod) return false;
         VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
@@ -310,7 +314,12 @@ bool VulkanEngine::createPipelines() {
                 ? (fp16_ ? makePipe(kGreenFp16Spv, sizeof(kGreenFp16Spv), greenLayout_, greenPipeLayout_, greenPipe_)
                          : makePipe(kGreenSpv, sizeof(kGreenSpv), greenLayout_, greenPipeLayout_, greenPipe_))
                 : (fp16_ ? makePipe(kGreenRgbaFp16Spv, sizeof(kGreenRgbaFp16Spv), greenLayout_, greenPipeLayout_, greenPipe_)
-                         : makePipe(kGreenRgbaSpv, sizeof(kGreenRgbaSpv), greenLayout_, greenPipeLayout_, greenPipe_)));
+                         : makePipe(kGreenRgbaSpv, sizeof(kGreenRgbaSpv), greenLayout_, greenPipeLayout_, greenPipe_))) &&
+           makePipe(kRenderPrevSpv, sizeof(kRenderPrevSpv), renderLayout_, renderPipeLayout_, renderPrevPipe_) &&
+           // Previous green variant only for the R16F image (the phone's path); otherwise A/B uses the current one.
+           (hqFormat_ != VK_FORMAT_R16_SFLOAT ||
+            (fp16_ ? makePipe(kGreenFp16PrevSpv, sizeof(kGreenFp16PrevSpv), greenLayout_, greenPipeLayout_, greenPrevPipe_)
+                   : makePipe(kGreenPrevSpv, sizeof(kGreenPrevSpv), greenLayout_, greenPipeLayout_, greenPrevPipe_)));
 }
 
 void VulkanEngine::release() {
@@ -341,8 +350,14 @@ void VulkanEngine::release() {
     if (cleanPipe_) vkDestroyPipeline(device_, cleanPipe_, nullptr);
     if (alignPipe_) vkDestroyPipeline(device_, alignPipe_, nullptr);
     if (greenPipe_) vkDestroyPipeline(device_, greenPipe_, nullptr);
+    if (greenPrevPipe_) vkDestroyPipeline(device_, greenPrevPipe_, nullptr);
+    if (renderPrevPipe_) vkDestroyPipeline(device_, renderPrevPipe_, nullptr);
+    greenPrevPipe_ = renderPrevPipe_ = VK_NULL_HANDLE;
     if (greenPipeLayout_) vkDestroyPipelineLayout(device_, greenPipeLayout_, nullptr);
     if (greenLayout_) vkDestroyDescriptorSetLayout(device_, greenLayout_, nullptr);
+    greenPipe_ = VK_NULL_HANDLE;
+    greenPipeLayout_ = VK_NULL_HANDLE;
+    greenLayout_ = VK_NULL_HANDLE;
     if (alignPipeLayout_) vkDestroyPipelineLayout(device_, alignPipeLayout_, nullptr);
     if (alignLayout_) vkDestroyDescriptorSetLayout(device_, alignLayout_, nullptr);
     alignPipe_ = VK_NULL_HANDLE;
@@ -1034,6 +1049,7 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
     std::memcpy(s.params.mapped, &params, sizeof(params));
     auto tCopy = Clock::now();
 
+    const bool prev = prevShaders_;
     VkCommandBuffer cb = s.cmd;
     vkResetCommandBuffer(cb, 0);
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -1065,7 +1081,7 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
                          0, nullptr, 0, nullptr, 1, &quadReady);
     if (hq) {
         // HQ luma detail per 16x16-quad tile (raw + quad image -> detail image).
-        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, greenPipe_);
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, prev && greenPrevPipe_ ? greenPrevPipe_ : greenPipe_);
         vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, greenPipeLayout_, 0, 1, &s.greenSet, 0, nullptr);
         vkCmdDispatch(cb, static_cast<uint32_t>((g.rawW / 2 + 15) / 16), static_cast<uint32_t>((g.rawH / 2 + 15) / 16), 1);
         VkImageMemoryBarrier detailReady = imageBarrier(greenImage_.image, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
@@ -1108,7 +1124,7 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
     historyValid_ = temporal;
 
     if (queryPool_) vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool_, q0 + 3);
-    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, renderPipe_);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, prev ? renderPrevPipe_ : renderPipe_);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, renderPipeLayout_, 0, 1, &s.renderSets[pingParity_], 0, nullptr);
     vkCmdDispatch(cb, static_cast<uint32_t>((g.outW / 2 + 7) / 8), static_cast<uint32_t>((g.outH / 2 + 7) / 8), 1);
 

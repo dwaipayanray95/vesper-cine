@@ -20,7 +20,8 @@
 //      and white balance applied (shading evaluated once per tile: the map
 //      varies over hundreds of pixels);
 //   2. reconstructs green at every raw pixel with edge-directed
-//      (Hamilton-Adams) interpolation;
+//      (Hamilton-Adams) interpolation (green photosites are copied while
+//      loading, so only the red/blue half is interpolated);
 //   3. applies the anti-alias downscale filter separably (8 taps per axis at
 //      the pixel positions around each quad centre) — the discrete form of the
 //      5x5 kernel tuned in gpu_pipeline_test (passband vs moire, Lanczos-2
@@ -111,6 +112,12 @@ void main() {
         uint lo = sh8 == 0u ? w0 : ((w0 >> sh8) | (w1 << (32u - sh8)));
         uint b4 = (sh8 == 0u ? w1 : (w1 >> sh8)) & 0xFFu;
         int ay = y;
+#ifndef VESPER_PREV
+        // Tile-relative position this value stands for (the clamped frame-edge
+        // copies keep their nominal CFA site, as step 2 sees them).
+        const int ry = row - RBY;
+        const bool greenRow = ry >= -GB && ry < T + GB;
+#endif
         for (int b = 0; b < 4; ++b) {
             int x = grp * 4 + b;
             float dn = float((((lo >> (8u * uint(b))) & 0xFFu) << 2) | ((b4 >> (2 * b)) & 3u));
@@ -119,12 +126,22 @@ void main() {
             float v = (dn - bl) / (P.wbGains.w - bl);
             float gain = site == 0 ? sh.x * P.wbGains.r
                        : (site == 3 ? sh.w * P.wbGains.b : ((ay & 1) == 0 ? sh.y : sh.z) * P.wbGains.g);
-            sRaw[row * RNX + gx * 4 + b] = HF(v * gain);
+            HF val = HF(v * gain);
+            sRaw[row * RNX + gx * 4 + b] = val;
+#ifndef VESPER_PREV
+            // Green photosites are their own full-res green: store them now, so
+            // step 2 only has to interpolate the red/blue sites.
+            const int rx = gx * 4 + b - RBX;
+            const int ns = cfaSite(rx & 1, ry & 1);
+            if (greenRow && rx >= -GB && rx < T + GB && (ns == 1 || ns == 2))
+                sGreen[(ry + GB) * GN + (rx + GB)] = val;
+#endif
         }
     }
     barrier();
 
     // 2. Full-resolution green (Hamilton-Adams) over the filter support.
+#ifdef VESPER_PREV
     for (int i = lid; i < GN * GN; i += NT) {
         int x = i % GN - GB, y = i / GN - GB;
         int site = cfaSite((org.x + x) & 1, (org.y + y) & 1);
@@ -132,6 +149,17 @@ void main() {
         if (site == 1 || site == 2) {
             g = R(x, y);
         } else {
+#else
+    // Only the red/blue half of the sites: every thread runs the same
+    // interpolation (no idle lanes waiting on neighbours that just copy).
+    for (int i = lid; i < GN * GN / 2; i += NT) {
+        int y = i / (GN / 2) - GB;
+        int x = 2 * (i % (GN / 2)) - GB;
+        int s0 = cfaSite(0, y & 1);           // org is even: tile-relative parity is the CFA parity
+        x += (s0 == 1 || s0 == 2) ? 1 : 0;    // the row's non-green column parity
+        HF g;
+        {
+#endif
             HF c = R(x, y);
             HF gl = R(x - 1, y), gr = R(x + 1, y), gu = R(x, y - 1), gd = R(x, y + 1);
             HF lapH = HF(2.0) * c - R(x - 2, y) - R(x + 2, y);
@@ -144,7 +172,11 @@ void main() {
             HF lo = min(min(gl, gr), min(gu, gd)), hi = max(max(gl, gr), max(gu, gd));
             g = clamp(g, lo, hi); // no overshoot: edges stay halo-free
         }
+#ifdef VESPER_PREV
         sGreen[i] = g;
+#else
+        sGreen[(y + GB) * GN + (x + GB)] = g;
+#endif
     }
     barrier();
 
