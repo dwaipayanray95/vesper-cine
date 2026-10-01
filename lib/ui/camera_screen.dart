@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../build_flags.dart';
 import '../services/vesper_native.dart';
 import 'cine_control_tile.dart';
 import 'focus_panel.dart';
@@ -549,7 +550,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       _nrAlignment = get('nrAlignment', _nrAlignment);
       _sharpening = get('sharpening', _sharpening).clamp(0, 3);
       _oversampling = get('oversampling', _oversampling);
-      _gpuGuard = get('gpuGuard', _gpuGuard);
+      _gpuGuard = kDevTools ? get('gpuGuard', _gpuGuard) : true; // release: the guard is always on
       _codec = get('codec', _codec).clamp(0, 1);
       _tapLocks = get('tapLocks', _tapLocks);
       _tapSetsExposure = get('tapSetsExposure', _tapSetsExposure);

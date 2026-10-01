@@ -201,7 +201,9 @@ class MainActivity : FlutterActivity() {
                 }
                 "deviceInfo" -> {
                     val dir = java.io.File(getExternalFilesDir(null), "calibration").apply { mkdirs() }
-                    result.success(mapOf("model" to Build.MODEL, "device" to Build.DEVICE, "calibrationDir" to dir.absolutePath, "filesDir" to filesDir.absolutePath))
+                    val pkg = packageManager.getPackageInfo(packageName, 0)
+                    result.success(mapOf("model" to Build.MODEL, "device" to Build.DEVICE, "calibrationDir" to dir.absolutePath, "filesDir" to filesDir.absolutePath,
+                        "version" to (pkg.versionName ?: ""), "build" to pkg.longVersionCode.toString(), "android" to Build.VERSION.RELEASE))
                 }
                 "publishCalibration" -> {
                     val base = call.argument<String>("base") ?: ""

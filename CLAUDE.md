@@ -6,6 +6,7 @@ After **every** piece of work, bump `version:` in `pubspec.yaml` before committi
 - **patch** (`0.x.Y`) for fixes, tuning and small UI tweaks;
 - always increment the **build number** after `+` by 1.
 Mention the new version in the commit message and in the reply to the user.
+For user-visible changes also add an entry to `lib/ui/changelog.dart` (shown in Settings › Info › What's new).
 
 ## Checks before committing
 - `test/native/run_tests.sh` (colour science, native type-check, GPU pipeline on lavapipe, calibration, focus, ISO analysis)
