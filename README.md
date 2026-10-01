@@ -1,147 +1,75 @@
 # Vesper Cine
 
-A cinema camera for Google Pixel (8 / 9 / 10). It reads the sensor's RAW10 data directly and develops it on the GPU into **Apple Log / Rec.2020**. Footage is recorded as **10-bit HEVC (or AV1)** with synced audio. The Pixel's video ISP path is bypassed entirely: no tone mapping, no sharpening halos, no temporal smearing.
+A cinema camera app for Google Pixel phones (developed on a **Pixel 10**). It reads the sensor's **RAW10** data directly, develops it on the GPU (Vulkan) with its own colour science into **Apple Log / Rec.2020**, and records **10-bit HEVC or AV1** with audio. The phone's video ISP path is bypassed entirely: no tone mapping, no sharpening halos, no temporal smearing.
 
-Architecture, threading and colour maths are described in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+- Architecture, threading, GPU passes, colour maths: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+- Notes for AI agents / contributors (rules, checks, gotchas, current numbers): [`CLAUDE.md`](CLAUDE.md)
+- Per-device colour calibration: [`tools/calibration/README.md`](tools/calibration/README.md)
+- User-facing changelog: [`lib/ui/changelog.dart`](lib/ui/changelog.dart) (shown in the app under Settings › Info)
 
-## Status
+## Status (v0.11)
 
 | Area | State |
 |---|---|
-| RAW10 capture (binned readout), fixed frame duration 24/25/30/60 fps | Implemented |
-| Per-frame dynamic black/white level, lens shading map (vignetting + colour shading) | Implemented |
-| Quad debayer, CFA-aware sub-pixel resampling, Gr/Gb split removal, neutral highlight clipping | Implemented, GPU-tested on host |
-| DNG dual-illuminant colour (CM/FM/CC, mired interpolation), Kelvin + tint, raw tap-to-WB | Implemented, unit-tested |
-| Apple Log (Rec.2020) master, Rec.709 / false colour / peaking / zebra monitoring | Implemented, GPU-tested on host |
-| Swapchain viewfinder (no CPU readback), 3-slot GPU ring | Implemented |
-| Recording: HEVC Main10 / AV1 Main10 (P010 input) + AAC, MP4 in `Movies/Vesper Cine` | Implemented |
-| Thermal stop (`SEVERE`), low-storage stop, dropped-frame counter | Implemented |
-| Hardware AF (PDAF + laser via HAL): continuous, tap-to-focus, lock; face detection | Implemented |
-| Google AWB (HAL neutral point, followed live) or manual Kelvin/tint | Implemented |
-| Lens distortion correction (Camera2 lens model), hot/dead pixel repair | Implemented, GPU-tested on host |
-| Temporal NR (motion-adaptive, sensor noise profile, HDR+-style tile alignment) and chroma NR — optional | Implemented, GPU-tested on host |
-| Full-range shutter (angle or speed), ISO, fps pickers; one-shot auto-exposure assist | Implemented |
-| OIS toggle | Implemented |
-| True UHD (full-res demosaic pass) | Planned. UHD output currently upsamples the ~2040 px quad image. |
-| Gyroflow IMU log, external SSD | Planned |
+| RAW10 capture, 16:9 readout 4000×2256 (up to 60 fps) or 4:3 4000×3000 (up to 30 fps); 23.976–60 fps | Working on Pixel 10 |
+| Dynamic black/white level, lens shading map, DNG dual-illuminant colour, Kelvin/tint, Google AWB follow, WB eyedropper | Working |
+| Apple Log (Rec.2020) master; viewfinder Rec.709 LUT, false colour, peaking, zebra, histogram/waveform, 3× magnifier | Working |
+| HQ oversampling (full-sensor luma, anti-aliased to 1080p), noise-aware sharpening, lens distortion correction, hot-pixel repair | Working |
+| Temporal NR (motion-adaptive, tile alignment) and chroma NR, noise model from the sensor profile and lens-shading gain | Working |
+| Recording: HEVC/AV1 Main10 1080p (P010 input) + AAC, MP4 in `Movies/Vesper Cine`; thermal / storage stops | Working |
+| GPU performance guard: pauses alignment → HQ → NR when frames would drop, restores them when they fit; always on while recording | Working |
+| Native viewfinder (Android `SurfaceView` under a transparent Flutter UI), submit/present on its own thread | Working |
+| PDAF/laser tap AF (track or lock), face detection; clean auto-exposure (native ISO first, shutter to 180°, then gain); native ISO analysis | Working |
+| Side-rail Settings with Info tab (version, changelog, how-to, FAQ); in-app log (developer builds) | Working |
+| **4K (UHD) output** | Engine has a `resolution` setting that upsamples the 2000-px quad image; not exposed in the UI. A real UHD path is the next big feature (see Roadmap). |
+| Gyroflow IMU log, external SSD, audio levels | Planned |
 
-**Not yet verified on a device.** This build environment can't reach the Android SDK/NDK, so the Android build itself hasn't been compiled here. See *First on-device run* below.
+Performance at 1080p on Pixel 10 (GPU time per frame, everything on): **~34 ms** — fits 24/25 fps (41.7/40 ms budgets). At 30 fps the guard pauses alignment; at 48/60 fps it pauses HQ and NR as well. Details in `CLAUDE.md`.
 
-## Exposure & Apple Log
+## Using it
 
-Apple Log maps scene-linear 0 → 12 onto code values 0.15 → 1.0, with 18% grey at 0.488. The binned Pixel sensor delivers about 11–12 stops at base ISO in 10 bits, which fits inside that range. So a custom curve isn't needed, and a standard one gets native support in Resolve, Premiere and FCP.
+- **Tap** the viewfinder to focus (TRACK = AF-C, FOCUS & LOCK = AF-L); **long-press** to focus and lock. Optionally a tap also meters exposure.
+- Top bar: Apple Log / LUT, aspect, **FC** false colour, **PEAK**, **MAG**, **ZEBRA**, settings. Left rack: FPS, shutter (angle or speed), ISO, WB, focus, scopes.
+- **Settings** (gear): Recording · Audio · Image & NR · Exposure · Color · Focus · Developer (debug/profile builds) · Info.
+- Recordings: `Movies/Vesper Cine/VESPER_<date>_<time>.mp4`.
 
-How the sensor's range is placed on the curve is set by **highlight headroom**: the number of stops between 18% grey and sensor clip.
+### Exposure & Apple Log
 
-* Default is **5.5 stops**. Clip maps to linear 8.1, which is Apple Log 0.952.
-* **Expose so 18% grey reads 0.49** (the green band in false colour). That leaves 5.5 stops above grey and roughly 5–6 stops of usable shadow detail below it.
-* `vesper_set_highlight_headroom()` (Dart: `setHighlightHeadroom`) trades highlights for shadows between 3 and 6.3 stops.
+Apple Log maps scene-linear 0 → 12 onto code values 0.15 → 1.0, 18% grey at 0.488. Highlight headroom (stops between 18% grey and sensor clip) defaults to **5.5 stops**; expose so 18% grey reads ~0.49 (green band in false colour). Clipped highlights are faded to neutral (never magenta).
 
-Blown highlights are clipped to the lowest channel's saturation and faded to neutral, so they never turn magenta.
-
-**In post:** set the clip's input colour space to **Apple Log** and the gamut to **Rec.2020**. MP4 has no transfer-curve code for Apple Log, so files are tagged BT.2020 primaries/matrix, limited range, transfer unspecified — the same as iPhone. `color_science/` contains Apple Log → Rec.709 LUTs (Gamma 2.4, plus an sRGB version that matches the viewfinder) and a matching DCTL. Regenerate them with `python3 color_science/generate_applelog_lut.py`.
+**In post:** input colour space **Apple Log**, gamut **Rec.2020**. Files are tagged BT.2020 primaries/matrix, limited range, transfer unspecified (as iPhone does). `color_science/` has Apple Log → Rec.709 LUTs and a DCTL (`python3 color_science/generate_applelog_lut.py`).
 
 ## Building
 
+Android APKs are built by GitHub Actions: **Actions → Build arm64 APK → Run workflow** on `main`, choose `release` / `profile` / `debug`, optionally `dev_tools`. Builds do **not** run automatically on push. All builds are signed with the shared tester key (`android/app/vesper-dev.jks`), so new APKs install over old ones.
+
+Locally:
+
 ```bash
 flutter pub get
-flutter run --release            # Pixel, USB debugging on
-```
-
-After editing any shader:
-
-```bash
-android/app/src/main/cpp/shaders/compile_shaders.sh   # needs glslangValidator
-```
-
-Host-side tests (Linux, needs `g++`, `glslang-tools`, `libvulkan-dev`, `mesa-vulkan-drivers`):
-
-```bash
-test/native/run_tests.sh   # colour maths, native type-check, real GPU pipeline on lavapipe
+flutter run --profile                                   # Pixel with USB debugging
+android/app/src/main/cpp/shaders/compile_shaders.sh     # after editing shaders (needs glslangValidator)
+test/native/run_tests.sh                                # colour maths, native type-check, GPU pipeline on lavapipe, …
 flutter analyze && flutter test
 ```
 
-## First on-device run — what to send back
+Host tests need `g++`, `glslang-tools`, `libvulkan-dev`, `mesa-vulkan-drivers`, `python3` + `numpy`.
 
-Run `adb logcat -s Vesper Vesper_Camera Vesper_Vulkan Vesper_Recorder` and send these lines:
+**Build types:** profile is the one to test with — as fast as release for the UI and GPU, keeps logs and developer tools. `kDevTools` (`lib/build_flags.dart`) shows developer tools (GPU guard switch, App log, GPU benchmark, chart calibration capture) in debug/profile builds and hides them in release.
 
-1. `Sensor: white=... black=[...] CFA=... shadingMap=CxR (applied=...)` and `Calibration: illuminants ...K/...K, CM2=.. FM1=.. FM2=..`. These confirm the calibration data and shading map exist.
-2. `RAW10 mode WxH max N fps` for each mode. This tells us whether 60 fps is possible at the binned size.
-3. `Viewfinder swapchain ...` **or** `Swapchain unavailable ... CPU copy fallback`.
-4. `Frame N: avg wait / upload / record+submit, dropped` (logged every 120 frames).
-5. After tap-to-WB on a grey card: `WB lock: raw neutral ... -> ...K tint ...`.
-6. When recording: `Recording WxH @ fps, <encoder name>, N Mb/s, audio=1, input stride ...`. If it fails instead, send the `10-bit P010 encoder configuration rejected` line.
+## Testing on a phone
 
-Also please check: grey card under LED light after tap-to-WB (is the green/yellow cast gone?), corners of a white wall (vignetting/colour shading corrected?), a clip opened in Resolve with Input = Apple Log.
+Use **Settings › Developer › App log** (debug/profile builds): it keeps the engine's log since launch and copies it in one tap — no adb needed. Useful lines:
 
-## What changed in the audit
+- `Stream mode WxH … @ fps` and `16-bit shader arithmetic: yes/no` (startup)
+- every 5 s: `Camera: N fps measured, N sensor drops`, `Frame N: … (max wait) … vf hitches`, `GPU per frame: … = X ms (budget Y ms), guard paused: …`
+- guard decisions: `paused stage N`, `paused stage N saved X ms`, `re-enabled stage N costs X ms`, `frame rate changed … all stages back on`
+- **Settings › Developer › GPU Benchmark** measures each option's GPU cost on the phone.
 
-The previous pipeline had several defects that directly caused the reported issues.
-
-**Colour**
-- **Green cast from tap-to-WB.** The gains were `grey/r, 1, grey/b` instead of `g/r, 1, g/b`, which left green un-normalised.
-- **Kelvin dial.** It always computed the neutral for D50, whatever Kelvin was requested. The tint direction was also inverted, and used a display-colour approximation instead of a proper Duv offset.
-- **R-Log curve.** The old curve was discontinuous at 0.01 (a jump of 0.29), and grey actually landed at 0.54, not the 0.40 the docs claimed. It has been replaced by Apple Log.
-- **Black level ordering.** Dynamic black level was read in physical CFA order but used as logical R/Gr/Gb/B, which is wrong on this GRBG sensor. Dynamic white level was also never read.
-- **Lens shading.** It was never applied (`SHADING_MODE_OFF`, no map requested), so vignetting and colour shading were uncorrected.
-- **Magenta highlights.** Nothing clipped the channels after WB gains.
-
-**Image quality**
-- **Aliasing and moiré.** Output was point-sampled from the (0,0) Bayer phase, with MHC coefficients that didn't match the published kernel. Replaced by the quad debayer with filtered resampling.
-
-**Performance**
-- The viewfinder did a GPU→CPU readback through uncached memory plus `ANativeWindow_lock` on the camera thread.
-- A single command buffer/fence meant no pipelining.
-- No frame duration was set, so fps was whatever the HAL defaulted to.
-
-**Stability**
-- The reader window was double-released.
-- Teardown raced with the frame callback, so the image could be freed while in use.
-- Unlocked setters raced with request teardown.
-- Device-error recovery ran on the camera callback thread.
-- Crop changes wrote out of bounds mid-frame.
-- `acquireLatestImageAsync` was called with a null fence.
-
-## History (pre-audit, on-device findings)
-
-- **Importing RAW10 `AHardwareBuffer` as a Vulkan image crashes the PowerVR gralloc** (`SIGTRAP` in `gralloc_native_handle_bpp`). This is why frames are copied, not imported.
-- **The sensor reports CFA=1 (GRBG).** Every CFA lookup is resolved dynamically.
-- **At 4K the old per-pixel MHC shader took ~92 ms/frame.** This is why output is 1080p, and why the new quad pipeline exists.
-- **`ForwardMatrix` outputs XYZ relative to D50,** so it is Bradford-adapted to Rec.2020's D65.
-- **The static black level pattern is unpopulated on this HAL.** Black level is read per frame from the CaptureResult.
-
-## Focus, metering, calibration
-
-- **Tap to focus** uses the phone's PDAF + laser AF on the tapped region, in one of two modes (FOCUS sheet):
-  - **TRACK** keeps following (AF-C).
-  - **FOCUS & LOCK** holds once converged (AF-L).
-  - The box stays on screen and turns green when AF has landed.
-  - Camera2 exposes no PDAF or laser distance before the lens moves, so the HAL's AF drive speed can't be re-timed. Contrast-detect AF was tried and dropped as unreliable on this sensor, especially in low light.
-- **Long-press** the viewfinder to focus there and lock.
-- **TAP SETS EXPOSURE** also spot-meters at the tapped point.
-- The **AE** button meters centre-weighted, and prefers a detected face (placed ½ stop over grey).
-- **Colour calibration** is per phone and per camera, from a ColorChecker chart; see [tools/calibration](tools/calibration/README.md). Profiles live in `assets/color_profiles/`. PROCESSING switches between FACTORY and CHART PROFILE.
-
-## Image quality: HQ oversampling
-
-The sensor is read at full width (4000x2256 at 16:9). The base path builds one RGB value per 2x2 Bayer quad (2000 px wide), which is barely more than 1080p.
-
-HQ oversampling (on by default) works in two steps:
-- `green.comp` rebuilds green (luma detail) at every sensor pixel with edge-directed Hamilton-Adams interpolation.
-- The render pass downsamples it with an anti-aliasing 5x5 kernel optimised for 1080p. Only the extra detail is added on top of the noise-reduced quad image, cored against the noise profile.
-
-Measured in `gpu_pipeline_test`:
-- +39% resolved fine detail.
-- -52% moire on detail finer than 1080p.
-- The same noise with NR on.
-- A 2% edge overshoot.
-
-If the GPU runs over budget, the guard pauses alignment first, then HQ, then NR.
+With adb: `adb logcat -s Vesper Vesper_Camera Vesper_Vulkan Vesper_Recorder VesperBench Vesper_UI`.
 
 ## Roadmap
 
-1. On-device verification of the items above.
-2. A true UHD path: full-res demosaic pass (e.g. RCD or MHC with a shared-memory tile) plus an area-filtered downscale.
-3. Temporal/spatial denoise driven by `SENSOR_NOISE_PROFILE` (optional, off by default).
-4. Gyroflow IMU logging (`ASensorManager`, 200 Hz+, synced to sensor timestamps).
-5. External USB-C SSD recording.
+1. **4K / UHD output**: needs a full-resolution demosaic path (the quad image is 2000 px wide) and enough GPU budget — at 1080p the GPU already uses ~34 of 41.7 ms at 24 fps, so 4K needs a cheaper pipeline (pass merging, 16-bit everywhere it's safe) and probably reduced NR.
+2. Audio levels / mic selection; Gyroflow IMU logging; external USB-C SSD.
+3. Mark unsustainable frame rates in the FPS picker (needs per-setting cost estimates from the guard).

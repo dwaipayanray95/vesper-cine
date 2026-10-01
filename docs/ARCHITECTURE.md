@@ -1,69 +1,101 @@
 # Vesper Cine — Architecture
 
-Pixel RAW10 sensor data → GPU → Apple Log (Rec.2020) → 10-bit HEVC/AV1, with a
-viewfinder that shows exactly what is being recorded. Nothing from the ISP's
-processed path (tone mapping, sharpening, temporal NR, HDR merge) is used.
+Pixel RAW10 sensor data → Vulkan compute → Apple Log (Rec.2020) → 10-bit HEVC/AV1, with a
+viewfinder that shows what is being recorded. Nothing from the ISP's processed path
+(tone mapping, sharpening, temporal NR, HDR merge) is used.
 
 ```
  Camera2 NDK (TEMPLATE_MANUAL, 3A off, fixed frame duration)
-   │ RAW10 largest mode = 2x2-binned readout (~4080x3072 on Pixel)
+   │ RAW10, 16:9 readout 4000x2256 (≤60 fps) or 4:3 4000x3000 (≤30 fps)
    │ CaptureResult: dynamic black/white level, lens shading map, timestamps
    ▼
- AImageReader (CPU_READ_OFTEN, 5 images) ── reader thread ──────────────────┐
-   │ memcpy into ring slot i (3 slots, persistently mapped, write-combined)   │
-   ▼                                                                          │
- Vulkan, one queue submission per frame                                        │
-   pass 1  unpack.comp   RAW10 → quad image (rgba16f, raw/2 size)            │
-           black level (signed), lens shading map, white balance,             │
-           highlight clip to lowest channel + chroma fade, Gr/Gb averaged     │
-   pass 2  render.comp   quad image → upright crop → resample (per-channel    │
-           sub-pixel CFA offsets, bilinear) → DNG camera→XYZ(D50)→Rec.2020     │
-           ×k → Apple Log → { P010 (BT.2020 limited), viewfinder RGBA8 }      │
-   copy    viewfinder → swapchain image on Flutter's Surface (no CPU readback)│
-   ▼                                                                          │
- Recorder thread: wait slot fence → copy P010 into MediaCodec input buffer ◄──┘
-   → HEVC Main10 / AV1 Main10 (VBR) ─┐
- AAudio 48 kHz stereo → AAC-LC 320k ─┴→ AMediaMuxer (MP4) → MediaStore fd
+ AImageReader (CPU_READ_OFTEN, 8 images, acquireLatestImage) ── camera thread
+   │ metering / AE / scopes (sparse CPU samples), memcpy into ring slot (3 slots)
+   │ waits only for the frame before last (≤2 frames on the GPU)
+   ▼
+ VulkanEngine::processFrame — records one command buffer, queues it
+   unpack.comp  RAW10 → quad image (rgba16f, 2000x1128): black level, lens shading,
+                WB, neutral highlight clip; alpha = clip flag or 0.1×shading gain
+   green.comp   [HQ] full-res green (Hamilton-Adams) per 16x16-quad tile, 8-tap
+                anti-alias filter → luma detail D = G_hq − G_quad (R16F); fp16 variant
+   align.comp   [TNR+align, every other frame] 1/4-res luma, per-tile motion search
+   clean.comp   hot-pixel repair, chroma NR (cross-bilateral), temporal NR against
+                the ping-pong history (motion-warped); noise model × shading gain
+   render.comp  crop/rotate, Catmull-Rom luma + bilinear chroma, + HQ detail,
+                sharpening, camera→Rec.2020, Apple Log → P010 (when recording)
+                + viewfinder RGBA8 (LUT / false colour / peaking / zebra)
+   ▼
+ Submit thread: vkQueueSubmit; then acquire swapchain image, blit viewfinder
+   (scaled to the on-screen box, optional 3x magnifier crop), present (FIFO)
+   → SurfaceView under the transparent Flutter UI (system compositor)
+   ▼
+ Recorder thread: wait slot fence → P010 into MediaCodec → HEVC/AV1 Main10 (VBR)
+ AAudio → AAC-LC ─┴→ AMediaMuxer (MP4) → MediaStore fd (Movies/Vesper Cine)
 ```
 
 ## Why these choices
 
 | Decision | Why |
 |---|---|
-| **Binned RAW10 readout**, not full 50 MP | Full field of view, ~2x better SNR per output pixel, the fastest readout (least rolling shutter), and the only mode that can reach 30–60 fps. Full-res quad-Bayer would need remosaicing and still be downscaled. |
-| **Quad (2x2 superpixel) debayer** | For 1080p the output is ~half the raw width, so a 2x2 quad already has more than one full RGB sample per output pixel. No demosaic interpolation means no zipper, maze or false-colour artefacts. Averaging Gr/Gb removes green split. The render pass samples R and B at their true sub-pixel positions, so there is no chroma misregistration. This is the approach used by HDR+ (quad-based merge) and MotionCam's preview. A full-res demosaic pass only becomes necessary for true UHD. |
-| **CPU memcpy upload** | Importing RAW10 `AHardwareBuffer`s crashes the PowerVR gralloc. Importing as a `VkBuffer` requires `AHARDWAREBUFFER_FORMAT_BLOB`, which RAW10 buffers aren't, so it isn't a conformant path. The copy is ~15 MB/frame (~2–4 ms) into write-combined memory, runs on a 3-slot ring, and never waits on the GPU in the steady state. |
-| **Swapchain viewfinder** | The old path read the viewfinder back from GPU to CPU through uncached memory and then used `ANativeWindow_lock` (12–35 ms/frame). The swapchain uses MAILBOX when available and acquire timeout 0, so the display can never stall the camera. If swapchain creation fails, a readback from cached memory is kept as a fallback. |
-| **P010 ByteBuffer encoder input** | We choose the exact YCbCr matrix (BT.2020 NCL), the range (limited) and 10-bit quantisation, and every frame carries its sensor timestamp as PTS. An input Surface would hand RGB→YUV conversion to the vendor. |
-| **Apple Log / Rec.2020** | A published, C1-continuous log curve with native support in Resolve, Premiere and FCP. It covers linear 0→12 (18% grey = 0.488), which exceeds the sensor's range, so no custom curve is needed. See the README for how the dynamic range is mapped. |
+| **Binned RAW10 readout** | Full field of view, better SNR, fastest readout (least rolling shutter), the only modes reaching 30–60 fps. The 16:9 mode is read directly (no 4:3 crop waste). |
+| **Quad (2x2) debayer + HQ detail** | For 1080p the quad image (2000 px) already has more than one RGB sample per output pixel: no zipper/maze artefacts, no Gr/Gb split. HQ adds the extra luma detail from a full-res green, anti-aliased, as a difference image. |
+| **CPU memcpy upload** | Importing RAW10 `AHardwareBuffer`s as Vulkan images crashed the PowerVR gralloc, and importing as a `VkBuffer` requires `AHARDWAREBUFFER_FORMAT_BLOB` (RAW10 isn't). ~15 MB/frame, ~2.5 ms on the camera thread. |
+| **Submit/present thread** | `vkQueueSubmit`/`vkQueuePresentKHR` blocked the camera thread for ~46 ms on PowerVR. The camera thread now only records and queues (<1 ms). |
+| **SurfaceView viewfinder** | Through a Flutter texture every frame waited for a Flutter frame (85–100 ms gaps). Now presented straight to SurfaceFlinger; Flutter draws the UI on a transparent surface on top and reports the viewfinder box (`setViewfinderRect`). The swapchain is sized to that box (the GPU scales; compositor scaling aliased noise). FIFO so no frame is replaced. |
+| **Ping-pong TNR history** | Clean writes image P[parity] and reads P[1−parity] as history; descriptor sets exist per slot per parity. No per-frame history copy. |
+| **P010 ByteBuffer encoder input** | We choose BT.2020 NCL matrix, limited range and quantisation; every frame carries its sensor timestamp as PTS. |
+| **Apple Log / Rec.2020** | Published, C1-continuous, natively supported in Resolve/Premiere/FCP; covers the sensor's range. |
+
+## GPU performance guard (`VulkanEngine::readTimestamps`)
+
+The frame budget is the camera's frame interval. The guard pauses optional stages when the
+smoothed GPU frame time stays > 85% of budget (~0.5 s): alignment (0), then HQ (1), then NR (2).
+It measures what each pause saved; that number is inflated while overloaded, so it is only a
+placeholder until a **restore** measures the stage's real cost (`costReliable_`). A paused stage
+comes back when `gpu + cost < 85% − 0.5 ms` (~1 s), or by trial when its cost isn't reliable and
+the GPU is under 85% − 1.5 ms (~3 s). A stage that overflows again is paused and backs off.
+**A frame-rate change resets everything**: all stages on, ~1 s settle, then re-evaluate.
+While recording the guard is always active; release builds always run it on AUTO.
+`overloaded()` (status `gpuOverloaded`) = over budget with nothing left to pause → UI warns.
+
+Per-pass GPU timestamps on PowerVR are unreliable (they lump into "unpack"); only the frame total
+(`gpuFrameMs_`) is meaningful.
 
 ## Threads and locks
 
-| Thread | Work | Locks (in order) |
+| Thread | Work | Locks |
 |---|---|---|
-| Camera reader (NDK) | acquire image, meter WB, `processFrame`, hand slot to recorder | `CameraEngine::frameMutex_` → `gStateMutex` (brief) → `VulkanEngine::frameMutex_` → `encoderMutex_` |
-| Capture result (NDK) | parse per-frame metadata into a ring | `metaMutex_` |
-| Dart / FFI | settings, start/stop | `CameraEngine::mutex_` **or** `gStateMutex`, never both. The bridge never calls into the camera while holding `gStateMutex`. |
+| Camera reader (NDK) | acquire newest image, metering, `processFrame`, hand slot to recorder | `CameraEngine::frameMutex_` → `gStateMutex` (brief) → `VulkanEngine::frameMutex_` → `encoderMutex_` / `submitMutex_` |
+| Submit (VulkanEngine) | queue submit, swapchain acquire/blit/present | `submitMutex_` (queue), `queueMutex_` (all `vkQueue*`) |
+| Capture result (NDK) | per-frame metadata ring | `metaMutex_` |
+| Dart / FFI | settings, status, start/stop | `CameraEngine::mutex_` **or** `gStateMutex`, never both |
 | Recorder | encode, audio, mux, thermal/storage guards | `jobMutex_`, `statusMutex_`, `encoderMutex_` |
 | JNI (Surface) | `setViewfinderWindow` | `windowMutex_` only |
-| Recovery | reopen camera after a fatal device error | `CameraEngine::mutex_` → `frameMutex_` |
+| Recovery | reopen camera after a device error | `CameraEngine::mutex_` → `frameMutex_` |
 
-`stopCapture` removes the image listener, then takes `frameMutex_` before deleting the reader. An in-flight frame therefore always finishes before its `AImage` is freed.
+Swapchain destroy / window change / resource reallocation call `flushSubmits()` first, then
+`vkQueueWaitIdle` under `queueMutex_`.
 
 ## Colour pipeline (DNG 1.6 §6)
 
-* `ColorMatrix1/2` (with `CalibrationTransform`) and `ForwardMatrix1/2` are interpolated by **mired** between the two reference illuminants.
-* **Kelvin/tint dial:** `xy = Planckian(T) + tint·Duv` (Adobe tint scale, 1 unit = Duv 1/3000). Then `neutral = CM(T)·XYZ(xy)`.
-* **Tap-to-WB:** the raw centre patch is averaged per channel (clipped pixels skipped). The DNG xy↔neutral fixed-point iteration then finds the scene white, and the equivalent Kelvin/tint is reported back to the UI.
-* `wbGains = 1/neutral` (G = 1), applied **before** highlight clipping.
-* `camToRec2020 = k · M(XYZ_D50→Rec.2020, Bradford) · FM · D · CC⁻¹ · diag(neutral)`, so the shader only does `M · (raw · gains)`.
-* All of this is covered by `test/native/color_science_test.cpp`.
+* `ColorMatrix1/2` (+ `CalibrationTransform`) and `ForwardMatrix1/2` interpolated by **mired** between the reference illuminants.
+* Kelvin/tint: `xy = Planckian(T) + tint·Duv`; `neutral = CM(T)·XYZ(xy)`. Eyedropper: raw patch average → xy↔neutral iteration → Kelvin/tint.
+* `wbGains = 1/neutral` (G = 1), applied before highlight clipping.
+* `camToRec2020 = k · M(XYZ_D50→Rec.2020, Bradford) · FM · D · CC⁻¹ · diag(neutral)`.
+* Optional per-device chart profile (`assets/color_profiles/`, `tools/calibration/`).
+* Unit tests: `test/native/color_science_test.cpp`.
+
+## Exposure
+
+`solveCleanExposure` (`iso_analysis.cpp`): base native ISO first, shutter up to 180°, then the
+HCG native ISO, then gain (never into digital gain). Native ISOs come from a dark-frame ISO sweep
+(`analyzeIsoSweep`). Auto-exposure glides in log space (no jumps).
 
 ## Tests
 
-`test/native/run_tests.sh`:
-1. Colour-science unit tests.
-2. Type-checks every native source against the real Vulkan headers plus NDK header stubs.
-3. Runs the real `VulkanEngine` and shaders on a host Vulkan driver (Mesa lavapipe) over a synthetic RAW10 frame. It checks the 18% grey code value, neutral clipped highlights, chroma sign, rotation, lens shading gain and ring-slot reuse.
-
-`flutter analyze` and `flutter test` cover the Dart side. On-device verification still needs the logcat checklist in the README.
+`test/native/run_tests.sh`: colour science; native type-check against NDK stubs
+(`test/native/android_stubs/`); the real `VulkanEngine` + shaders on Mesa lavapipe (grey code
+value, clipping, rotation, shading, sharpening, HQ detail/moiré/overshoot/noise, TNR ghosting,
+hot pixels, ring reuse); calibration tool; focus controller; ISO analysis. lavapipe timings are
+CPU-emulated and noisy — never use them as phone performance numbers.
+`flutter analyze` and `flutter test` cover the Dart side.

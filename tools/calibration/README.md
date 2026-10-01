@@ -14,7 +14,7 @@ encoding is not touched: calibration happens *before* the log curve.
 1. Chart fills ~1/3 of the frame, evenly lit, no glare, no shadow. Camera parallel to the chart.
 2. WB: MANUAL, set Kelvin roughly to the light (or tap AUTO then switch to MANUAL).
 3. Tap **AE**, then make sure the white patch isn't clipped (use zebras, lower ISO/shutter if it is).
-4. PROCESSING → **Calibration frame → CAPTURE**. The `.raw10` + `.json` pair goes to
+4. Settings › **Developer › Calibration Frame → CAPTURE** (debug/profile builds). The `.raw10` + `.json` pair goes to
    `Download/Vesper Calibration/` (and stays in the app's private `files/calibration`).
 5. Repeat under a second light if you have one.
 
@@ -34,7 +34,7 @@ python3 calibrate.py profile day_fit.json tung_fit.json --device "Pixel 10" --ca
 ## 3. Ship it
 Rebuild the app. On start it loads `assets/color_profiles/*.json`, picks the file whose
 `device` equals Android `Build.MODEL` and whose `cameraId` equals the open camera, and
-enables it. PROCESSING → **Colour calibration** switches between FACTORY and CHART PROFILE.
+enables it. Settings › **Exposure · Color · Focus › Calibration Profile** switches between FACTORY and CHART PROFILE.
 
 ## Adding another phone
 1. The phone must expose RAW10 via Camera2 (the app says so on start).
