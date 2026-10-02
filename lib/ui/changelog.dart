@@ -7,6 +7,10 @@ class ChangelogEntry {
 }
 
 const changelog = <ChangelogEntry>[
+  ChangelogEntry('0.11.6', [
+    'Raw-copy experiment from 0.11.5 removed (it was slower)',
+    'GPU Benchmark (developer builds) breaks HQ and alignment down further and tries three speed-ups',
+  ]),
   ChangelogEntry('0.11.5', [
     'Noise-reduction change from 0.11.4 undone (it measured slower on the phone)',
     'GPU Benchmark (developer builds) measures the cost of each GPU pass and scrolls when long',

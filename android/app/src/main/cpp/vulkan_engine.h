@@ -96,13 +96,17 @@ public:
     bool noiseReductionThrottled() const { return nrThrottled_; }
     // HQ oversampled luma: unsupported on this GPU, or paused by the budget guard.
     bool oversamplingAvailable() const { return hqSupported_ && !hqThrottled_; }
-    // GPU benchmark A/B: undo recent optimisation steps (shader variants from
-    // code under #ifdef VESPER_PREV, or engine paths). Level 0 = current; each
-    // step is undone from its kPrevLevel* up (1 = the latest step only).
-    void setPreviousSteps(int level) { prevLevel_ = level; }
-    // GPU benchmark pass-cost probe: dispatch one pass a second time (same
-    // inputs, same output) so the frame-time increase is that pass's cost.
-    // -1 off, 0 unpack, 1 HQ, 2 alignment, 3 clean (NR), 4 render.
+    // GPU benchmark A/B: opt-in optimisation experiments (kExp* bits), off in
+    // normal use until the benchmark on the phone has confirmed them.
+    static constexpr int kExpHqLoad = 1;        // HQ: per-tile site scales instead of a division per pixel
+    static constexpr int kExpAlignDownsample = 2; // alignment: 1/4-res luma from 4 filtered reads, not 16 loads
+    static constexpr int kExpAlignArgmin = 4;   // alignment: best-candidate search split over threads
+    void setExperiments(int mask) { experiments_ = mask; }
+    // GPU benchmark pass-cost probe: dispatch one pass (or part of one) an
+    // extra time per frame, same output, so the frame-time increase is its
+    // cost. -1 off, 0 unpack, 1 HQ, 2 alignment, 3 clean (NR), 4 render,
+    // 5 alignment 1/4-res luma only, 6 alignment search only,
+    // 7 HQ raw tile load only, 8 HQ load + demosaic (no filter / output).
     void setRepeatPass(int pass) { repeatPass_ = pass; }
 
     // Blocks until the slot's GPU work is done, then returns its P010 bytes
@@ -126,7 +130,6 @@ private:
     };
     struct Slot {
         Buffer raw, shading, params, p010, vfReadback;
-        Buffer rawDev; // device-local copy of `raw`, read by unpack + HQ (see kPrevLevelRawCopy)
         VkCommandBuffer cmd = VK_NULL_HANDLE;
         VkFence fence = VK_NULL_HANDLE;
         VkSemaphore acquireSem = VK_NULL_HANDLE;
@@ -137,7 +140,6 @@ private:
         VkDescriptorSet alignSets[2] = {};
         VkDescriptorSet renderSets[2] = {};
         VkDescriptorSet greenSet = VK_NULL_HANDLE;
-        VkDescriptorSet unpackSetHost = VK_NULL_HANDLE, greenSetHost = VK_NULL_HANDLE; // read `raw` directly (A/B)
         bool vfReadbackPending = false;
         bool encoderHold = false; // guarded by encoderMutex_
         bool timed = false;       // timestamp queries were written for this slot's last frame
@@ -168,8 +170,6 @@ private:
     void flushSubmits(); // waits until every queued job has been submitted
 
     bool createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, bool hostCached, Buffer& out);
-    bool createDeviceBuffer(VkDeviceSize size, VkBufferUsageFlags usage, Buffer& out);
-    void writeRawDescriptors(Slot& s, VkDescriptorSet unpackSet, VkDescriptorSet greenSet, const Buffer& raw);
     void destroyBuffer(Buffer& b);
     bool createImage(uint32_t w, uint32_t h, VkFormat fmt, VkImageUsageFlags usage, Image& out);
     void destroyImage(Image& img);
@@ -203,8 +203,10 @@ private:
     VkPipeline alignPipe_ = VK_NULL_HANDLE;
     VkPipelineLayout unpackPipeLayout_ = VK_NULL_HANDLE, cleanPipeLayout_ = VK_NULL_HANDLE, renderPipeLayout_ = VK_NULL_HANDLE;
     VkPipeline unpackPipe_ = VK_NULL_HANDLE, cleanPipe_ = VK_NULL_HANDLE, renderPipe_ = VK_NULL_HANDLE;
-    std::atomic<int> prevLevel_{0}, repeatPass_{-1};
-    static constexpr int kPrevLevelRawCopy = 1; // v0.11.5: raw copied to device-local memory before unpack/HQ
+    std::atomic<int> experiments_{0}, repeatPass_{-1};
+    // Benchmark experiments / probes (VK_NULL_HANDLE where the variant doesn't apply: HQ ones need fp16 + R16F).
+    VkPipeline greenExpLoadPipe_ = VK_NULL_HANDLE, greenProbe1Pipe_ = VK_NULL_HANDLE, greenProbe2Pipe_ = VK_NULL_HANDLE;
+    VkPipeline alignExpDsPipe_ = VK_NULL_HANDLE, alignExpArgminPipe_ = VK_NULL_HANDLE, alignExpBothPipe_ = VK_NULL_HANDLE;
     VkSampler sampler_ = VK_NULL_HANDLE;
 
     Slot slots_[kRingSize];

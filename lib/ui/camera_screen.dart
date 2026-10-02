@@ -341,32 +341,44 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   // --- GPU benchmark (developer tool) --------------------------------------
   // Measures the GPU time of each optional pass on this phone: every feature
   // alone, then all together, with the budget guard off. Then, with
-  // everything on: each GPU pass run twice per frame (the increase is that
-  // pass's cost; per-pass GPU timestamps are useless on this GPU), and an A/B
-  // against the GPU path before the latest optimisation step(s). Everything
-  // on is measured again at the end and the two runs averaged, so a slow
-  // drift (the phone warming up) cancels out. Settings are restored
+  // everything on: each GPU pass (and parts of HQ and alignment) run an extra
+  // time per frame — the increase is its cost, since per-pass GPU timestamps
+  // are useless on this GPU — and each optimisation experiment on its own.
+  // Everything on is measured again at the end and the two runs averaged, so
+  // a slow drift (the phone warming up) cancels out. Settings are restored
   // afterwards. Results are shown and printed to the app log (VesperBench).
+  // Run at 60 fps for costs: the GPU is then always at full clock.
   static const _benchPasses = ['unpack', 'HQ', 'align', 'NR', 'render'];
-  // A/B baselines: (label, VulkanEngine::setPreviousSteps level).
-  static const _benchPrev = [('All on, no raw copy', 1)];
+  // Partial passes (VulkanEngine::setRepeatPass 5..8).
+  static const _benchParts = [
+    ('All on, align luma x2', 5),
+    ('All on, align search x2', 6),
+    ('All on, + HQ load', 7),
+    ('All on, + HQ load+demos', 8),
+  ];
+  // Opt-in experiments: (label, VulkanEngine::kExp* bit).
+  static const _benchExperiments = [
+    ('Exp: HQ site scales', 1),
+    ('Exp: align 4 reads', 2),
+    ('Exp: align split search', 4),
+  ];
 
   Future<void> _runGpuBenchmark() async {
     if (_benchmarking || !_streaming || _recording) return;
     setState(() => _benchmarking = true);
     void apply({bool hq = false, int sharp = 0, double tnr = 0, double cnr = 0, bool align = false,
-        int prev = 0, int repeat = -1}) {
+        int exps = 0, int repeat = -1}) {
       _engine.setOversampling(hq);
       _engine.setSharpening(sharp);
       _engine.setTemporalNr(tnr);
       _engine.setChromaNr(cnr);
       _engine.setNrAlignment(align);
-      _engine.setPreviousSteps(prev);
+      _engine.setExperiments(exps);
       _engine.setRepeatPass(repeat);
     }
 
-    void allOn({int prev = 0, int repeat = -1}) =>
-        apply(hq: true, sharp: 1, tnr: 0.7, cnr: 0.5, align: true, prev: prev, repeat: repeat);
+    void allOn({int exps = 0, int repeat = -1}) =>
+        apply(hq: true, sharp: 1, tnr: 0.7, cnr: 0.5, align: true, exps: exps, repeat: repeat);
 
     _engine.setBudgetGuard(false);
     final configs = <(String, void Function())>[
@@ -378,7 +390,8 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       ('Temporal NR + align', () => apply(tnr: 0.7, align: true)),
       ('Everything on', () => allOn()),
       for (var p = 0; p < _benchPasses.length; p++) ('All on, ${_benchPasses[p]} x2', () => allOn(repeat: p)),
-      for (final (label, level) in _benchPrev) (label, () => allOn(prev: level)),
+      for (final (label, probe) in _benchParts) (label, () => allOn(repeat: probe)),
+      for (final (label, bit) in _benchExperiments) (label, () => allOn(exps: bit)),
       ('Everything on (again)', () => allOn()),
     ];
     final results = <String>[];
@@ -400,7 +413,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       final drops = (_engine.status()?.cameraDrops ?? 0) - drops0;
       base ??= ms;
       final line =
-          '${name.padRight(22)} ${ms.toStringAsFixed(1).padLeft(5)} ms'
+          '${name.padRight(24)} ${ms.toStringAsFixed(1).padLeft(5)} ms'
           '${i > 0 ? '  (+${(ms - base).toStringAsFixed(1)})' : ''}${drops > 0 ? '  $drops drops' : ''}';
       results.add(line);
       _engine.log(line, tag: 'VesperBench');
@@ -408,17 +421,21 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     final newA = measured['Everything on'], newB = measured['Everything on (again)'];
     if (newA != null && newB != null) {
       final allOnMs = (newA + newB) / 2;
-      final costs = [
-        for (final p in _benchPasses)
-          if (measured['All on, $p x2'] != null) '$p ${(measured['All on, $p x2']! - allOnMs).toStringAsFixed(1)}',
-      ];
+      String extra(String label) => measured[label] == null ? '?' : (measured[label]! - allOnMs).toStringAsFixed(1);
+      String diff(String a, String b) => measured[a] == null || measured[b] == null
+          ? '?'
+          : (measured[a]! - measured[b]!).toStringAsFixed(1);
+      final hqLoad = _benchParts[2].$1, hqDemosaic = _benchParts[3].$1;
       final summary = [
-        'Pass costs (ms): ${costs.join(', ')}',
-        for (final (label, _) in _benchPrev)
+        'Pass costs (ms): ${[for (final p in _benchPasses) '$p ${extra('All on, $p x2')}'].join(', ')}',
+        'Align (ms): 1/4-res luma ${extra(_benchParts[0].$1)}, search ${extra(_benchParts[1].$1)}',
+        'HQ (ms): load ${extra(hqLoad)}, demosaic ${diff(hqDemosaic, hqLoad)}, '
+            'filter+output ${measured['All on, HQ x2'] == null || measured[hqDemosaic] == null ? '?' : (measured['All on, HQ x2']! - measured[hqDemosaic]!).toStringAsFixed(1)}',
+        for (final (label, _) in _benchExperiments)
           if (measured[label] != null)
             () {
-              final saved = measured[label]! - allOnMs;
-              return 'A/B vs ${label.substring(8)}: new ${saved >= 0 ? 'saves' : 'costs'} ${saved.abs().toStringAsFixed(1)} ms';
+              final saved = allOnMs - measured[label]!;
+              return '${label.substring(5)}: ${saved >= 0 ? 'saves' : 'costs'} ${saved.abs().toStringAsFixed(1)} ms';
             }(),
       ];
       for (final line in summary) {
@@ -426,7 +443,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
         _engine.log(line, tag: 'VesperBench');
       }
     }
-    _engine.setPreviousSteps(0);
+    _engine.setExperiments(0);
     _engine.setRepeatPass(-1);
     // Restore the user's settings.
     _engine.setOversampling(_oversampling);

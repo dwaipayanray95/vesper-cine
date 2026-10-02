@@ -86,6 +86,29 @@ vec4 shadingAt(vec2 rawPos) {
     return mix(mix(s[0], s[1], f.x), mix(s[2], s[3], f.x), f.y);
 }
 
+#ifdef HQ_EXP_LOAD
+// Black level and scale (WB x shading / range) of the photosite at raw
+// parity (px, py): only four exist per tile, so they're computed up front
+// instead of a CFA lookup and a division per pixel.
+void siteScale(int px, int py, vec4 sh, out float bl, out float scale) {
+    int site = cfaSite(px, py);
+    bl = P.blackLevel[site];
+    float gain = site == 0 ? sh.x * P.wbGains.r : (site == 3 ? sh.w * P.wbGains.b : (py == 0 ? sh.y : sh.z) * P.wbGains.g);
+    scale = gain / (P.wbGains.w - bl);
+}
+#endif
+
+#ifdef HQ_PROBE
+// GPU benchmark probe (HQ_PROBE 1: stop after loading the raw tile, 2: after
+// the demosaic): a partial run whose cost shows where the pass spends its
+// time. Its output is overwritten by the real HQ pass that follows.
+void probeStore(ivec2 tile, int lid) {
+    ivec2 q = tile * Q + ivec2(gl_LocalInvocationID.xy);
+    if (q.x < P.quadInfo.x && q.y < P.quadInfo.y)
+        imageStore(detailImage, q, vec4(float(sRaw[lid]) + float(sGreen[lid]), 0.0, 0.0, 0.0));
+}
+#endif
+
 HF R(int x, int y) { return sRaw[(y + RBY) * RNX + (x + RBX)]; } // tile-relative raw px
 HF G(int x, int y) { return sGreen[(y + GB) * GN + (x + GB)]; } // tile-relative green
 
@@ -97,6 +120,13 @@ void main() {
     barrier();
     const vec4 sh = sShade;
     const int groupsPerRow = (P.rawInfo.x + 3) / 4;
+#ifdef HQ_EXP_LOAD
+    float bl00, bl01, bl10, bl11, sc00, sc01, sc10, sc11; // [row parity][column parity]
+    siteScale(0, 0, sh, bl00, sc00);
+    siteScale(1, 0, sh, bl01, sc01);
+    siteScale(0, 1, sh, bl10, sc10);
+    siteScale(1, 1, sh, bl11, sc11);
+#endif
 
     // 1. Raw -> shared, one RAW10 group (4 px, 5 bytes = 2 word reads) per step.
     //    Clamping whole groups / rows at the frame edge keeps the CFA parity
@@ -116,15 +146,24 @@ void main() {
         // copies keep their nominal CFA site, as step 2 sees them).
         const int ry = row - RBY;
         const bool greenRow = ry >= -GB && ry < T + GB;
+#ifdef HQ_EXP_LOAD
+        const bool oddRow = (ay & 1) != 0; // groups start on even columns: column parity = b & 1
+        const float blE = oddRow ? bl10 : bl00, blO = oddRow ? bl11 : bl01;
+        const float scE = oddRow ? sc10 : sc00, scO = oddRow ? sc11 : sc01;
+#endif
         for (int b = 0; b < 4; ++b) {
-            int x = grp * 4 + b;
             float dn = float((((lo >> (8u * uint(b))) & 0xFFu) << 2) | ((b4 >> (2 * b)) & 3u));
+#ifdef HQ_EXP_LOAD
+            HF val = HF((dn - ((b & 1) == 0 ? blE : blO)) * ((b & 1) == 0 ? scE : scO));
+#else
+            int x = grp * 4 + b;
             int site = cfaSite(x & 1, ay & 1);
             float bl = P.blackLevel[site];
             float v = (dn - bl) / (P.wbGains.w - bl);
             float gain = site == 0 ? sh.x * P.wbGains.r
                        : (site == 3 ? sh.w * P.wbGains.b : ((ay & 1) == 0 ? sh.y : sh.z) * P.wbGains.g);
             HF val = HF(v * gain);
+#endif
             sRaw[row * RNX + gx * 4 + b] = val;
             // Green photosites are their own full-res green: store them now, so
             // step 2 only has to interpolate the red/blue sites.
@@ -135,6 +174,10 @@ void main() {
         }
     }
     barrier();
+#if defined(HQ_PROBE) && HQ_PROBE == 1
+    probeStore(tile, lid);
+    return;
+#endif
 
     // 2. Full-resolution green (Hamilton-Adams) over the filter support.
     // Only the red/blue half of the sites: every thread runs the same
@@ -158,6 +201,10 @@ void main() {
         sGreen[(y + GB) * GN + (x + GB)] = g;
     }
     barrier();
+#if defined(HQ_PROBE) && HQ_PROBE == 2
+    probeStore(tile, lid);
+    return;
+#endif
 
     // 3a. Horizontal filter: quad column qx covers px 2qx, 2qx+1; taps at px 2qx-3 .. 2qx+4.
     for (int i = lid; i < GN * Q; i += NT) {

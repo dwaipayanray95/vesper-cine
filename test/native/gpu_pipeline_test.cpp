@@ -555,16 +555,17 @@ int main() {
         std::printf("  frame time (lavapipe): HQ off %.1f ms, HQ on %.1f ms (+%.0f%%)\n", off, on, 100 * (on / off - 1));
     }
 
-    // 10. Benchmark tools: the A/B baseline (previous GPU path) and the
-    //     pass-cost probe (a pass dispatched twice) must run; the printed
-    //     differences show what they change in the recording (0 = identical).
+    // 10. Benchmark tools: the opt-in experiments and the pass-cost probes (a
+    //     pass, or part of one, dispatched an extra time) must run; probes
+    //     must not change the output, and the printed differences show what
+    //     each experiment changes in the recording (0 = identical).
     {
         FrameParams ap = baseParams(0);
         ap.flags[3] = 16 | 1;
         ap.cleanFlags[0] = 1; ap.cleanFlags[1] = 1; ap.cleanFlags[3] = 1;
         ap.noise[0] = 0.7f; ap.noise[1] = 0.5f; ap.noise[2] = 2e-4f; ap.noise[3] = 2e-6f;
-        auto runSeq = [&](int prev, int repeat, std::vector<uint16_t>& out) {
-            gpu.setPreviousSteps(prev);
+        auto runSeq = [&](int exps, int repeat, std::vector<uint16_t>& out) {
+            gpu.setExperiments(exps);
             gpu.setRepeatPass(repeat);
             P010 fr{};
             bool ok = runFrame(gpu, raw, baseParams(0), nullptr, fr); // temporal NR off: every run starts without history
@@ -579,17 +580,21 @@ int main() {
         };
         std::vector<uint16_t> cur, other;
         bool ok = runSeq(0, -1, cur);
-        ok = runSeq(1, -1, other) && ok;
-        std::printf("  A/B previous GPU path: max difference %d codes (everything on)\n", maxDiff(cur, other));
+        std::printf("  experiments, max difference (codes):");
+        for (int bit : {VulkanEngine::kExpHqLoad, VulkanEngine::kExpAlignDownsample, VulkanEngine::kExpAlignArgmin}) {
+            ok = runSeq(bit, -1, other) && ok;
+            std::printf(" exp %d: %d", bit, maxDiff(cur, other));
+        }
+        std::printf("\n");
         int repeatDiff = 0;
-        for (int pass = 0; pass < 5; ++pass) {
+        for (int pass = 0; pass <= 8; ++pass) {
             ok = runSeq(0, pass, other) && ok;
             repeatDiff = std::max(repeatDiff, maxDiff(cur, other));
         }
-        gpu.setPreviousSteps(0);
+        gpu.setExperiments(0);
         gpu.setRepeatPass(-1);
-        check(ok, "benchmark A/B and pass-cost probe frames run", ok, 1);
-        check(repeatDiff == 0, "pass-cost probe (a pass run twice) leaves the output unchanged", repeatDiff, 0);
+        check(ok, "benchmark experiments and pass-cost probe frames run", ok, 1);
+        check(repeatDiff == 0, "pass-cost probes (a pass run twice) leave the output unchanged", repeatDiff, 0);
     }
 
     // 7. Ring: many frames in a row must all complete (fence/slot reuse).

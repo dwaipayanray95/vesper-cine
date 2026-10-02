@@ -1259,14 +1259,14 @@ EXPORT void vesper_set_budget_guard(int32_t enable) {
     if (gGpu) gGpu->setBudgetGuard(enable != 0);
 }
 
-// GPU benchmark A/B (developer tool): 0 = current GPU path, 1 = without the
-// latest optimisation step, 2 = without the last two (see VulkanEngine).
-EXPORT void vesper_set_previous_steps(int32_t level) {
-    if (gGpu) gGpu->setPreviousSteps(level);
+// GPU benchmark A/B (developer tool): opt-in optimisation experiments,
+// a bit mask of VulkanEngine::kExp* (0 = the proven GPU path).
+EXPORT void vesper_set_experiments(int32_t mask) {
+    if (gGpu) gGpu->setExperiments(mask);
 }
 
-// GPU benchmark pass-cost probe (developer tool): run one pass twice per
-// frame (-1 off, 0 unpack, 1 HQ, 2 alignment, 3 NR, 4 render).
+// GPU benchmark pass-cost probe (developer tool): run one pass (or part of
+// one) an extra time per frame; see VulkanEngine::setRepeatPass.
 EXPORT void vesper_set_repeat_pass(int32_t pass) {
     if (gGpu) gGpu->setRepeatPass(pass);
 }
