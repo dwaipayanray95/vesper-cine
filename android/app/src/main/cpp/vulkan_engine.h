@@ -84,6 +84,13 @@ public:
     void resetPacing() { pacingReset_ = true; }
     // Viewfinder magnifier: show 1/scale of the frame around (cx, cy) (normalised).
     void setViewfinderZoom(float cx, float cy, float scale) { zoomCx_ = cx; zoomCy_ = cy; zoomScale_ = scale; }
+    // Recording power saver: skip the viewfinder output and its present (the
+    // recording is computed exactly as before). Resuming starts a fresh
+    // pacing measurement so the pause doesn't count as a hitch.
+    void setViewfinderPaused(bool paused) {
+        if (!paused && vfPaused_) pacingReset_ = true;
+        vfPaused_ = paused;
+    }
     // false: never pause alignment / HQ / NR automatically (frames may drop instead).
     void setBudgetGuard(bool enabled);
     bool oversamplingSupported() const { return hqSupported_; }
@@ -291,6 +298,7 @@ private:
     std::atomic<float> zoomCx_{0.5f}, zoomCy_{0.5f}, zoomScale_{1.0f};
     std::atomic<uint64_t> vfHitches_{0};
     std::atomic<bool> pacingReset_{false};
+    std::atomic<bool> vfPaused_{false};
     std::atomic<double> vfMaxGapMs_{0.0};
     std::chrono::steady_clock::time_point lastPresent_{}; // submit thread only
     double maxWaitMs_ = 0;

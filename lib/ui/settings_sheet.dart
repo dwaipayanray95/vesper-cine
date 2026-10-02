@@ -15,6 +15,8 @@ class SettingsScreen extends StatefulWidget {
   final int cropMode; // 0 = 16:9, 1 = 4:3
   final ValueChanged<int> onCropModeChanged;
   final bool isRecording;
+  final int powerSaver; // while recording: 0 off, 1 dim screen, 2 dim + viewfinder off
+  final ValueChanged<int> onPowerSaverChanged;
   final bool lensCorrection;
   final ValueChanged<bool> onLensCorrectionChanged;
   final bool hotPixelFix;
@@ -53,6 +55,8 @@ class SettingsScreen extends StatefulWidget {
     required this.cropMode,
     required this.onCropModeChanged,
     required this.isRecording,
+    this.powerSaver = 0,
+    required this.onPowerSaverChanged,
     required this.lensCorrection,
     required this.onLensCorrectionChanged,
     required this.hotPixelFix,
@@ -97,6 +101,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   late int codec = widget.codec;
   late int cropMode = widget.cropMode;
+  late int powerSaver = widget.powerSaver;
   late bool lensCorrection = widget.lensCorrection;
   late bool hotPixelFix = widget.hotPixelFix;
   late double temporalNr = widget.temporalNr;
@@ -317,6 +322,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
               },
       ),
     ),
+    _settingRow(
+      'Power Saver While Recording',
+      const [
+        'Screen and viewfinder stay as they are',
+        'After 10 s the screen dims to minimum; tap to brighten it for 10 s. Less heat on long takes',
+        'After 10 s the screen dims and the viewfinder stops updating (less heat and GPU work); tap to view for 10 s',
+      ][powerSaver.clamp(0, 2)],
+      Segmented(
+        options: const ['OFF', 'DIM SCREEN', 'VIEWFINDER OFF'],
+        selected: powerSaver.clamp(0, 2),
+        onSelected: (i) {
+          setState(() => powerSaver = i);
+          widget.onPowerSaverChanged(i);
+        },
+      ),
+    ),
+    _note('The recording itself is never affected: only what the screen shows.'),
   ];
 
   List<Widget> _audio() => [

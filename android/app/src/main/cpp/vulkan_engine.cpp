@@ -1062,7 +1062,8 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
     FrameParams params = in.params;
     params.flags[0] = encoderSlot ? 1 : 0;
     params.flags[1] = swapRB_ && swapchain_ ? 1 : 0;
-    params.flags[2] = window_ ? 1 : 0;
+    const bool vfPaused = vfPaused_;
+    params.flags[2] = window_ && !vfPaused ? 1 : 0;
     if (!g.shadingFloats) { params.quadInfo[2] = 0; params.quadInfo[3] = 0; }
     if (nrThrottled_) {
         params.cleanFlags[1] = 0;
@@ -1224,7 +1225,7 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
                       (static_cast<uint32_t>(g.outH / 2) + renderWgY - 1) / renderWgY, 1);
     });
 
-    if (window_) {
+    if (window_ && !vfPaused) {
         VkImageMemoryBarrier vfReady = imageBarrier(vfImage_.image, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
                                                     VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
         vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
@@ -1256,7 +1257,7 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
         job.cb = cb;
         job.fence = s.fence;
         job.slot = idx;
-        job.present = swapchain_ && window_ && !swapchainStale_;
+        job.present = swapchain_ && window_ && !swapchainStale_ && !vfPaused;
         std::lock_guard<std::mutex> lk(submitMutex_);
         submitJobs_.push_back(job);
     }

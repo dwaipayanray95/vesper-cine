@@ -169,6 +169,12 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
 
   bool _settingsOpen = false; // settings page covers the viewfinder: processing paused
   bool _benchmarking = false;
+  // Recording power saver (Settings › Recording): 0 off, 1 dim screen, 2 dim +
+  // viewfinder off. Kicks in 10 s into a take (or after a wake-up tap).
+  int _powerSaver = 0;
+  bool _saverActive = false;
+  Timer? _saverTimer;
+  static const _saverDelay = Duration(seconds: 10);
   int _streamGeneration = 0; // +1 per (re)open: a benchmark spanning a camera restart is invalid
   String _benchStep = '';
   bool _permissionDenied = false; // camera permission refused: status text offers a retry
@@ -228,6 +234,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _poll?.cancel();
+    _saverTimer?.cancel();
     _pulse.dispose();
     if (_recording) {
       _engine.stopRecording();
@@ -603,6 +610,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     'oversampling': _oversampling,
     'gpuGuard': _gpuGuard,
     'codec': _codec,
+    'powerSaver': _powerSaver,
     'tapLocks': _tapLocks,
     'tapSetsExposure': _tapSetsExposure,
     'useProfile': _useProfile,
@@ -646,6 +654,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       _oversampling = get('oversampling', _oversampling);
       _gpuGuard = kDevTools ? get('gpuGuard', _gpuGuard) : true; // release: the guard is always on
       _codec = get('codec', _codec).clamp(0, 1);
+      _powerSaver = get('powerSaver', _powerSaver).clamp(0, 2);
       _tapLocks = get('tapLocks', _tapLocks);
       _tapSetsExposure = get('tapSetsExposure', _tapSetsExposure);
       _useProfile = get('useProfile', _useProfile);
@@ -779,10 +788,58 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     setState(() => _recordingFile = file);
     _engine.lockRotation(true); // a clip never flips orientation mid-take
     _overloadWarned = false;
+    _armSaver();
+  }
+
+  // --- Recording power saver ---------------------------------------------
+  // Only what the screen shows changes; the recording is computed as always.
+  void _armSaver() {
+    _saverTimer?.cancel();
+    if (_powerSaver == 0 || !_recording) return;
+    _saverTimer = Timer(_saverDelay, () {
+      if (!mounted || !_recording || _powerSaver == 0) return;
+      setState(() => _saverActive = true);
+      _engine.setScreenBrightness(0.0);
+      if (_powerSaver == 2) _engine.setViewfinderPaused(true);
+    });
+  }
+
+  // Tap while the saver is active: back to normal for 10 s (the tap itself
+  // does nothing else, so it can't hit a control by accident).
+  void _wakeSaver({bool rearm = true}) {
+    _saverTimer?.cancel();
+    if (_saverActive) {
+      _engine.setViewfinderPaused(false);
+      _engine.setScreenBrightness(null);
+      if (mounted) setState(() => _saverActive = false);
+    }
+    if (rearm) _armSaver();
+  }
+
+  Widget _saverOverlay() {
+    final viewfinderOff = _powerSaver == 2;
+    return Positioned.fill(
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: _wakeSaver,
+        child: Container(
+          color: viewfinderOff ? Colors.black : Colors.transparent,
+          alignment: Alignment.center,
+          child: viewfinderOff
+              ? Text(
+                  '●  REC  ${_timecode(_status?.durationMs ?? 0)}\nViewfinder paused to save power · tap to view',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: Colors.redAccent, fontSize: 14, height: 1.6, fontWeight: FontWeight.bold),
+                )
+              : null,
+        ),
+      ),
+    );
   }
 
   Future<void> _finishRecording(String reason) async {
     _stopping = true;
+    _wakeSaver(rearm: false);
     final file = _recordingFile;
     if (file != null) await _engine.finalizeRecording(file);
     if (!mounted) return;
@@ -882,6 +939,13 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
           cropMode: _cropMode,
           onCropModeChanged: (m) async => await _toggleCrop(),
           isRecording: _recording,
+          powerSaver: _powerSaver,
+          onPowerSaverChanged: (v) {
+            setState(() => _powerSaver = v);
+            if (_recording) {
+              _wakeSaver(); // apply the new choice from now on
+            }
+          },
           lensCorrection: _lensCorrection,
           onLensCorrectionChanged: (val) {
             setState(() => _lensCorrection = val);
@@ -1081,7 +1145,12 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => Stack(
+    fit: StackFit.expand,
+    children: [_buildCamera(context), if (_saverActive) _saverOverlay()],
+  );
+
+  Widget _buildCamera(BuildContext context) {
     final s = _status;
     final hot = (s?.thermal ?? 0) >= 2;
     final speedList = _buildSpeedList();

@@ -230,6 +230,7 @@ class VesperNative {
   late final void Function(int, int) _setNativeIsos;
   late final void Function(int) _setBudgetGuard;
   late final void Function(int) _setExperiments;
+  late final void Function(int) _setViewfinderPaused;
   late final void Function(int) _setAlignInterval;
   late final void Function(int) _setRepeatPass;
   late final int Function(Pointer<Utf8>, Pointer<Utf8>) _isoSweepStart;
@@ -320,6 +321,8 @@ class VesperNative {
       _setNativeIsos = _lib.lookupFunction<Void Function(Int32, Int32), void Function(int, int)>('vesper_set_native_isos');
       _setBudgetGuard = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_budget_guard');
       _setExperiments = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_experiments');
+      _setViewfinderPaused =
+          _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_viewfinder_paused');
       _setAlignInterval = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_align_interval');
       _setRepeatPass = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_repeat_pass');
       _setProcessingPaused = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_processing_paused');
@@ -575,6 +578,15 @@ class VesperNative {
   }
 
   /// Locks the current landscape orientation (while recording) or frees both.
+  /// Recording power saver: stop updating the viewfinder (the recording is unaffected).
+  void setViewfinderPaused(bool paused) => _loaded ? _setViewfinderPaused(paused ? 1 : 0) : null;
+
+  /// This window's screen brightness, 0..1; null = back to the system setting.
+  Future<void> setScreenBrightness(double? value) async {
+    if (!Platform.isAndroid) return;
+    await _channel.invokeMethod('setScreenBrightness', {'value': value ?? -1.0});
+  }
+
   Future<void> lockRotation(bool locked) async {
     if (!Platform.isAndroid) return;
     await _channel.invokeMethod('lockRotation', {'locked': locked});

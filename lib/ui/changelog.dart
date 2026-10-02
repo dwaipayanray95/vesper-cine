@@ -7,6 +7,10 @@ class ChangelogEntry {
 }
 
 const changelog = <ChangelogEntry>[
+  ChangelogEntry('0.13.0', [
+    'The screen no longer dims or locks while Vesper is open',
+    'Power Saver While Recording (Settings › Recording): dim the screen, or also pause the viewfinder, 10 s into a take; tap to wake. The recording is not affected',
+  ]),
   ChangelogEntry('0.12.3', ['GPU Benchmark (developer builds) stops with a message if the camera restarts or the GPU guard steps in, instead of showing wrong numbers']),
   ChangelogEntry('0.12.2', ['GPU Benchmark (developer builds) tries exact vignetting in HQ, bigger HQ tiles and other GPU work-group sizes']),
   ChangelogEntry('0.12.1', ['No dropped frame when recording starts (the viewfinder no longer changes size)']),

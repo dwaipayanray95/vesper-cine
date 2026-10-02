@@ -1313,6 +1313,11 @@ EXPORT void vesper_log_line(const char* tag, const char* message) {
     vesperLog(ANDROID_LOG_INFO, tag ? tag : "Vesper_UI", "%s", message ? message : "");
 }
 
+// Recording power saver: 1 = stop updating the viewfinder (recording unaffected).
+EXPORT void vesper_set_viewfinder_paused(int32_t paused) {
+    if (gGpu) gGpu->setViewfinderPaused(paused != 0);
+}
+
 EXPORT void vesper_set_viewfinder_zoom(float cx, float cy, float scale) {
     if (gGpu) gGpu->setViewfinderZoom(cx, cy, scale);
 }

@@ -15,6 +15,7 @@ import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.widget.FrameLayout
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.android.RenderMode
@@ -57,6 +58,9 @@ class MainActivity : FlutterActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.setBackgroundDrawable(ColorDrawable(Color.BLACK))
+        // A camera never dims or locks while it's on screen (a lock mid-take or
+        // mid-benchmark closes the camera). Only applies while the app is visible.
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         val view = SurfaceView(this)
         view.holder.addCallback(vfCallback)
         findViewById<ViewGroup>(android.R.id.content).addView(view, 0, FrameLayout.LayoutParams(1, 1))
@@ -192,6 +196,14 @@ class MainActivity : FlutterActivity() {
                         permissionResult = result
                         requestPermissions(missing.toTypedArray(), 1001)
                     }
+                }
+                "setScreenBrightness" -> {
+                    // 0..1 for this window only (recording power saver); < 0 = back to the system setting.
+                    val v = call.argument<Double>("value") ?: -1.0
+                    window.attributes = window.attributes.apply {
+                        screenBrightness = if (v < 0) WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE else v.toFloat()
+                    }
+                    result.success(true)
                 }
                 "lockRotation" -> {
                     // Freeze the current landscape while recording; free (both landscapes) otherwise.

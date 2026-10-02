@@ -19,6 +19,7 @@ A cinema camera app for Google Pixel phones (developed on a **Pixel 10**). It re
 | Recording: HEVC/AV1 Main10 1080p (P010 input) + AAC, MP4 in `Movies/Vesper Cine`; thermal / storage stops | Working |
 | GPU performance guard: alignment at reduced rate → alignment off → HQ → NR when frames would drop, restores them when they fit; always on while recording | Working |
 | Native viewfinder (Android `SurfaceView` under a transparent Flutter UI), submit/present on its own thread | Working |
+| Screen kept on while the app is open; recording power saver (dim screen / pause viewfinder, tap to wake) | Working |
 | PDAF/laser tap AF (track or lock), face detection; clean auto-exposure (native ISO first, shutter to 180°, then gain); native ISO analysis | Working |
 | Side-rail Settings with Info tab (version, changelog, how-to, FAQ); in-app log (developer builds) | Working |
 | **4K (UHD) output** | Engine has a `resolution` setting that upsamples the 2000-px quad image; not exposed in the UI. A real UHD path is the next big feature (see Roadmap). |
