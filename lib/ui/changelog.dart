@@ -7,6 +7,7 @@ class ChangelogEntry {
 }
 
 const changelog = <ChangelogEntry>[
+  ChangelogEntry('0.12.1', ['No dropped frame when recording starts (the viewfinder no longer changes size)']),
   ChangelogEntry('0.12.0', [
     'At 30 fps temporal NR keeps its motion alignment: when the GPU is tight it runs every 4th frame (ALIGN REDUCED) instead of switching off',
     'Faster motion alignment (about 1–1.5 ms less GPU time per frame)',

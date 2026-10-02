@@ -1082,9 +1082,12 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                 aspectRatio: _cropMode == 0 ? 16 / 9 : 4 / 3,
                 child: Container(
                   decoration: BoxDecoration(
+                    // Same width recording or not: a width change resizes the
+                    // viewfinder box, and resizing the native swapchain stalls
+                    // the camera for ~80 ms (a dropped frame as recording starts).
                     border: Border.all(
                       color: _recording ? Colors.redAccent : Colors.white12,
-                      width: _recording ? 2.5 : 1.0,
+                      width: 2.5,
                     ),
                   ),
                   child: _textureId != null
