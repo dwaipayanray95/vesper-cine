@@ -1,5 +1,13 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
+#if defined(CLEAN_FP16) && !defined(VESPER_PREV)
+// The staged tile in 16-bit: the quad image is RGBA16F, so its values are
+// stored exactly (half the shared memory); all arithmetic stays 32-bit.
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#define TV f16vec3
+#else
+#define TV vec3
+#endif
 // Pass 1b: quad image cleanup, all optional (see FrameParams.cleanFlags/noise).
 //
 //  1. Hot/dead pixel repair: a channel that sits outside the range of its 8
@@ -43,13 +51,29 @@ float luma(vec3 c) { return dot(c, vec3(0.25, 0.5, 0.25)); }
 // issuing ~34 image loads per texel.
 const int kApron = 2;
 const int kTileW = 16 + 2 * kApron, kTileH = 8 + 2 * kApron;
+#ifdef VESPER_PREV
 shared vec3 sTile[kTileH][kTileW];
 vec3 nb(ivec2 local, int dx, int dy) { return sTile[local.y + kApron + dy][local.x + kApron + dx]; }
+#else
+shared TV sTile[kTileH][kTileW];
+shared float sLuma[kTileH][kTileW]; // luma of each staged texel, computed once instead of by up to 25 threads
+vec3 nb(ivec2 local, int dx, int dy) { return vec3(sTile[local.y + kApron + dy][local.x + kApron + dx]); }
+float nbLuma(ivec2 local, int dx, int dy) { return sLuma[local.y + kApron + dy][local.x + kApron + dx]; }
+#endif
 // The G of a quad is already the mean of two photosites (half the variance).
 float lumaSigma(vec3 c) {
     vec3 v = channelVar(c);
     return sqrt(0.0625 * v.r + 0.125 * v.g + 0.0625 * v.b + 1e-12);
 }
+
+#ifndef VESPER_PREV
+// Texel (hq + (ox, oy)) of the 3x3 history window, picked with selects
+// (constant array indices only, so the window stays in registers).
+vec3 pick3(int o, vec3 a, vec3 b, vec3 c) { return o < 0 ? a : (o == 0 ? b : c); }
+vec3 histAt(vec3 hw[9], int ox, int oy) {
+    return pick3(oy, pick3(ox, hw[0], hw[1], hw[2]), pick3(ox, hw[3], hw[4], hw[5]), pick3(ox, hw[6], hw[7], hw[8]));
+}
+#endif
 
 void main() {
     ivec2 q = ivec2(gl_GlobalInvocationID.xy);
@@ -58,7 +82,13 @@ void main() {
     ivec2 origin = ivec2(gl_WorkGroupID.xy) * ivec2(16, 8) - kApron;
     for (uint i = gl_LocalInvocationIndex; i < uint(kTileW * kTileH); i += 128u) {
         ivec2 t = ivec2(int(i) % kTileW, int(i) / kTileW);
+#ifdef VESPER_PREV
         sTile[t.y][t.x] = imageLoad(quadIn, clamp(origin + t, ivec2(0), size - 1)).rgb;
+#else
+        vec3 v = imageLoad(quadIn, clamp(origin + t, ivec2(0), size - 1)).rgb;
+        sTile[t.y][t.x] = TV(v);
+        sLuma[t.y][t.x] = luma(v);
+#endif
     }
     barrier();
     if (q.x >= size.x || q.y >= size.y) return;
@@ -104,7 +134,11 @@ void main() {
         for (int dy = -2; dy <= 2; ++dy)
             for (int dx = -2; dx <= 2; ++dx) {
                 vec3 n = nb(local, dx, dy);
+#ifdef VESPER_PREV
                 float yn = luma(n);
+#else
+                float yn = nbLuma(local, dx, dy);
+#endif
                 // (1 - x/4)^4 ~ exp(-x) for the Gaussian range weight, without exp()
                 // (25 per texel), and exactly 0 beyond ~2.8 sigma.
                 float t = max(1.0 - (yn - y0) * (yn - y0) / (8.0 * s * s), 0.0);
@@ -120,6 +154,7 @@ void main() {
     if (P.cleanFlags.y != 0 && P.cleanFlags.z != 0) {
         vec3 h;
         vec2 hpos = vec2(q);
+#ifdef VESPER_PREV
         if (P.cleanFlags.w != 0) {
             ivec2 tiles = (size + 31) / 32;
             vec2 tf = clamp((vec2(q) + 0.5) / 32.0 - 0.5, vec2(0.0), vec2(tiles - 1));
@@ -151,6 +186,45 @@ void main() {
                 curMean += nb(local, dx, dy);
                 histMean += imageLoad(history, hq + ivec2(dx, dy)).rgb;
             }
+#else
+        // The 3x3 history window around the (warped) position is loaded once:
+        // the bilinear fetch below uses 2x2 of its texels (always inside it,
+        // also at the frame edges), so 9 history loads per texel instead of 13.
+        ivec2 h0 = q, h1 = q;
+        vec2 fh = vec2(0.0);
+        if (P.cleanFlags.w != 0) {
+            ivec2 tiles = (size + 31) / 32;
+            vec2 tf = clamp((vec2(q) + 0.5) / 32.0 - 0.5, vec2(0.0), vec2(tiles - 1));
+            ivec2 t0 = ivec2(floor(tf));
+            ivec2 t1 = min(t0 + 1, tiles - 1);
+            vec2 ft = tf - vec2(t0);
+            vec2 mv = mix(mix(imageLoad(motion, t0).xy, imageLoad(motion, ivec2(t1.x, t0.y)).xy, ft.x),
+                          mix(imageLoad(motion, ivec2(t0.x, t1.y)).xy, imageLoad(motion, t1).xy, ft.x), ft.y);
+            vec2 hp = clamp(vec2(q) + mv, vec2(0.0), vec2(size - 1));
+            hpos = hp;
+            h0 = ivec2(floor(hp));
+            h1 = min(h0 + 1, size - 1);
+            fh = hp - vec2(h0);
+        }
+        ivec2 hq = clamp(ivec2(floor(hpos + 0.5)), ivec2(1), size - 2);
+        vec3 hw[9];
+        for (int dy = -1; dy <= 1; ++dy)
+            for (int dx = -1; dx <= 1; ++dx) hw[(dy + 1) * 3 + dx + 1] = imageLoad(history, hq + ivec2(dx, dy)).rgb;
+        ivec2 o0 = h0 - hq, o1 = h1 - hq; // each in -1..1
+        if (P.cleanFlags.w != 0) {
+            h = mix(mix(histAt(hw, o0.x, o0.y), histAt(hw, o1.x, o0.y), fh.x),
+                    mix(histAt(hw, o0.x, o1.y), histAt(hw, o1.x, o1.y), fh.x), fh.y);
+        } else {
+            h = histAt(hw, o0.x, o0.y);
+        }
+        // Motion test on 3x3 means, as described above (#ifdef VESPER_PREV).
+        vec3 curMean = vec3(0.0), histMean = vec3(0.0);
+        for (int dy = -1; dy <= 1; ++dy)
+            for (int dx = -1; dx <= 1; ++dx) {
+                curMean += nb(local, dx, dy);
+                histMean += hw[(dy + 1) * 3 + dx + 1];
+            }
+#endif
         curMean /= 9.0;
         histMean /= 9.0;
         vec3 sig = sqrt(channelVar(curMean) * vec3(1.0, 0.5, 1.0) * 2.0 / 9.0);

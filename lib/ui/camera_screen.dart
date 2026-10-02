@@ -257,6 +257,8 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     }
     _cameraId = cam.id;
     final info = await _engine.deviceInfo();
+    _engine.log('Vesper Cine ${info?['version']} (build ${info?['build']}) on ${info?['model']}, Android ${info?['android']}',
+        tag: 'Vesper_UI');
     _deviceModel = info?['model'] as String?;
     _calibrationDir = info?['calibrationDir'] as String?;
     final filesDir = info?['filesDir'] as String?;
@@ -337,15 +339,20 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   }
 
   // --- GPU benchmark (developer tool) --------------------------------------
+  // A/B baselines (VulkanEngine::setPreviousShaders levels 1 and 2).
+  static const _benchPrev1 = 'All on, 0.11.3 shaders';
+  static const _benchPrev2 = 'All on, 0.11.2 shaders';
+
   // Measures the GPU time of each optional pass on this phone: every feature
   // alone, then all together, with the budget guard off. Then an A/B of the
-  // current shaders against the previous ones (new, previous, new again, so a
-  // slow drift such as the phone warming up cancels out). Settings are
+  // current shaders against the two previous optimisation steps (new, older,
+  // oldest, new again, so a slow drift such as the phone warming up cancels
+  // out). Settings are
   // restored afterwards. Results are shown and printed to logcat (VesperBench).
   Future<void> _runGpuBenchmark() async {
     if (_benchmarking || !_streaming || _recording) return;
     setState(() => _benchmarking = true);
-    void apply({bool hq = false, int sharp = 0, double tnr = 0, double cnr = 0, bool align = false, bool prev = false}) {
+    void apply({bool hq = false, int sharp = 0, double tnr = 0, double cnr = 0, bool align = false, int prev = 0}) {
       _engine.setOversampling(hq);
       _engine.setSharpening(sharp);
       _engine.setTemporalNr(tnr);
@@ -363,7 +370,8 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       ('Temporal NR', () => apply(tnr: 0.7)),
       ('Temporal NR + align', () => apply(tnr: 0.7, align: true)),
       ('Everything on', () => apply(hq: true, sharp: 1, tnr: 0.7, cnr: 0.5, align: true)),
-      ('All on, prev. shaders', () => apply(hq: true, sharp: 1, tnr: 0.7, cnr: 0.5, align: true, prev: true)),
+      (_benchPrev1, () => apply(hq: true, sharp: 1, tnr: 0.7, cnr: 0.5, align: true, prev: 1)),
+      (_benchPrev2, () => apply(hq: true, sharp: 1, tnr: 0.7, cnr: 0.5, align: true, prev: 2)),
       ('Everything on (again)', () => apply(hq: true, sharp: 1, tnr: 0.7, cnr: 0.5, align: true)),
     ];
     final results = <String>[];
@@ -390,15 +398,16 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       results.add(line);
       _engine.log(line, tag: 'VesperBench');
     }
-    final prevMs = measured['All on, prev. shaders'];
     final newA = measured['Everything on'], newB = measured['Everything on (again)'];
-    if (prevMs != null && newA != null && newB != null) {
+    for (final prev in [_benchPrev1, _benchPrev2]) {
+      final prevMs = measured[prev];
+      if (prevMs == null || newA == null || newB == null) continue;
       final saved = prevMs - (newA + newB) / 2;
-      final line = 'A/B: new shaders ${saved >= 0 ? 'save' : 'cost'} ${saved.abs().toStringAsFixed(1)} ms per frame';
+      final line = 'A/B vs ${prev.substring(8)}: ${saved >= 0 ? 'save' : 'cost'} ${saved.abs().toStringAsFixed(1)} ms';
       results.add(line);
       _engine.log(line, tag: 'VesperBench');
     }
-    _engine.setPreviousShaders(false);
+    _engine.setPreviousShaders(0);
     // Restore the user's settings.
     _engine.setOversampling(_oversampling);
     _engine.setSharpening(_sharpening);

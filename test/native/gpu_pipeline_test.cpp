@@ -563,7 +563,7 @@ int main() {
         ap.flags[3] = 16 | 1;
         ap.cleanFlags[0] = 1; ap.cleanFlags[1] = 1; ap.cleanFlags[3] = 1;
         ap.noise[0] = 0.7f; ap.noise[1] = 0.5f; ap.noise[2] = 2e-4f; ap.noise[3] = 2e-6f;
-        auto runSeq = [&](bool prev, std::vector<uint16_t>& out) {
+        auto runSeq = [&](int prev, std::vector<uint16_t>& out) {
             gpu.setPreviousShaders(prev);
             P010 fr{};
             bool ok = runFrame(gpu, raw, baseParams(0), nullptr, fr); // temporal NR off: both runs start without history
@@ -571,12 +571,15 @@ int main() {
             out.assign(fr.y, fr.y + OUT_W * OUT_H * 3 / 2);
             return ok;
         };
-        std::vector<uint16_t> cur, prev;
-        bool ok = runSeq(false, cur) && runSeq(true, prev);
-        gpu.setPreviousShaders(false);
-        int maxDiff = 0;
-        for (size_t i = 0; i < cur.size(); ++i) maxDiff = std::max(maxDiff, std::abs((cur[i] >> 6) - (prev[i] >> 6)));
-        std::printf("  A/B previous shaders: max difference %d codes (everything on)\n", maxDiff);
+        std::vector<uint16_t> cur, prev1, prev2;
+        bool ok = runSeq(0, cur) && runSeq(1, prev1) && runSeq(2, prev2);
+        gpu.setPreviousShaders(0);
+        int d1 = 0, d2 = 0;
+        for (size_t i = 0; i < cur.size(); ++i) {
+            d1 = std::max(d1, std::abs((cur[i] >> 6) - (prev1[i] >> 6)));
+            d2 = std::max(d2, std::abs((cur[i] >> 6) - (prev2[i] >> 6)));
+        }
+        std::printf("  A/B previous shaders: max difference %d / %d codes (levels 1 / 2, everything on)\n", d1, d2);
         check(ok, "previous shaders (benchmark A/B) run", ok, 1);
     }
 

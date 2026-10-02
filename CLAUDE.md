@@ -23,7 +23,8 @@ For user-visible changes also add an entry to `lib/ui/changelog.dart` (shown in 
 - APKs come from GitHub Actions (**Build arm64 APK**, manual `workflow_dispatch`: build_mode, dev_tools). Pushing does not build — if a log looks like an old version, check which commit the latest run used.
 - Ask for logs from **Settings › Developer › App log › Copy** (in-app ring buffer, all native log lines since launch). Native logging goes through `vesperLog` (`app_log.h`); new log lines should use the existing `LOGI`/`VK_LOGI`/… macros.
 - Profile builds are the test builds (release-speed UI/GPU, dev tools visible).
-- **GPU optimisation A/B:** wrap the old version of changed shader code in `#ifdef VESPER_PREV` and keep the `*_prev` variants in `compile_shaders.sh` (render, green R16F fp32/fp16). The GPU Benchmark ends with "Everything on → previous shaders → again" and prints `A/B: new shaders save X ms`; the GPU test prints the max P010 difference (0 = bit-identical). Once a result is confirmed on the phone, delete the `VESPER_PREV` code (keep the `*_prev` plumbing for the next experiment).
+- **GPU optimisation A/B:** wrap the old version of changed shader code in `#ifdef VESPER_PREV` and keep the `*_prev` variants in `compile_shaders.sh` (render, clean, green R16F fp32/fp16). `VulkanEngine::setPreviousShaders(level)`: each pass uses its prev variant from its `kPrevLevel*` up (1 = undo the latest step, 2 = the one before too). The GPU Benchmark ends with "Everything on → level 1 → level 2 → again" and prints `A/B vs <version> shaders: save X ms`; the GPU test prints the max P010 difference per level (0 = bit-identical). Once a step is confirmed on the phone, delete its `VESPER_PREV` code and renumber the levels/labels (`_benchPrev1/2` in camera_screen.dart).
+- Bit-exactness check beyond the unit tests: render several scenes/configs through `VulkanEngine` before and after and compare the P010 byte for byte (a harness of ~150 lines linking `vulkan_engine.cpp`, like `gpu_pipeline_test.cpp`).
 
 ## Layout
 - `android/app/src/main/cpp/` — native engine: `camera_engine` (Camera2 NDK), `vulkan_engine` (GPU pipeline, submit thread, guard), `shaders/` (unpack, green, align, clean, render), `color_science`, `recorder`, `focus_controller`, `iso_analysis`, `app_log.h`. `native_bridge.cpp` holds the `vesper_*` C exports, `onFrame` and the status JSON.
@@ -32,7 +33,8 @@ For user-visible changes also add an entry to `lib/ui/changelog.dart` (shown in 
 - `tools/calibration/` — per-device colour calibration (ColorChecker).
 
 ## Current performance facts (Pixel 10, 1080p, 16:9 4000x2256 readout)
-- GPU per frame, everything on: ~34–35 ms (24 fps budget 41.7). Benchmark deltas: base ~16–18, sharpening +3, HQ +14–16 (10.8 measured when paused at 48 fps), chroma NR +3–5, TNR +3–4, alignment ~3 (every other frame).
+- **The GPU clocks down when it has slack**: the same settings measured 33.2–33.9 ms at 24 fps but ~29.6–30 ms at 30 fps (log of 2 Oct 2026, v0.11.3 shaders). Compare costs only at the same frame rate (benchmark at 30 fps); the A/B line in the benchmark is the reliable number. At 30 fps the guard (85 % = 28.4 ms) pauses alignment; then ~27 ms.
+- GPU per frame, everything on: ~34–35 ms (24 fps budget 41.7), v0.11.2. Benchmark deltas: base ~16–18, sharpening +3, HQ +14–16 (10.8 measured when paused at 48 fps), chroma NR +3–5, TNR +3–4, alignment ~3 (every other frame).
 - 16-bit shader arithmetic is supported (HQ uses the fp16 variant); HQ image format R16F.
 - Per-pass GPU timestamps are unreliable on this PowerVR GPU; trust only the frame total. lavapipe timings in tests are meaningless for the phone.
 - Camera thread work ~3 ms (memcpy ~2.5 ms). The GPU is the bottleneck, not the CPU.

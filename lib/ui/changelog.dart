@@ -7,6 +7,10 @@ class ChangelogEntry {
 }
 
 const changelog = <ChangelogEntry>[
+  ChangelogEntry('0.11.4', [
+    'Faster temporal and chroma noise reduction on the GPU (identical image)',
+    'GPU Benchmark compares against the 0.11.3 and 0.11.2 shaders; app log starts with the app version',
+  ]),
   ChangelogEntry('0.11.3', [
     'Faster HQ oversampling and sharpening on the GPU (identical image)',
     'GPU Benchmark (developer builds) ends with an A/B: new vs previous shaders',

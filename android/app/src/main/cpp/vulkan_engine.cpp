@@ -7,6 +7,8 @@
 #include "shaders/green_rgba_fp16_spv.h"
 #include "shaders/green_spv.h"
 #include "shaders/green_rgba_spv.h"
+#include "shaders/clean_fp16_spv.h"
+#include "shaders/clean_prev_spv.h"
 #include "shaders/render_prev_spv.h"
 #include "shaders/green_prev_spv.h"
 #include "shaders/green_fp16_prev_spv.h"
@@ -307,7 +309,9 @@ bool VulkanEngine::createPipelines() {
         return r == VK_SUCCESS;
     };
     return makePipe(kUnpackSpv, sizeof(kUnpackSpv), unpackLayout_, unpackPipeLayout_, unpackPipe_) &&
-           makePipe(kCleanSpv, sizeof(kCleanSpv), cleanLayout_, cleanPipeLayout_, cleanPipe_) &&
+           (fp16_ ? makePipe(kCleanFp16Spv, sizeof(kCleanFp16Spv), cleanLayout_, cleanPipeLayout_, cleanPipe_)
+                  : makePipe(kCleanSpv, sizeof(kCleanSpv), cleanLayout_, cleanPipeLayout_, cleanPipe_)) &&
+           makePipe(kCleanPrevSpv, sizeof(kCleanPrevSpv), cleanLayout_, cleanPipeLayout_, cleanPrevPipe_) &&
            makePipe(kAlignSpv, sizeof(kAlignSpv), alignLayout_, alignPipeLayout_, alignPipe_, sizeof(int32_t)) &&
            makePipe(kRenderSpv, sizeof(kRenderSpv), renderLayout_, renderPipeLayout_, renderPipe_) &&
            (hqFormat_ == VK_FORMAT_R16_SFLOAT
@@ -352,7 +356,8 @@ void VulkanEngine::release() {
     if (greenPipe_) vkDestroyPipeline(device_, greenPipe_, nullptr);
     if (greenPrevPipe_) vkDestroyPipeline(device_, greenPrevPipe_, nullptr);
     if (renderPrevPipe_) vkDestroyPipeline(device_, renderPrevPipe_, nullptr);
-    greenPrevPipe_ = renderPrevPipe_ = VK_NULL_HANDLE;
+    if (cleanPrevPipe_) vkDestroyPipeline(device_, cleanPrevPipe_, nullptr);
+    greenPrevPipe_ = renderPrevPipe_ = cleanPrevPipe_ = VK_NULL_HANDLE;
     if (greenPipeLayout_) vkDestroyPipelineLayout(device_, greenPipeLayout_, nullptr);
     if (greenLayout_) vkDestroyDescriptorSetLayout(device_, greenLayout_, nullptr);
     greenPipe_ = VK_NULL_HANDLE;
@@ -1049,7 +1054,8 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
     std::memcpy(s.params.mapped, &params, sizeof(params));
     auto tCopy = Clock::now();
 
-    const bool prev = prevShaders_;
+    const int prevLevel = prevLevel_;
+    const bool prevClean = prevLevel >= kPrevLevelClean, prev = prevLevel >= kPrevLevelRenderGreen;
     VkCommandBuffer cb = s.cmd;
     vkResetCommandBuffer(cb, 0);
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -1112,7 +1118,7 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
     }
 
     if (queryPool_) vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool_, q0 + 2);
-    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cleanPipe_);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, prevClean ? cleanPrevPipe_ : cleanPipe_);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cleanPipeLayout_, 0, 1, &s.cleanSets[pingParity_], 0, nullptr);
     vkCmdDispatch(cb, static_cast<uint32_t>((g.rawW / 2 + 15) / 16), static_cast<uint32_t>((g.rawH / 2 + 7) / 8), 1);
 

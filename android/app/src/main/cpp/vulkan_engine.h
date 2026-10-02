@@ -96,9 +96,11 @@ public:
     bool noiseReductionThrottled() const { return nrThrottled_; }
     // HQ oversampled luma: unsupported on this GPU, or paused by the budget guard.
     bool oversamplingAvailable() const { return hqSupported_ && !hqThrottled_; }
-    // GPU benchmark A/B: run the shaders as they were before the current
-    // optimisation (compile_shaders.sh *_prev variants) instead of the new ones.
-    void setPreviousShaders(bool on) { prevShaders_ = on; }
+    // GPU benchmark A/B: run older shaders (compile_shaders.sh *_prev variants,
+    // code under #ifdef VESPER_PREV) instead of the current ones. Level 0 =
+    // current; each pass's previous variant is used from its kPrevLevel* up,
+    // so level 1 undoes only the latest optimisation step, level 2 all of them.
+    void setPreviousShaders(int level) { prevLevel_ = level; }
 
     // Blocks until the slot's GPU work is done, then returns its P010 bytes
     // (Y plane of outW*outH uint16, then interleaved CbCr of outW*outH/2 uint16).
@@ -193,8 +195,10 @@ private:
     VkPipeline alignPipe_ = VK_NULL_HANDLE;
     VkPipelineLayout unpackPipeLayout_ = VK_NULL_HANDLE, cleanPipeLayout_ = VK_NULL_HANDLE, renderPipeLayout_ = VK_NULL_HANDLE;
     VkPipeline unpackPipe_ = VK_NULL_HANDLE, cleanPipe_ = VK_NULL_HANDLE, renderPipe_ = VK_NULL_HANDLE;
-    VkPipeline greenPrevPipe_ = VK_NULL_HANDLE, renderPrevPipe_ = VK_NULL_HANDLE; // benchmark A/B (setPreviousShaders)
-    std::atomic<bool> prevShaders_{false};
+    VkPipeline greenPrevPipe_ = VK_NULL_HANDLE, renderPrevPipe_ = VK_NULL_HANDLE, cleanPrevPipe_ = VK_NULL_HANDLE; // benchmark A/B (setPreviousShaders)
+    std::atomic<int> prevLevel_{0};
+    static constexpr int kPrevLevelClean = 1;       // v0.11.4: TNR history window, 16-bit tile + luma in shared
+    static constexpr int kPrevLevelRenderGreen = 2; // v0.11.3: HQ red/blue-only demosaic, sharpening gathers
     VkSampler sampler_ = VK_NULL_HANDLE;
 
     Slot slots_[kRingSize];

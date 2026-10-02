@@ -545,8 +545,9 @@ class VesperNative {
   /// GPU budget guard: auto-pause alignment / HQ / NR when frames would drop.
   void setBudgetGuard(bool on) => _loaded ? _setBudgetGuard(on ? 1 : 0) : null;
 
-  /// GPU benchmark A/B: run the shaders from before the current optimisation.
-  void setPreviousShaders(bool on) => _loaded ? _setPreviousShaders(on ? 1 : 0) : null;
+  /// GPU benchmark A/B: 0 = current shaders, 1 = without the latest
+  /// optimisation step, 2 = without the last two.
+  void setPreviousShaders(int level) => _loaded ? _setPreviousShaders(level) : null;
 
   /// Asks for camera + microphone permission and waits for the answer.
   /// True only when both are granted (every recording has sound).

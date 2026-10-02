@@ -42,9 +42,12 @@ PY
 variant green_rgba GreenRgba green -DGREEN_RGBA16F
 variant green_fp16 GreenFp16 green -DHQ_FP16
 variant green_rgba_fp16 GreenRgbaFp16 green -DGREEN_RGBA16F -DHQ_FP16
+# clean.comp: shared tile in 16-bit on GPUs with shaderFloat16.
+variant clean_fp16 CleanFp16 clean -DCLEAN_FP16
 # A/B for the GPU benchmark: the shaders as they were before the current
 # optimisation (code under #ifdef VESPER_PREV), selectable at run time.
 variant render_prev RenderPrev render -DVESPER_PREV
+variant clean_prev CleanPrev clean -DVESPER_PREV
 variant green_prev GreenPrev green -DVESPER_PREV
 variant green_fp16_prev GreenFp16Prev green -DHQ_FP16 -DVESPER_PREV
 echo "SPIR-V headers regenerated"

@@ -1259,10 +1259,10 @@ EXPORT void vesper_set_budget_guard(int32_t enable) {
     if (gGpu) gGpu->setBudgetGuard(enable != 0);
 }
 
-// GPU benchmark A/B (developer tool): 1 = run the shaders as they were before
-// the current optimisation, 0 = the current ones.
-EXPORT void vesper_set_previous_shaders(int32_t enable) {
-    if (gGpu) gGpu->setPreviousShaders(enable != 0);
+// GPU benchmark A/B (developer tool): 0 = current shaders, 1 = without the
+// latest optimisation step, 2 = without the last two (see VulkanEngine).
+EXPORT void vesper_set_previous_shaders(int32_t level) {
+    if (gGpu) gGpu->setPreviousShaders(level);
 }
 
 // HQ oversampling: luma rebuilt from the full-resolution sensor and
