@@ -7,9 +7,10 @@
 //   camera RGB -> scene-linear Rec.2020 (DNG forward matrix, Bradford D50->D65)
 //              -> Apple Log  (recording master)
 //              -> Rec.709 display transform + monitoring overlays (viewfinder)
-// Workgroup size: 8x8 normally; RENDER_WG_X/Y variants are benchmark experiments.
+// Workgroup 16x8 (2x2-pixel blocks): measured ~0.4-1.3 ms faster than 8x8 on
+// the phone (0.12.2 benchmark); 16x16 was slower. RENDER_WG_X/Y override it.
 #ifndef RENDER_WG_X
-#define RENDER_WG_X 8
+#define RENDER_WG_X 16
 #define RENDER_WG_Y 8
 #endif
 layout(local_size_x = RENDER_WG_X, local_size_y = RENDER_WG_Y) in;

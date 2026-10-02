@@ -7,6 +7,11 @@ class ChangelogEntry {
 }
 
 const changelog = <ChangelogEntry>[
+  ChangelogEntry('0.13.1', [
+    'While recording, paused processing (e.g. HQ on a hot phone) comes back only with clear headroom and at most every 30 s: no more sharpness pumping in a clip',
+    'Slightly faster viewfinder/recording step on the GPU',
+    'GPU Benchmark corrects for the phone warming up during the run',
+  ]),
   ChangelogEntry('0.13.0', [
     'The screen no longer dims or locks while Vesper is open',
     'Power Saver While Recording (Settings › Recording): dim the screen, or also pause the viewfinder, 10 s into a take; tap to wake. The recording is not affected',

@@ -47,9 +47,6 @@ variant green_rgba_fp16 GreenRgbaFp16 green -DGREEN_RGBA16F -DHQ_FP16
 variant green_fp16_probe1 GreenFp16Probe1 green -DHQ_FP16 -DHQ_PROBE=1
 variant green_fp16_probe2 GreenFp16Probe2 green -DHQ_FP16 -DHQ_PROBE=2
 variant green_fp16_exact GreenFp16Exact green -DHQ_FP16 -DHQ_EXACT_SHADING
+variant green_fp16_smooth GreenFp16Smooth green -DHQ_FP16 -DHQ_SMOOTH_SHADING
 variant green_fp16_wide GreenFp16Wide green -DHQ_FP16 -DHQ_WIDE
-variant render_wg16x8 RenderWg16x8 render -DRENDER_WG_X=16 -DRENDER_WG_Y=8
-variant render_wg16x16 RenderWg16x16 render -DRENDER_WG_X=16 -DRENDER_WG_Y=16
-variant clean_wg16x16 CleanWg16x16 clean -DCLEAN_WG_X=16 -DCLEAN_WG_Y=16
-variant clean_wg8x8 CleanWg8x8 clean -DCLEAN_WG_X=8 -DCLEAN_WG_Y=8
 echo "SPIR-V headers regenerated"

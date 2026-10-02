@@ -11,10 +11,7 @@
 #include "shaders/green_fp16_probe2_spv.h"
 #include "shaders/green_fp16_wide_spv.h"
 #include "shaders/green_fp16_exact_spv.h"
-#include "shaders/render_wg16x8_spv.h"
-#include "shaders/render_wg16x16_spv.h"
-#include "shaders/clean_wg16x16_spv.h"
-#include "shaders/clean_wg8x8_spv.h"
+#include "shaders/green_fp16_smooth_spv.h"
 
 #include <algorithm>
 #include <cmath>
@@ -322,14 +319,11 @@ bool VulkanEngine::createPipelines() {
                          : makePipe(kGreenSpv, sizeof(kGreenSpv), greenLayout_, greenPipeLayout_, greenPipe_))
                 : (fp16_ ? makePipe(kGreenRgbaFp16Spv, sizeof(kGreenRgbaFp16Spv), greenLayout_, greenPipeLayout_, greenPipe_)
                          : makePipe(kGreenRgbaSpv, sizeof(kGreenRgbaSpv), greenLayout_, greenPipeLayout_, greenPipe_))) &&
-           makePipe(kRenderWg16x8Spv, sizeof(kRenderWg16x8Spv), renderLayout_, renderPipeLayout_, render16x8Pipe_) &&
-           makePipe(kRenderWg16x16Spv, sizeof(kRenderWg16x16Spv), renderLayout_, renderPipeLayout_, render16x16Pipe_) &&
-           makePipe(kCleanWg16x16Spv, sizeof(kCleanWg16x16Spv), cleanLayout_, cleanPipeLayout_, clean16x16Pipe_) &&
-           makePipe(kCleanWg8x8Spv, sizeof(kCleanWg8x8Spv), cleanLayout_, cleanPipeLayout_, clean8x8Pipe_) &&
            // HQ probes / wide tiles exist for the phone's path only (16-bit maths, R16F detail image).
            (!fp16_ || hqFormat_ != VK_FORMAT_R16_SFLOAT ||
             (makePipe(kGreenFp16WideSpv, sizeof(kGreenFp16WideSpv), greenLayout_, greenPipeLayout_, greenWidePipe_) &&
              makePipe(kGreenFp16ExactSpv, sizeof(kGreenFp16ExactSpv), greenLayout_, greenPipeLayout_, greenExactPipe_) &&
+             makePipe(kGreenFp16SmoothSpv, sizeof(kGreenFp16SmoothSpv), greenLayout_, greenPipeLayout_, greenSmoothPipe_) &&
              makePipe(kGreenFp16Probe1Spv, sizeof(kGreenFp16Probe1Spv), greenLayout_, greenPipeLayout_, greenProbe1Pipe_) &&
              makePipe(kGreenFp16Probe2Spv, sizeof(kGreenFp16Probe2Spv), greenLayout_, greenPipeLayout_, greenProbe2Pipe_)));
 }
@@ -362,8 +356,7 @@ void VulkanEngine::release() {
     if (cleanPipe_) vkDestroyPipeline(device_, cleanPipe_, nullptr);
     if (alignPipe_) vkDestroyPipeline(device_, alignPipe_, nullptr);
     if (greenPipe_) vkDestroyPipeline(device_, greenPipe_, nullptr);
-    for (VkPipeline* p : {&greenProbe1Pipe_, &greenProbe2Pipe_, &greenWidePipe_, &greenExactPipe_, &render16x8Pipe_,
-                          &render16x16Pipe_, &clean16x16Pipe_, &clean8x8Pipe_}) {
+    for (VkPipeline* p : {&greenProbe1Pipe_, &greenProbe2Pipe_, &greenWidePipe_, &greenExactPipe_, &greenSmoothPipe_}) {
         if (*p) vkDestroyPipeline(device_, *p, nullptr);
         *p = VK_NULL_HANDLE;
     }
@@ -1053,6 +1046,7 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
         return false;
     }
     auto tWait = Clock::now();
+    if (recordingNow_ && !encoderSlot) recoverFrames_ = std::min(recoverFrames_, 24); // take ended: no recording back-off in preview
     recordingNow_ = encoderSlot != nullptr;
     readTimestamps(idx);
     presentCpuFallback(s);
@@ -1093,14 +1087,11 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
     // Benchmark experiments: pipeline variant + its tile / workgroup size.
     const bool hqWide = (exps & kExpHqWide) && greenWidePipe_;
     VkPipeline greenPipe = hqWide ? greenWidePipe_
-                         : ((exps & kExpHqExactShading) && greenExactPipe_ ? greenExactPipe_ : greenPipe_);
+                         : ((exps & kExpHqExactShading) && greenExactPipe_ ? greenExactPipe_
+                            : ((exps & kExpHqSmoothShading) && greenSmoothPipe_ ? greenSmoothPipe_ : greenPipe_));
     const uint32_t greenTileX = hqWide ? 32 : 16;
-    VkPipeline renderPipe = (exps & kExpRender16x16) ? render16x16Pipe_ : ((exps & kExpRender16x8) ? render16x8Pipe_ : renderPipe_);
-    const uint32_t renderWgX = (exps & (kExpRender16x16 | kExpRender16x8)) ? 16 : 8;
-    const uint32_t renderWgY = (exps & kExpRender16x16) ? 16 : 8;
-    VkPipeline cleanPipe = (exps & kExpClean16x16) ? clean16x16Pipe_ : ((exps & kExpClean8x8) ? clean8x8Pipe_ : cleanPipe_);
-    const uint32_t cleanWgX = (exps & kExpClean8x8) && !(exps & kExpClean16x16) ? 8 : 16;
-    const uint32_t cleanWgY = (exps & kExpClean16x16) ? 16 : 8;
+    constexpr uint32_t renderWgX = 16, renderWgY = 8; // render.comp workgroup
+    constexpr uint32_t cleanWgX = 16, cleanWgY = 8;   // clean.comp workgroup
     VkCommandBuffer cb = s.cmd;
     vkResetCommandBuffer(cb, 0);
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -1204,7 +1195,7 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
 
     if (queryPool_) vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool_, q0 + 2);
     runPass(3, [&] {
-        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cleanPipe);
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cleanPipe_);
         vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cleanPipeLayout_, 0, 1, &s.cleanSets[pingParity_], 0, nullptr);
         vkCmdDispatch(cb, (static_cast<uint32_t>(g.rawW / 2) + cleanWgX - 1) / cleanWgX,
                       (static_cast<uint32_t>(g.rawH / 2) + cleanWgY - 1) / cleanWgY, 1);
@@ -1219,7 +1210,7 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
 
     if (queryPool_) vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool_, q0 + 3);
     runPass(4, [&] {
-        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, renderPipe);
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, renderPipe_);
         vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, renderPipeLayout_, 0, 1, &s.renderSets[pingParity_], 0, nullptr);
         vkCmdDispatch(cb, (static_cast<uint32_t>(g.outW / 2) + renderWgX - 1) / renderWgX,
                       (static_cast<uint32_t>(g.outH / 2) + renderWgY - 1) / renderWgY, 1);
@@ -1359,12 +1350,19 @@ void VulkanEngine::readTimestamps(int slot) {
     const double budget = frameBudgetMs_;
     overBudgetFrames_ = gpuFrameMs_ > 0.85 * budget ? overBudgetFrames_ + 1 : 0;
     int next = nrThrottled_ ? 2 : (hqThrottled_ ? 1 : (alignThrottled_ ? 0 : (alignReduced_ ? 3 : -1))); // next stage to restore
-    const bool fitsByCost = next >= 0 && gpuFrameMs_ + stageCostMs_[next] < 0.85 * budget - 0.5;
+    // While recording, a stage that comes back and goes again is visible in the
+    // clip (HQ flapped 3x in 20 s on a hot phone, 3 Oct): restore only with a
+    // wider gap below the pause line, and never sooner than 30 s after a flap.
+    const bool rec = recordingNow_;
+    const double restoreGap = rec ? 2.0 : 0.5;
+    const int frames30s = static_cast<int>(30000.0 / budget);
+    const bool fitsByCost = next >= 0 && gpuFrameMs_ + stageCostMs_[next] < 0.85 * budget - restoreGap;
     // Trial when the cost is only an (inflated) pause estimate and there is room below the pause line.
-    const bool headroom = next >= 0 && !costReliable_[next] && gpuFrameMs_ < 0.85 * budget - 1.5;
+    const bool headroom = next >= 0 && !costReliable_[next] && gpuFrameMs_ < 0.85 * budget - 1.5 - (rec ? 1.5 : 0.0);
     underBudgetFrames_ = (fitsByCost || headroom) ? underBudgetFrames_ + 1 : 0;
+    const int trialWait = rec ? std::max(3 * recoverFrames_, frames30s) : 3 * recoverFrames_;
     const bool fits = fitsByCost ? underBudgetFrames_ > recoverFrames_
-                                 : (headroom && underBudgetFrames_ > 3 * recoverFrames_);
+                                 : (headroom && underBudgetFrames_ > trialWait);
     if (overBudgetFrames_ > 12) {
         overBudgetFrames_ = underBudgetFrames_ = 0;
         int stage = -1;
@@ -1374,7 +1372,10 @@ void VulkanEngine::readTimestamps(int slot) {
         else if (!nrThrottled_) { nrThrottled_ = true; stage = 2; }
         if (stage >= 0) {
             VK_LOGW("GPU %.1fms over %.1fms budget: paused stage %d (3 align 1/4 rate, 0 align, 1 HQ, 2 NR)", gpuFrameMs_, budget, stage);
-            if (stage == lastRestored_) recoverFrames_ = std::min(recoverFrames_ * 2, 24 * 60); // flapping: back off
+            if (stage == lastRestored_) { // flapping: back off (while recording at least 30 s, up to ~2 min)
+                recoverFrames_ = rec ? std::min(std::max(recoverFrames_ * 2, frames30s), 4 * frames30s)
+                                     : std::min(recoverFrames_ * 2, 24 * 60);
+            }
             measuringStage_ = stage;
             measuringRestore_ = false;
             costBeforeMs_ = gpuFrameMs_;

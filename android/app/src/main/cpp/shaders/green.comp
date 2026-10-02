@@ -75,6 +75,15 @@ const int NB = TX / T;               // 32x32 shading blocks per tile
 shared HF sRaw[RNX * RNY];           // 2112 / 3520; later reused for row-filter results (GN x QX = 640 / 1280)
 shared HF sGreen[GNX * GN];          // 1600 / 2880
 shared vec4 sShade[NB];
+#ifdef HQ_SMOOTH_SHADING
+// Benchmark experiment, the cheaper version of the fix below: the shading map
+// at the four corners of the loaded region (tile + halo), interpolated for
+// every pixel (as unpack does per workgroup). Exact while the region lies
+// inside one map cell (~125 px on the phone), a fraction of a percent off
+// where a cell boundary crosses it; no per-pixel memory reads.
+shared vec4 sCorner[4];
+shared vec2 sCornerOrg, sCornerSpan;
+#endif
 #ifdef HQ_EXACT_SHADING
 // Map nodes covering the tile and its halo (map cells are ~125 px on the
 // phone: 2x2 cells, 3x3 nodes; up to 4x4 cached, else read from the buffer).
@@ -180,11 +189,21 @@ void main() {
             }
         }
     }
+#elif defined(HQ_SMOOTH_SHADING)
+    if (lid < 4) {
+        vec2 lo = clamp(vec2(org - ivec2(RBX, RBY)), vec2(0.0), vec2(P.rawInfo.xy - 1)) + 0.5;
+        vec2 hi = clamp(vec2(org + ivec2(TX + RBX - 1, T + RBY - 1)), vec2(0.0), vec2(P.rawInfo.xy - 1)) + 0.5;
+        sCorner[lid] = shadingAt(vec2((lid & 1) != 0 ? hi.x : lo.x, (lid & 2) != 0 ? hi.y : lo.y));
+        if (lid == 0) {
+            sCornerOrg = lo;
+            sCornerSpan = max(hi - lo, vec2(1.0));
+        }
+    }
 #else
     if (lid < NB) sShade[lid] = shadingAt(vec2(org) + vec2(float(T * lid) + T * 0.5, T * 0.5)); // per block, not per thread
 #endif
     barrier();
-#ifndef HQ_EXACT_SHADING
+#if !defined(HQ_EXACT_SHADING) && !defined(HQ_SMOOTH_SHADING)
     const vec4 sh = sShade[0];
 #endif
     const int groupsPerRow = (P.rawInfo.x + 3) / 4;
@@ -210,6 +229,9 @@ void main() {
         for (int b = 0; b < 4; ++b) {
 #ifdef HQ_EXACT_SHADING
             const vec4 sh = shadingExact(vec2(grp * 4 + b, y) + 0.5); // the pixel actually loaded
+#elif defined(HQ_SMOOTH_SHADING)
+            const vec2 sf = clamp((vec2(grp * 4 + b, y) + 0.5 - sCornerOrg) / sCornerSpan, vec2(0.0), vec2(1.0));
+            const vec4 sh = mix(mix(sCorner[0], sCorner[1], sf.x), mix(sCorner[2], sCorner[3], sf.x), sf.y);
 #endif
             float dn = float((((lo >> (8u * uint(b))) & 0xFFu) << 2) | ((b4 >> (2 * b)) & 3u));
             int x = grp * 4 + b;

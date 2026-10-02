@@ -367,12 +367,9 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   ];
   // Opt-in experiments: (label, VulkanEngine::kExp* bit).
   static const List<(String, int)> _benchExperiments = [
+    ('Exp: HQ smooth vignetting', 64),
     ('Exp: HQ exact vignetting', 32),
     ('Exp: HQ exact + wide tiles', 1),
-    ('Exp: render 16x8', 2),
-    ('Exp: render 16x16', 4),
-    ('Exp: NR 16x16', 8),
-    ('Exp: NR 8x8', 16),
   ];
   // The guard's first step: motion search every 4th frame instead of every 2nd.
   static const _benchAlignReduced = 'All on, align every 4th';
@@ -413,6 +410,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     ];
     final results = <String>[];
     final measured = <String, double>{};
+    final stepOf = <String, int>{}; // position in the run, for the warm-up drift correction
     double? base;
     // A camera restart (app left the foreground) re-applies the user's
     // settings, and a stage the guard holds paused makes a step measure less
@@ -441,6 +439,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
         break;
       }
       measured[name] = ms;
+      stepOf[name] = i;
       final drops = (_engine.status()?.cameraDrops ?? 0) - drops0;
       base ??= ms;
       final line =
@@ -455,23 +454,27 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     }
     final newA = measured['Everything on'], newB = measured['Everything on (again)'];
     if (interrupted == null && newA != null && newB != null) {
-      final allOnMs = (newA + newB) / 2;
-      String extra(String label) => measured[label] == null ? '?' : (measured[label]! - allOnMs).toStringAsFixed(1);
-      String diff(String a, String b) => measured[a] == null || measured[b] == null
-          ? '?'
-          : (measured[a]! - measured[b]!).toStringAsFixed(1);
+      // The phone warms up during the run (GPU flat out at 60 fps): "Everything
+      // on" is measured first and last, and each step is compared with the
+      // baseline interpolated to its own position in the run.
+      final iA = stepOf['Everything on']!, iB = stepOf['Everything on (again)']!;
+      double baseline(String label) => newA + (newB - newA) * (stepOf[label]! - iA) / (iB - iA);
+      double? delta(String label) => measured[label] == null ? null : measured[label]! - baseline(label);
+      String fmt(double? v) => v == null ? '?' : v.toStringAsFixed(1);
       final hqLoad = _benchParts[2].$1, hqDemosaic = _benchParts[3].$1;
+      final dLoad = delta(hqLoad), dDemosaic = delta(hqDemosaic), dHq = delta('All on, HQ x2');
       final summary = [
-        'Pass costs (ms): ${[for (final p in _benchPasses) '$p ${extra('All on, $p x2')}'].join(', ')}',
-        'Align (ms): 1/4-res luma ${extra(_benchParts[0].$1)}, search ${extra(_benchParts[1].$1)}',
-        if (measured[_benchAlignReduced] != null)
-          'Align every 4th frame instead of 2nd: saves ${(-double.parse(extra(_benchAlignReduced))).toStringAsFixed(1)} ms',
-        'HQ (ms): load ${extra(hqLoad)}, demosaic ${diff(hqDemosaic, hqLoad)}, '
-            'filter+output ${measured['All on, HQ x2'] == null || measured[hqDemosaic] == null ? '?' : (measured['All on, HQ x2']! - measured[hqDemosaic]!).toStringAsFixed(1)}',
+        'Warm-up drift during the run: ${newB - newA >= 0 ? '+' : ''}${(newB - newA).toStringAsFixed(1)} ms (corrected below)',
+        'Pass costs (ms): ${[for (final p in _benchPasses) '$p ${fmt(delta('All on, $p x2'))}'].join(', ')}',
+        'Align (ms): 1/4-res luma ${fmt(delta(_benchParts[0].$1))}, search ${fmt(delta(_benchParts[1].$1))}',
+        if (delta(_benchAlignReduced) != null)
+          'Align every 4th frame instead of 2nd: saves ${fmt(-delta(_benchAlignReduced)!)} ms',
+        'HQ (ms): load ${fmt(dLoad)}, demosaic ${fmt(dDemosaic == null || dLoad == null ? null : dDemosaic - dLoad)}, '
+            'filter+output ${fmt(dHq == null || dDemosaic == null ? null : dHq - dDemosaic)}',
         for (final (label, _) in _benchExperiments)
-          if (measured[label] != null)
+          if (delta(label) != null)
             () {
-              final saved = allOnMs - measured[label]!;
+              final saved = -delta(label)!;
               return '${label.substring(5)}: ${saved >= 0 ? 'saves' : 'costs'} ${saved.abs().toStringAsFixed(1)} ms';
             }(),
       ];

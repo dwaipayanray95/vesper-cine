@@ -16,7 +16,7 @@
 //     so handheld shake and pans are denoised too instead of just rejected.
 // Noise model: raw variance = S * x + O (x normalised raw), then scaled by
 // each channel's white-balance gain. Luma = (R + Gr + Gb + B) / 4.
-// Workgroup size: 16x8 normally; CLEAN_WG_X/Y variants are benchmark experiments.
+// Workgroup 16x8 (16x16 and 8x8 measured slower on the phone, 0.12.2).
 #ifndef CLEAN_WG_X
 #define CLEAN_WG_X 16
 #define CLEAN_WG_Y 8

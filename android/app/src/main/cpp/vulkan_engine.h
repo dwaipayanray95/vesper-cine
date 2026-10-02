@@ -109,10 +109,7 @@ public:
     // normal use until the benchmark on the phone has confirmed them.
     static constexpr int kExpHqWide = 1;       // HQ on 32x16-quad tiles (64x32 px), halo shared; implies exact shading
     static constexpr int kExpHqExactShading = 32; // HQ: lens shading per raw pixel (quality fix) instead of per 32x32 block
-    static constexpr int kExpRender16x8 = 2;   // render workgroup 16x8 (normally 8x8)
-    static constexpr int kExpRender16x16 = 4;  // render workgroup 16x16
-    static constexpr int kExpClean16x16 = 8;   // clean (NR) workgroup 16x16 (normally 16x8)
-    static constexpr int kExpClean8x8 = 16;    // clean workgroup 8x8
+    static constexpr int kExpHqSmoothShading = 64; // HQ: shading interpolated from the tile's corners (cheaper fix)
     void setExperiments(int mask) { experiments_ = mask; }
     // GPU benchmark: run the motion search every n-th frame (2 = normal,
     // 4 = the guard's reduced rate); 0 = automatic (guard decides).
@@ -221,9 +218,7 @@ private:
     std::atomic<int> experiments_{0}, repeatPass_{-1}, alignInterval_{0};
     // Benchmark experiments / probes (VK_NULL_HANDLE where the variant doesn't apply: HQ ones need fp16 + R16F).
     VkPipeline greenProbe1Pipe_ = VK_NULL_HANDLE, greenProbe2Pipe_ = VK_NULL_HANDLE, greenWidePipe_ = VK_NULL_HANDLE;
-    VkPipeline greenExactPipe_ = VK_NULL_HANDLE;
-    VkPipeline render16x8Pipe_ = VK_NULL_HANDLE, render16x16Pipe_ = VK_NULL_HANDLE;
-    VkPipeline clean16x16Pipe_ = VK_NULL_HANDLE, clean8x8Pipe_ = VK_NULL_HANDLE;
+    VkPipeline greenExactPipe_ = VK_NULL_HANDLE, greenSmoothPipe_ = VK_NULL_HANDLE;
     VkSampler sampler_ = VK_NULL_HANDLE;
 
     Slot slots_[kRingSize];

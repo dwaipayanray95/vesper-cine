@@ -601,8 +601,7 @@ int main() {
         std::vector<uint16_t> cur, other;
         bool ok = runSeq(0, -1, cur);
         std::printf("  experiments, max difference (codes):");
-        for (int bit : {VulkanEngine::kExpHqExactShading, VulkanEngine::kExpHqWide, VulkanEngine::kExpRender16x8, VulkanEngine::kExpRender16x16,
-                        VulkanEngine::kExpClean16x16, VulkanEngine::kExpClean8x8}) {
+        for (int bit : {VulkanEngine::kExpHqExactShading, VulkanEngine::kExpHqSmoothShading, VulkanEngine::kExpHqWide}) {
             ok = runSeq(bit, -1, other) && ok;
             int d = maxDiff(cur, other);
             std::printf(" exp %d: %d", bit, d);
@@ -612,11 +611,14 @@ int main() {
         {
             // With vignetting: exact per-pixel shading changes HQ a little (it's the fix);
             // wide tiles must then give exactly the same result as 32-px tiles.
-            std::vector<uint16_t> shadedCur, shadedExact, shadedWide;
+            std::vector<uint16_t> shadedCur, shadedExact, shadedWide, shadedSmooth;
             ok = runSeq(0, -1, shadedCur, true) && runSeq(VulkanEngine::kExpHqExactShading, -1, shadedExact, true) &&
-                 runSeq(VulkanEngine::kExpHqWide, -1, shadedWide, true) && ok;
+                 runSeq(VulkanEngine::kExpHqWide, -1, shadedWide, true) &&
+                 runSeq(VulkanEngine::kExpHqSmoothShading, -1, shadedSmooth, true) && ok;
             int dFix = maxDiff(shadedCur, shadedExact), dWide = maxDiff(shadedExact, shadedWide);
-            std::printf("  with vignetting: exact shading vs per-block max %d codes; wide vs 32-px tiles (both exact) %d\n", dFix, dWide);
+            int dSmooth = maxDiff(shadedSmooth, shadedExact);
+            std::printf("  with vignetting: exact shading vs per-block max %d codes; wide vs 32-px tiles (both exact) %d;"
+                        " smooth (tile corners) vs exact %d\n", dFix, dWide, dSmooth);
             check(dWide == 0, "HQ wide tiles give the same output as 32-px tiles (exact shading)", dWide, 0);
         }
         int repeatDiff = 0;
