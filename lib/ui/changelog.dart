@@ -7,6 +7,7 @@ class ChangelogEntry {
 }
 
 const changelog = <ChangelogEntry>[
+  ChangelogEntry('0.12.3', ['GPU Benchmark (developer builds) stops with a message if the camera restarts or the GPU guard steps in, instead of showing wrong numbers']),
   ChangelogEntry('0.12.2', ['GPU Benchmark (developer builds) tries exact vignetting in HQ, bigger HQ tiles and other GPU work-group sizes']),
   ChangelogEntry('0.12.1', ['No dropped frame when recording starts (the viewfinder no longer changes size)']),
   ChangelogEntry('0.12.0', [

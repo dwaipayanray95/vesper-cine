@@ -169,6 +169,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
 
   bool _settingsOpen = false; // settings page covers the viewfinder: processing paused
   bool _benchmarking = false;
+  int _streamGeneration = 0; // +1 per (re)open: a benchmark spanning a camera restart is invalid
   String _benchStep = '';
   bool _permissionDenied = false; // camera permission refused: status text offers a retry
   int? _textureId;
@@ -276,6 +277,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   // Opens the camera, pushes every setting and starts streaming. Also used
   // when returning from the background (Android revokes camera access there).
   Future<bool> _openAndStream({bool createTexture = false}) async {
+    _streamGeneration++;
     if (!_engine.openCamera(_cameraId!)) {
       setState(() => _statusMessage = 'FAILED TO OPEN CAMERA $_cameraId');
       return false;
@@ -381,6 +383,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       _engine.setExperiments(exps);
       _engine.setRepeatPass(repeat);
       _engine.setAlignInterval(alignEvery);
+      _engine.setBudgetGuard(false); // again every step: a camera restart re-applies the user's guard setting
     }
 
     void allOn({int exps = 0, int repeat = -1, int alignEvery = 0}) =>
@@ -404,6 +407,11 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     final results = <String>[];
     final measured = <String, double>{};
     double? base;
+    // A camera restart (app left the foreground) re-applies the user's
+    // settings, and a stage the guard holds paused makes a step measure less
+    // than it says: either makes the numbers meaningless, so stop and say so.
+    final generation = _streamGeneration;
+    String? interrupted;
     for (var i = 0; i < configs.length && mounted; i++) {
       final (name, set) = configs[i];
       set();
@@ -416,6 +424,15 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
         sum += _engine.status()?.gpuMs ?? 0;
       }
       final ms = sum / 8;
+      final st = _engine.status();
+      if (_streamGeneration != generation || !_streaming) {
+        interrupted = 'Interrupted at "$name": the camera restarted (did the app leave the screen?). Run it again.';
+        break;
+      }
+      if (st != null && (st.alignThrottled || st.alignReduced || st.nrThrottled || (st.hqSupported && !st.hqAvailable))) {
+        interrupted = 'Interrupted at "$name": the GPU guard had paused processing. Run it again.';
+        break;
+      }
       measured[name] = ms;
       final drops = (_engine.status()?.cameraDrops ?? 0) - drops0;
       base ??= ms;
@@ -425,8 +442,12 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       results.add(line);
       _engine.log(line, tag: 'VesperBench');
     }
+    if (interrupted != null) {
+      results.add(interrupted);
+      _engine.log(interrupted, tag: 'VesperBench');
+    }
     final newA = measured['Everything on'], newB = measured['Everything on (again)'];
-    if (newA != null && newB != null) {
+    if (interrupted == null && newA != null && newB != null) {
       final allOnMs = (newA + newB) / 2;
       String extra(String label) => measured[label] == null ? '?' : (measured[label]! - allOnMs).toStringAsFixed(1);
       String diff(String a, String b) => measured[a] == null || measured[b] == null
