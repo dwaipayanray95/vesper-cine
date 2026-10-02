@@ -572,12 +572,24 @@ int main() {
         ap.flags[3] = 16 | 1;
         ap.cleanFlags[0] = 1; ap.cleanFlags[1] = 1; ap.cleanFlags[3] = 1;
         ap.noise[0] = 0.7f; ap.noise[1] = 0.5f; ap.noise[2] = 2e-4f; ap.noise[3] = 2e-6f;
-        auto runSeq = [&](int exps, int repeat, std::vector<uint16_t>& out) {
+        // Vignetting like a phone lens (gain 1 in the centre, ~3.5 in the corners, green rows
+        // differing slightly), so per-block lens-shading lookups show up in the comparison.
+        std::vector<float> vignette(33 * 25 * 4);
+        for (int r = 0; r < 25; ++r)
+            for (int c = 0; c < 33; ++c) {
+                float dx = (c - 16) / 16.0f, dy = (r - 12) / 12.0f, d2 = 0.5f * (dx * dx + dy * dy);
+                float gch[4] = {1 + 3.0f * d2, 1 + 2.4f * d2, 1 + 2.45f * d2, 1 + 2.7f * d2};
+                for (int k = 0; k < 4; ++k) vignette[(r * 33 + c) * 4 + k] = gch[k];
+            }
+        FrameParams vp = ap;
+        vp.quadInfo[2] = 33; vp.quadInfo[3] = 25;
+        auto runSeq = [&](int exps, int repeat, std::vector<uint16_t>& out, bool shaded = false) {
             gpu.setExperiments(exps);
             gpu.setRepeatPass(repeat);
             P010 fr{};
             bool ok = runFrame(gpu, raw, baseParams(0), nullptr, fr); // temporal NR off: every run starts without history
-            for (unsigned i = 0; i < 4; ++i) ok = runFrame(gpu, makeNoisyRaw10(TestScene(), 40 + i), ap, nullptr, fr) && ok;
+            for (unsigned i = 0; i < 4; ++i)
+                ok = runFrame(gpu, makeNoisyRaw10(TestScene(), 40 + i), shaded ? vp : ap, shaded ? &vignette : nullptr, fr) && ok;
             out.assign(fr.y, fr.y + OUT_W * OUT_H * 3 / 2);
             return ok;
         };
@@ -588,9 +600,25 @@ int main() {
         };
         std::vector<uint16_t> cur, other;
         bool ok = runSeq(0, -1, cur);
-        // Pending experiments (VulkanEngine::kExp* bits) go here, e.g.:
-        //   ok = runSeq(VulkanEngine::kExpSomething, -1, other) && ok;
-        //   std::printf("  experiment X: max difference %d codes\n", maxDiff(cur, other));
+        std::printf("  experiments, max difference (codes):");
+        for (int bit : {VulkanEngine::kExpHqExactShading, VulkanEngine::kExpHqWide, VulkanEngine::kExpRender16x8, VulkanEngine::kExpRender16x16,
+                        VulkanEngine::kExpClean16x16, VulkanEngine::kExpClean8x8}) {
+            ok = runSeq(bit, -1, other) && ok;
+            int d = maxDiff(cur, other);
+            std::printf(" exp %d: %d", bit, d);
+            check(d == 0, "experiment leaves the output unchanged (no vignetting)", d, 0);
+        }
+        std::printf("\n");
+        {
+            // With vignetting: exact per-pixel shading changes HQ a little (it's the fix);
+            // wide tiles must then give exactly the same result as 32-px tiles.
+            std::vector<uint16_t> shadedCur, shadedExact, shadedWide;
+            ok = runSeq(0, -1, shadedCur, true) && runSeq(VulkanEngine::kExpHqExactShading, -1, shadedExact, true) &&
+                 runSeq(VulkanEngine::kExpHqWide, -1, shadedWide, true) && ok;
+            int dFix = maxDiff(shadedCur, shadedExact), dWide = maxDiff(shadedExact, shadedWide);
+            std::printf("  with vignetting: exact shading vs per-block max %d codes; wide vs 32-px tiles (both exact) %d\n", dFix, dWide);
+            check(dWide == 0, "HQ wide tiles give the same output as 32-px tiles (exact shading)", dWide, 0);
+        }
         int repeatDiff = 0;
         for (int pass = 0; pass <= 8; ++pass) {
             ok = runSeq(0, pass, other) && ok;

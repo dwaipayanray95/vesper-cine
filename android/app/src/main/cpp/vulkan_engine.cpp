@@ -9,6 +9,12 @@
 #include "shaders/green_rgba_spv.h"
 #include "shaders/green_fp16_probe1_spv.h"
 #include "shaders/green_fp16_probe2_spv.h"
+#include "shaders/green_fp16_wide_spv.h"
+#include "shaders/green_fp16_exact_spv.h"
+#include "shaders/render_wg16x8_spv.h"
+#include "shaders/render_wg16x16_spv.h"
+#include "shaders/clean_wg16x16_spv.h"
+#include "shaders/clean_wg8x8_spv.h"
 
 #include <algorithm>
 #include <cmath>
@@ -316,9 +322,15 @@ bool VulkanEngine::createPipelines() {
                          : makePipe(kGreenSpv, sizeof(kGreenSpv), greenLayout_, greenPipeLayout_, greenPipe_))
                 : (fp16_ ? makePipe(kGreenRgbaFp16Spv, sizeof(kGreenRgbaFp16Spv), greenLayout_, greenPipeLayout_, greenPipe_)
                          : makePipe(kGreenRgbaSpv, sizeof(kGreenRgbaSpv), greenLayout_, greenPipeLayout_, greenPipe_))) &&
-           // HQ probes exist for the phone's path only (16-bit maths, R16F detail image).
+           makePipe(kRenderWg16x8Spv, sizeof(kRenderWg16x8Spv), renderLayout_, renderPipeLayout_, render16x8Pipe_) &&
+           makePipe(kRenderWg16x16Spv, sizeof(kRenderWg16x16Spv), renderLayout_, renderPipeLayout_, render16x16Pipe_) &&
+           makePipe(kCleanWg16x16Spv, sizeof(kCleanWg16x16Spv), cleanLayout_, cleanPipeLayout_, clean16x16Pipe_) &&
+           makePipe(kCleanWg8x8Spv, sizeof(kCleanWg8x8Spv), cleanLayout_, cleanPipeLayout_, clean8x8Pipe_) &&
+           // HQ probes / wide tiles exist for the phone's path only (16-bit maths, R16F detail image).
            (!fp16_ || hqFormat_ != VK_FORMAT_R16_SFLOAT ||
-            (makePipe(kGreenFp16Probe1Spv, sizeof(kGreenFp16Probe1Spv), greenLayout_, greenPipeLayout_, greenProbe1Pipe_) &&
+            (makePipe(kGreenFp16WideSpv, sizeof(kGreenFp16WideSpv), greenLayout_, greenPipeLayout_, greenWidePipe_) &&
+             makePipe(kGreenFp16ExactSpv, sizeof(kGreenFp16ExactSpv), greenLayout_, greenPipeLayout_, greenExactPipe_) &&
+             makePipe(kGreenFp16Probe1Spv, sizeof(kGreenFp16Probe1Spv), greenLayout_, greenPipeLayout_, greenProbe1Pipe_) &&
              makePipe(kGreenFp16Probe2Spv, sizeof(kGreenFp16Probe2Spv), greenLayout_, greenPipeLayout_, greenProbe2Pipe_)));
 }
 
@@ -350,7 +362,8 @@ void VulkanEngine::release() {
     if (cleanPipe_) vkDestroyPipeline(device_, cleanPipe_, nullptr);
     if (alignPipe_) vkDestroyPipeline(device_, alignPipe_, nullptr);
     if (greenPipe_) vkDestroyPipeline(device_, greenPipe_, nullptr);
-    for (VkPipeline* p : {&greenProbe1Pipe_, &greenProbe2Pipe_}) {
+    for (VkPipeline* p : {&greenProbe1Pipe_, &greenProbe2Pipe_, &greenWidePipe_, &greenExactPipe_, &render16x8Pipe_,
+                          &render16x16Pipe_, &clean16x16Pipe_, &clean8x8Pipe_}) {
         if (*p) vkDestroyPipeline(device_, *p, nullptr);
         *p = VK_NULL_HANDLE;
     }
@@ -1075,7 +1088,18 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
     std::memcpy(s.params.mapped, &params, sizeof(params));
     auto tCopy = Clock::now();
 
-    const int repeat = repeatPass_;
+    const int repeat = repeatPass_, exps = experiments_;
+    // Benchmark experiments: pipeline variant + its tile / workgroup size.
+    const bool hqWide = (exps & kExpHqWide) && greenWidePipe_;
+    VkPipeline greenPipe = hqWide ? greenWidePipe_
+                         : ((exps & kExpHqExactShading) && greenExactPipe_ ? greenExactPipe_ : greenPipe_);
+    const uint32_t greenTileX = hqWide ? 32 : 16;
+    VkPipeline renderPipe = (exps & kExpRender16x16) ? render16x16Pipe_ : ((exps & kExpRender16x8) ? render16x8Pipe_ : renderPipe_);
+    const uint32_t renderWgX = (exps & (kExpRender16x16 | kExpRender16x8)) ? 16 : 8;
+    const uint32_t renderWgY = (exps & kExpRender16x16) ? 16 : 8;
+    VkPipeline cleanPipe = (exps & kExpClean16x16) ? clean16x16Pipe_ : ((exps & kExpClean8x8) ? clean8x8Pipe_ : cleanPipe_);
+    const uint32_t cleanWgX = (exps & kExpClean8x8) && !(exps & kExpClean16x16) ? 8 : 16;
+    const uint32_t cleanWgY = (exps & kExpClean16x16) ? 16 : 8;
     VkCommandBuffer cb = s.cmd;
     vkResetCommandBuffer(cb, 0);
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -1125,7 +1149,8 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
         auto dispatchGreen = [&](VkPipeline pipe) {
             vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
             vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, greenPipeLayout_, 0, 1, &s.greenSet, 0, nullptr);
-            vkCmdDispatch(cb, static_cast<uint32_t>((g.rawW / 2 + 15) / 16), static_cast<uint32_t>((g.rawH / 2 + 15) / 16), 1);
+            const uint32_t tileX = pipe == greenPipe ? greenTileX : 16; // probes use the normal tiles
+            vkCmdDispatch(cb, (static_cast<uint32_t>(g.rawW / 2) + tileX - 1) / tileX, static_cast<uint32_t>((g.rawH / 2 + 15) / 16), 1);
         };
         // Probes 7/8: a partial HQ pass first (its output is overwritten).
         VkPipeline probe = repeat == 7 ? greenProbe1Pipe_ : (repeat == 8 ? greenProbe2Pipe_ : VK_NULL_HANDLE);
@@ -1134,7 +1159,7 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
             vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
                                  1, &passDone, 0, nullptr, 0, nullptr);
         }
-        runPass(1, [&] { dispatchGreen(greenPipe_); });
+        runPass(1, [&] { dispatchGreen(greenPipe); });
         VkImageMemoryBarrier detailReady = imageBarrier(greenImage_.image, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
                                                         VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
         vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
@@ -1178,9 +1203,10 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
 
     if (queryPool_) vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool_, q0 + 2);
     runPass(3, [&] {
-        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cleanPipe_);
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cleanPipe);
         vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cleanPipeLayout_, 0, 1, &s.cleanSets[pingParity_], 0, nullptr);
-        vkCmdDispatch(cb, static_cast<uint32_t>((g.rawW / 2 + 15) / 16), static_cast<uint32_t>((g.rawH / 2 + 7) / 8), 1);
+        vkCmdDispatch(cb, (static_cast<uint32_t>(g.rawW / 2) + cleanWgX - 1) / cleanWgX,
+                      (static_cast<uint32_t>(g.rawH / 2) + cleanWgY - 1) / cleanWgY, 1);
     });
 
     VkImageMemoryBarrier cleanReady = imageBarrier(pingPong(pingParity_).image, VK_ACCESS_SHADER_WRITE_BIT,
@@ -1192,9 +1218,10 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
 
     if (queryPool_) vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool_, q0 + 3);
     runPass(4, [&] {
-        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, renderPipe_);
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, renderPipe);
         vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, renderPipeLayout_, 0, 1, &s.renderSets[pingParity_], 0, nullptr);
-        vkCmdDispatch(cb, static_cast<uint32_t>((g.outW / 2 + 7) / 8), static_cast<uint32_t>((g.outH / 2 + 7) / 8), 1);
+        vkCmdDispatch(cb, (static_cast<uint32_t>(g.outW / 2) + renderWgX - 1) / renderWgX,
+                      (static_cast<uint32_t>(g.outH / 2) + renderWgY - 1) / renderWgY, 1);
     });
 
     if (window_) {

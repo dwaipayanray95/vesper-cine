@@ -356,8 +356,15 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     ('All on, + HQ load', 7),
     ('All on, + HQ load+demos', 8),
   ];
-  // Opt-in experiments: (label, VulkanEngine::kExp* bit). None pending.
-  static const List<(String, int)> _benchExperiments = [];
+  // Opt-in experiments: (label, VulkanEngine::kExp* bit).
+  static const List<(String, int)> _benchExperiments = [
+    ('Exp: HQ exact vignetting', 32),
+    ('Exp: HQ exact + wide tiles', 1),
+    ('Exp: render 16x8', 2),
+    ('Exp: render 16x16', 4),
+    ('Exp: NR 16x16', 8),
+    ('Exp: NR 8x8', 16),
+  ];
   // The guard's first step: motion search every 4th frame instead of every 2nd.
   static const _benchAlignReduced = 'All on, align every 4th';
 

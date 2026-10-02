@@ -48,14 +48,41 @@ layout(set = 0, binding = 4, rgba16f) uniform readonly image2D quadImage;
 // Tile: 16x16 quads = 32x32 raw px. Filter reach +-3.5 px -> green needed for
 // px -4..35 (40x40); Hamilton-Adams reach +-2 px -> raw rows -6..37 (44) and
 // raw columns -8..39 (48: whole RAW10 groups, so loads start on a group).
-const int Q = 16, T = 2 * Q;
-const int GB = 4, GN = T + 2 * GB;      // green: px -4..35 (40)
-const int RBX = 8, RNX = T + 2 * RBX;   // raw cols: -8..39 (48)
+// HQ_WIDE (benchmark experiment): 32x16-quad tiles (64x32 px, the same 256
+// threads with two output columns each), so the halo is shared by twice the
+// width: raw loaded 1.72x instead of 2.06x the output, green 1.41x vs 1.56x.
+// HQ_WIDE always comes with HQ_EXACT_SHADING (below), so its output is
+// identical to 32-px tiles with exact shading.
+//
+// HQ_EXACT_SHADING (benchmark experiment, a quality fix): lens shading for
+// every raw pixel at its own position, exactly as the map interpolates there
+// (from the few map nodes around the tile, cached in shared memory), instead
+// of one value per 32x32 block. The block value mismatched the quad image's
+// smooth shading by up to the map's gradient over 16 px, which leaked into
+// the detail (D = HQ - quad green) near strong edges towards the corners.
+#ifdef HQ_WIDE
+#define HQ_EXACT_SHADING
+const int QX = 32;
+#else
+const int QX = 16;
+#endif
+const int Q = 16, T = 2 * Q, TX = 2 * QX;
+const int GB = 4, GN = T + 2 * GB, GNX = TX + 2 * GB; // green: rows -4..35 (40), cols -4..TX+3
+const int RBX = 8, RNX = TX + 2 * RBX;  // raw cols: -8..TX+7 (48 / 80)
 const int RBY = 6, RNY = T + 2 * RBY;   // raw rows: -6..37 (44)
 const int NT = Q * Q;
-shared HF sRaw[RNX * RNY];           // 2112; later reused for row-filter results (GN x Q = 640)
-shared HF sGreen[GN * GN];           // 1600
-shared vec4 sShade;
+const int NB = TX / T;               // 32x32 shading blocks per tile
+shared HF sRaw[RNX * RNY];           // 2112 / 3520; later reused for row-filter results (GN x QX = 640 / 1280)
+shared HF sGreen[GNX * GN];          // 1600 / 2880
+shared vec4 sShade[NB];
+#ifdef HQ_EXACT_SHADING
+// Map nodes covering the tile and its halo (map cells are ~125 px on the
+// phone: 2x2 cells, 3x3 nodes; up to 4x4 cached, else read from the buffer).
+const int kNodes = 4;
+shared vec4 sNode[kNodes * kNodes];
+shared ivec2 sNode0;
+shared int sNodeOk;
+#endif
 
 const HF K[8] = HF[8](HF(-0.024), HF(-0.056), HF(0.153), HF(0.427), HF(0.427), HF(0.153), HF(-0.056), HF(-0.024));
 
@@ -92,22 +119,74 @@ vec4 shadingAt(vec2 rawPos) {
 // the demosaic): a partial run whose cost shows where the pass spends its
 // time. Its output is overwritten by the real HQ pass that follows.
 void probeStore(ivec2 tile, int lid) {
-    ivec2 q = tile * Q + ivec2(gl_LocalInvocationID.xy);
+    ivec2 q = tile * ivec2(QX, Q) + ivec2(gl_LocalInvocationID.xy);
     if (q.x < P.quadInfo.x && q.y < P.quadInfo.y)
         imageStore(detailImage, q, vec4(float(sRaw[lid]) + float(sGreen[lid]), 0.0, 0.0, 0.0));
 }
 #endif
 
+#ifdef HQ_EXACT_SHADING
+vec4 mapNode(int c, int r) {
+    int idx = (r * P.quadInfo.z + c) * 4;
+    return vec4(shading.gains[idx], shading.gains[idx + 1], shading.gains[idx + 2], shading.gains[idx + 3]);
+}
+// Map position (in nodes) of a raw position, as shadingAt computes it.
+vec2 mapPos(vec2 rawPos) {
+    int cols = P.quadInfo.z, rows = P.quadInfo.w;
+    return clamp(rawToArray(rawPos) / P.arrayInfo.xy * vec2(cols - 1, rows - 1), vec2(0.0), vec2(cols - 1, rows - 1));
+}
+// shadingAt(rawPos), with the four nodes from the tile's cache when it holds them.
+vec4 shadingExact(vec2 rawPos) {
+    int cols = P.quadInfo.z, rows = P.quadInfo.w;
+    if (cols < 2 || rows < 2) return vec4(1.0);
+    vec2 g = mapPos(rawPos);
+    ivec2 i0 = min(ivec2(g), ivec2(cols - 2, rows - 2));
+    vec2 f = g - vec2(i0);
+    vec4 s[4];
+    ivec2 c = i0 - sNode0;
+    if (sNodeOk != 0 && all(greaterThanEqual(c, ivec2(0))) && all(lessThan(c, ivec2(kNodes - 1)))) {
+        for (int k = 0; k < 4; ++k) s[k] = sNode[(c.y + (k >> 1)) * kNodes + c.x + (k & 1)];
+    } else {
+        for (int k = 0; k < 4; ++k) s[k] = mapNode(i0.x + (k & 1), i0.y + (k >> 1));
+    }
+    return mix(mix(s[0], s[1], f.x), mix(s[2], s[3], f.x), f.y);
+}
+#endif
+
 HF R(int x, int y) { return sRaw[(y + RBY) * RNX + (x + RBX)]; } // tile-relative raw px
-HF G(int x, int y) { return sGreen[(y + GB) * GN + (x + GB)]; } // tile-relative green
+HF G(int x, int y) { return sGreen[(y + GB) * GNX + (x + GB)]; } // tile-relative green
 
 void main() {
     const ivec2 tile = ivec2(gl_WorkGroupID.xy);
-    const ivec2 org = tile * T;                     // tile origin, raw px (multiple of 32)
+    const ivec2 org = tile * ivec2(TX, T);          // tile origin, raw px (multiple of 32)
     const int lid = int(gl_LocalInvocationIndex);   // 0..255
-    if (lid == 0) sShade = shadingAt(vec2(org) + vec2(T * 0.5)); // once per tile, not per thread
+#ifdef HQ_EXACT_SHADING
+    if (lid == 0) {
+        // Nodes for every pixel the tile loads (clamped to the frame, like the loads).
+        int cols = P.quadInfo.z, rows = P.quadInfo.w;
+        sNodeOk = 0;
+        if (cols >= 2 && rows >= 2) {
+            vec2 lo = clamp(vec2(org - ivec2(RBX, RBY)), vec2(0.0), vec2(P.rawInfo.xy - 1)) + 0.5;
+            vec2 hi = clamp(vec2(org + ivec2(TX + RBX - 1, T + RBY - 1)), vec2(0.0), vec2(P.rawInfo.xy - 1)) + 0.5;
+            // The array mapping may flip an axis: take the node range over all four corners.
+            ivec2 a = min(ivec2(mapPos(lo)), ivec2(cols - 2, rows - 2)), b = min(ivec2(mapPos(hi)), ivec2(cols - 2, rows - 2));
+            ivec2 c = min(ivec2(mapPos(vec2(lo.x, hi.y))), ivec2(cols - 2, rows - 2)), d = min(ivec2(mapPos(vec2(hi.x, lo.y))), ivec2(cols - 2, rows - 2));
+            ivec2 n0 = min(min(a, b), min(c, d)), n1 = max(max(a, b), max(c, d)) + 1;
+            sNode0 = n0;
+            if (all(lessThan(n1 - n0, ivec2(kNodes)))) {
+                for (int r = n0.y; r <= n1.y; ++r)
+                    for (int col = n0.x; col <= n1.x; ++col) sNode[(r - n0.y) * kNodes + (col - n0.x)] = mapNode(col, r);
+                sNodeOk = 1;
+            }
+        }
+    }
+#else
+    if (lid < NB) sShade[lid] = shadingAt(vec2(org) + vec2(float(T * lid) + T * 0.5, T * 0.5)); // per block, not per thread
+#endif
     barrier();
-    const vec4 sh = sShade;
+#ifndef HQ_EXACT_SHADING
+    const vec4 sh = sShade[0];
+#endif
     const int groupsPerRow = (P.rawInfo.x + 3) / 4;
 
     // 1. Raw -> shared, one RAW10 group (4 px, 5 bytes = 2 word reads) per step.
@@ -129,6 +208,9 @@ void main() {
         const int ry = row - RBY;
         const bool greenRow = ry >= -GB && ry < T + GB;
         for (int b = 0; b < 4; ++b) {
+#ifdef HQ_EXACT_SHADING
+            const vec4 sh = shadingExact(vec2(grp * 4 + b, y) + 0.5); // the pixel actually loaded
+#endif
             float dn = float((((lo >> (8u * uint(b))) & 0xFFu) << 2) | ((b4 >> (2 * b)) & 3u));
             int x = grp * 4 + b;
             int site = cfaSite(x & 1, ay & 1);
@@ -142,8 +224,8 @@ void main() {
             // step 2 only has to interpolate the red/blue sites.
             const int rx = gx * 4 + b - RBX;
             const int ns = cfaSite(rx & 1, ry & 1);
-            if (greenRow && rx >= -GB && rx < T + GB && (ns == 1 || ns == 2))
-                sGreen[(ry + GB) * GN + (rx + GB)] = val;
+            if (greenRow && rx >= -GB && rx < TX + GB && (ns == 1 || ns == 2))
+                sGreen[(ry + GB) * GNX + (rx + GB)] = val;
         }
     }
     barrier();
@@ -155,9 +237,9 @@ void main() {
     // 2. Full-resolution green (Hamilton-Adams) over the filter support.
     // Only the red/blue half of the sites: every thread runs the same
     // interpolation (no idle lanes waiting on neighbours that just copy).
-    for (int i = lid; i < GN * GN / 2; i += NT) {
-        int y = i / (GN / 2) - GB;
-        int x = 2 * (i % (GN / 2)) - GB;
+    for (int i = lid; i < GNX * GN / 2; i += NT) {
+        int y = i / (GNX / 2) - GB;
+        int x = 2 * (i % (GNX / 2)) - GB;
         int s0 = cfaSite(0, y & 1);           // org is even: tile-relative parity is the CFA parity
         x += (s0 == 1 || s0 == 2) ? 1 : 0;    // the row's non-green column parity
         HF c = R(x, y);
@@ -171,7 +253,7 @@ void main() {
         HF g = dH < dV ? gH : (dV < dH ? gV : HF(0.5) * (gH + gV));
         HF lo = min(min(gl, gr), min(gu, gd)), hi = max(max(gl, gr), max(gu, gd));
         g = clamp(g, lo, hi); // no overshoot: edges stay halo-free
-        sGreen[(y + GB) * GN + (x + GB)] = g;
+        sGreen[(y + GB) * GNX + (x + GB)] = g;
     }
     barrier();
 #if defined(HQ_PROBE) && HQ_PROBE == 2
@@ -180,21 +262,23 @@ void main() {
 #endif
 
     // 3a. Horizontal filter: quad column qx covers px 2qx, 2qx+1; taps at px 2qx-3 .. 2qx+4.
-    for (int i = lid; i < GN * Q; i += NT) {
-        int row = i / Q, qx = i % Q;
+    for (int i = lid; i < GN * QX; i += NT) {
+        int row = i / QX, qx = i % QX;
         HF acc = HF(0.0);
-        for (int k = 0; k < 8; ++k) acc += K[k] * sGreen[row * GN + (2 * qx - 3 + k + GB)];
+        for (int k = 0; k < 8; ++k) acc += K[k] * sGreen[row * GNX + (2 * qx - 3 + k + GB)];
         sRaw[i] = acc; // raw data is no longer needed
     }
     barrier();
 
     // 3b. Vertical filter + 4. detail against the quad image.
     ivec2 lq = ivec2(gl_LocalInvocationID.xy);
-    ivec2 q = tile * Q + lq;
-    if (q.x >= P.quadInfo.x || q.y >= P.quadInfo.y) return;
-    HF hqh = HF(0.0);
-    for (int k = 0; k < 8; ++k) hqh += K[k] * sRaw[(2 * lq.y - 3 + k + GB) * Q + lq.x];
-    float hq = float(hqh);
-    float gq = imageLoad(quadImage, q).g;
-    imageStore(detailImage, q, vec4(hq - gq, 0.0, 0.0, 0.0));
+    for (int cx = lq.x; cx < QX; cx += Q) {
+        ivec2 q = tile * ivec2(QX, Q) + ivec2(cx, lq.y);
+        if (q.x >= P.quadInfo.x || q.y >= P.quadInfo.y) continue;
+        HF hqh = HF(0.0);
+        for (int k = 0; k < 8; ++k) hqh += K[k] * sRaw[(2 * lq.y - 3 + k + GB) * QX + cx];
+        float hq = float(hqh);
+        float gq = imageLoad(quadImage, q).g;
+        imageStore(detailImage, q, vec4(hq - gq, 0.0, 0.0, 0.0));
+    }
 }

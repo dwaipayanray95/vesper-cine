@@ -16,7 +16,12 @@
 //     so handheld shake and pans are denoised too instead of just rejected.
 // Noise model: raw variance = S * x + O (x normalised raw), then scaled by
 // each channel's white-balance gain. Luma = (R + Gr + Gb + B) / 4.
-layout(local_size_x = 16, local_size_y = 8) in;
+// Workgroup size: 16x8 normally; CLEAN_WG_X/Y variants are benchmark experiments.
+#ifndef CLEAN_WG_X
+#define CLEAN_WG_X 16
+#define CLEAN_WG_Y 8
+#endif
+layout(local_size_x = CLEAN_WG_X, local_size_y = CLEAN_WG_Y) in;
 
 #include "frame_params.glsl"
 
@@ -42,7 +47,7 @@ float luma(vec3 c) { return dot(c, vec3(0.25, 0.5, 0.25)); }
 // memory: the 3x3 and 5x5 neighbourhoods below read from here instead of
 // issuing ~34 image loads per texel.
 const int kApron = 2;
-const int kTileW = 16 + 2 * kApron, kTileH = 8 + 2 * kApron;
+const int kTileW = CLEAN_WG_X + 2 * kApron, kTileH = CLEAN_WG_Y + 2 * kApron;
 shared vec3 sTile[kTileH][kTileW];
 vec3 nb(ivec2 local, int dx, int dy) { return sTile[local.y + kApron + dy][local.x + kApron + dx]; }
 // The G of a quad is already the mean of two photosites (half the variance).
@@ -55,8 +60,8 @@ void main() {
     ivec2 q = ivec2(gl_GlobalInvocationID.xy);
     ivec2 local = ivec2(gl_LocalInvocationID.xy);
     ivec2 size = P.quadInfo.xy;
-    ivec2 origin = ivec2(gl_WorkGroupID.xy) * ivec2(16, 8) - kApron;
-    for (uint i = gl_LocalInvocationIndex; i < uint(kTileW * kTileH); i += 128u) {
+    ivec2 origin = ivec2(gl_WorkGroupID.xy) * ivec2(CLEAN_WG_X, CLEAN_WG_Y) - kApron;
+    for (uint i = gl_LocalInvocationIndex; i < uint(kTileW * kTileH); i += uint(CLEAN_WG_X * CLEAN_WG_Y)) {
         ivec2 t = ivec2(int(i) % kTileW, int(i) / kTileW);
         sTile[t.y][t.x] = imageLoad(quadIn, clamp(origin + t, ivec2(0), size - 1)).rgb;
     }

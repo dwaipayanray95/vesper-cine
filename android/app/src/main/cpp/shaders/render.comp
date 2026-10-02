@@ -7,7 +7,12 @@
 //   camera RGB -> scene-linear Rec.2020 (DNG forward matrix, Bradford D50->D65)
 //              -> Apple Log  (recording master)
 //              -> Rec.709 display transform + monitoring overlays (viewfinder)
-layout(local_size_x = 8, local_size_y = 8) in;
+// Workgroup size: 8x8 normally; RENDER_WG_X/Y variants are benchmark experiments.
+#ifndef RENDER_WG_X
+#define RENDER_WG_X 8
+#define RENDER_WG_Y 8
+#endif
+layout(local_size_x = RENDER_WG_X, local_size_y = RENDER_WG_Y) in;
 
 #include "frame_params.glsl"
 
