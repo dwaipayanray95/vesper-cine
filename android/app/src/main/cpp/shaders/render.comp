@@ -149,13 +149,6 @@ vec3 sharpen(vec3 cam, vec2 rawPos) {
     float c = cq.g;
     float shadeGain = cq.a > 0.5 ? 1.0 : max(cq.a * 10.0, 1.0); // corners are amplified (noisier)
     float blur = 0.0;
-#ifdef VESPER_PREV
-    for (int j = -1; j <= 1; ++j)
-        for (int i = -1; i <= 1; ++i) {
-            float w = (i == 0 ? 2.0 : 1.0) * (j == 0 ? 2.0 : 1.0);
-            blur += w * texelFetch(quadTex, clamp(q + ivec2(i, j), ivec2(0), qmax), 0).g;
-        }
-#else
     // The 3x3 greens from four 2x2 gathers (4 texture reads instead of 9).
     // A gather at the corner shared by texels (x, y) and (x + 1, y + 1) returns
     // them as .w (x, y), .z (x + 1, y), .x (x, y + 1), .y (x + 1, y + 1);
@@ -174,7 +167,6 @@ vec3 sharpen(vec3 cam, vec2 rawPos) {
             float w = (i == 0 ? 2.0 : 1.0) * (j == 0 ? 2.0 : 1.0);
             blur += w * g3[(j + 1) * 3 + i + 1];
         }
-#endif
     blur /= 16.0;
     float detail = c - blur;
     float sigma = shadeGain * sqrt(max(P.noise.z * blur / shadeGain + P.noise.w, 1e-9)) * 0.6; // noise of (c - blur)

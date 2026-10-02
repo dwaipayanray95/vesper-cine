@@ -96,11 +96,14 @@ public:
     bool noiseReductionThrottled() const { return nrThrottled_; }
     // HQ oversampled luma: unsupported on this GPU, or paused by the budget guard.
     bool oversamplingAvailable() const { return hqSupported_ && !hqThrottled_; }
-    // GPU benchmark A/B: run older shaders (compile_shaders.sh *_prev variants,
-    // code under #ifdef VESPER_PREV) instead of the current ones. Level 0 =
-    // current; each pass's previous variant is used from its kPrevLevel* up,
-    // so level 1 undoes only the latest optimisation step, level 2 all of them.
-    void setPreviousShaders(int level) { prevLevel_ = level; }
+    // GPU benchmark A/B: undo recent optimisation steps (shader variants from
+    // code under #ifdef VESPER_PREV, or engine paths). Level 0 = current; each
+    // step is undone from its kPrevLevel* up (1 = the latest step only).
+    void setPreviousSteps(int level) { prevLevel_ = level; }
+    // GPU benchmark pass-cost probe: dispatch one pass a second time (same
+    // inputs, same output) so the frame-time increase is that pass's cost.
+    // -1 off, 0 unpack, 1 HQ, 2 alignment, 3 clean (NR), 4 render.
+    void setRepeatPass(int pass) { repeatPass_ = pass; }
 
     // Blocks until the slot's GPU work is done, then returns its P010 bytes
     // (Y plane of outW*outH uint16, then interleaved CbCr of outW*outH/2 uint16).
@@ -114,6 +117,7 @@ private:
         void* mapped = nullptr;
         VkDeviceSize size = 0;
         bool coherent = true;
+        uint32_t memType = 0;
     };
     struct Image {
         VkImage image = VK_NULL_HANDLE;
@@ -122,6 +126,7 @@ private:
     };
     struct Slot {
         Buffer raw, shading, params, p010, vfReadback;
+        Buffer rawDev; // device-local copy of `raw`, read by unpack + HQ (see kPrevLevelRawCopy)
         VkCommandBuffer cmd = VK_NULL_HANDLE;
         VkFence fence = VK_NULL_HANDLE;
         VkSemaphore acquireSem = VK_NULL_HANDLE;
@@ -132,6 +137,7 @@ private:
         VkDescriptorSet alignSets[2] = {};
         VkDescriptorSet renderSets[2] = {};
         VkDescriptorSet greenSet = VK_NULL_HANDLE;
+        VkDescriptorSet unpackSetHost = VK_NULL_HANDLE, greenSetHost = VK_NULL_HANDLE; // read `raw` directly (A/B)
         bool vfReadbackPending = false;
         bool encoderHold = false; // guarded by encoderMutex_
         bool timed = false;       // timestamp queries were written for this slot's last frame
@@ -162,6 +168,8 @@ private:
     void flushSubmits(); // waits until every queued job has been submitted
 
     bool createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, bool hostCached, Buffer& out);
+    bool createDeviceBuffer(VkDeviceSize size, VkBufferUsageFlags usage, Buffer& out);
+    void writeRawDescriptors(Slot& s, VkDescriptorSet unpackSet, VkDescriptorSet greenSet, const Buffer& raw);
     void destroyBuffer(Buffer& b);
     bool createImage(uint32_t w, uint32_t h, VkFormat fmt, VkImageUsageFlags usage, Image& out);
     void destroyImage(Image& img);
@@ -195,10 +203,8 @@ private:
     VkPipeline alignPipe_ = VK_NULL_HANDLE;
     VkPipelineLayout unpackPipeLayout_ = VK_NULL_HANDLE, cleanPipeLayout_ = VK_NULL_HANDLE, renderPipeLayout_ = VK_NULL_HANDLE;
     VkPipeline unpackPipe_ = VK_NULL_HANDLE, cleanPipe_ = VK_NULL_HANDLE, renderPipe_ = VK_NULL_HANDLE;
-    VkPipeline greenPrevPipe_ = VK_NULL_HANDLE, renderPrevPipe_ = VK_NULL_HANDLE, cleanPrevPipe_ = VK_NULL_HANDLE; // benchmark A/B (setPreviousShaders)
-    std::atomic<int> prevLevel_{0};
-    static constexpr int kPrevLevelClean = 1;       // v0.11.4: TNR history window, 16-bit tile + luma in shared
-    static constexpr int kPrevLevelRenderGreen = 2; // v0.11.3: HQ red/blue-only demosaic, sharpening gathers
+    std::atomic<int> prevLevel_{0}, repeatPass_{-1};
+    static constexpr int kPrevLevelRawCopy = 1; // v0.11.5: raw copied to device-local memory before unpack/HQ
     VkSampler sampler_ = VK_NULL_HANDLE;
 
     Slot slots_[kRingSize];

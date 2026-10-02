@@ -1259,10 +1259,16 @@ EXPORT void vesper_set_budget_guard(int32_t enable) {
     if (gGpu) gGpu->setBudgetGuard(enable != 0);
 }
 
-// GPU benchmark A/B (developer tool): 0 = current shaders, 1 = without the
+// GPU benchmark A/B (developer tool): 0 = current GPU path, 1 = without the
 // latest optimisation step, 2 = without the last two (see VulkanEngine).
-EXPORT void vesper_set_previous_shaders(int32_t level) {
-    if (gGpu) gGpu->setPreviousShaders(level);
+EXPORT void vesper_set_previous_steps(int32_t level) {
+    if (gGpu) gGpu->setPreviousSteps(level);
+}
+
+// GPU benchmark pass-cost probe (developer tool): run one pass twice per
+// frame (-1 off, 0 unpack, 1 HQ, 2 alignment, 3 NR, 4 render).
+EXPORT void vesper_set_repeat_pass(int32_t pass) {
+    if (gGpu) gGpu->setRepeatPass(pass);
 }
 
 // HQ oversampling: luma rebuilt from the full-resolution sensor and

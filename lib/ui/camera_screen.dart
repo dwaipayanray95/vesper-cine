@@ -339,27 +339,34 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   }
 
   // --- GPU benchmark (developer tool) --------------------------------------
-  // A/B baselines (VulkanEngine::setPreviousShaders levels 1 and 2).
-  static const _benchPrev1 = 'All on, 0.11.3 shaders';
-  static const _benchPrev2 = 'All on, 0.11.2 shaders';
-
   // Measures the GPU time of each optional pass on this phone: every feature
-  // alone, then all together, with the budget guard off. Then an A/B of the
-  // current shaders against the two previous optimisation steps (new, older,
-  // oldest, new again, so a slow drift such as the phone warming up cancels
-  // out). Settings are
-  // restored afterwards. Results are shown and printed to logcat (VesperBench).
+  // alone, then all together, with the budget guard off. Then, with
+  // everything on: each GPU pass run twice per frame (the increase is that
+  // pass's cost; per-pass GPU timestamps are useless on this GPU), and an A/B
+  // against the GPU path before the latest optimisation step(s). Everything
+  // on is measured again at the end and the two runs averaged, so a slow
+  // drift (the phone warming up) cancels out. Settings are restored
+  // afterwards. Results are shown and printed to the app log (VesperBench).
+  static const _benchPasses = ['unpack', 'HQ', 'align', 'NR', 'render'];
+  // A/B baselines: (label, VulkanEngine::setPreviousSteps level).
+  static const _benchPrev = [('All on, no raw copy', 1)];
+
   Future<void> _runGpuBenchmark() async {
     if (_benchmarking || !_streaming || _recording) return;
     setState(() => _benchmarking = true);
-    void apply({bool hq = false, int sharp = 0, double tnr = 0, double cnr = 0, bool align = false, int prev = 0}) {
+    void apply({bool hq = false, int sharp = 0, double tnr = 0, double cnr = 0, bool align = false,
+        int prev = 0, int repeat = -1}) {
       _engine.setOversampling(hq);
       _engine.setSharpening(sharp);
       _engine.setTemporalNr(tnr);
       _engine.setChromaNr(cnr);
       _engine.setNrAlignment(align);
-      _engine.setPreviousShaders(prev);
+      _engine.setPreviousSteps(prev);
+      _engine.setRepeatPass(repeat);
     }
+
+    void allOn({int prev = 0, int repeat = -1}) =>
+        apply(hq: true, sharp: 1, tnr: 0.7, cnr: 0.5, align: true, prev: prev, repeat: repeat);
 
     _engine.setBudgetGuard(false);
     final configs = <(String, void Function())>[
@@ -369,10 +376,10 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       ('Chroma NR', () => apply(cnr: 0.5)),
       ('Temporal NR', () => apply(tnr: 0.7)),
       ('Temporal NR + align', () => apply(tnr: 0.7, align: true)),
-      ('Everything on', () => apply(hq: true, sharp: 1, tnr: 0.7, cnr: 0.5, align: true)),
-      (_benchPrev1, () => apply(hq: true, sharp: 1, tnr: 0.7, cnr: 0.5, align: true, prev: 1)),
-      (_benchPrev2, () => apply(hq: true, sharp: 1, tnr: 0.7, cnr: 0.5, align: true, prev: 2)),
-      ('Everything on (again)', () => apply(hq: true, sharp: 1, tnr: 0.7, cnr: 0.5, align: true)),
+      ('Everything on', () => allOn()),
+      for (var p = 0; p < _benchPasses.length; p++) ('All on, ${_benchPasses[p]} x2', () => allOn(repeat: p)),
+      for (final (label, level) in _benchPrev) (label, () => allOn(prev: level)),
+      ('Everything on (again)', () => allOn()),
     ];
     final results = <String>[];
     final measured = <String, double>{};
@@ -399,15 +406,28 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       _engine.log(line, tag: 'VesperBench');
     }
     final newA = measured['Everything on'], newB = measured['Everything on (again)'];
-    for (final prev in [_benchPrev1, _benchPrev2]) {
-      final prevMs = measured[prev];
-      if (prevMs == null || newA == null || newB == null) continue;
-      final saved = prevMs - (newA + newB) / 2;
-      final line = 'A/B vs ${prev.substring(8)}: ${saved >= 0 ? 'save' : 'cost'} ${saved.abs().toStringAsFixed(1)} ms';
-      results.add(line);
-      _engine.log(line, tag: 'VesperBench');
+    if (newA != null && newB != null) {
+      final allOnMs = (newA + newB) / 2;
+      final costs = [
+        for (final p in _benchPasses)
+          if (measured['All on, $p x2'] != null) '$p ${(measured['All on, $p x2']! - allOnMs).toStringAsFixed(1)}',
+      ];
+      final summary = [
+        'Pass costs (ms): ${costs.join(', ')}',
+        for (final (label, _) in _benchPrev)
+          if (measured[label] != null)
+            () {
+              final saved = measured[label]! - allOnMs;
+              return 'A/B vs ${label.substring(8)}: new ${saved >= 0 ? 'saves' : 'costs'} ${saved.abs().toStringAsFixed(1)} ms';
+            }(),
+      ];
+      for (final line in summary) {
+        results.add(line);
+        _engine.log(line, tag: 'VesperBench');
+      }
     }
-    _engine.setPreviousShaders(0);
+    _engine.setPreviousSteps(0);
+    _engine.setRepeatPass(-1);
     // Restore the user's settings.
     _engine.setOversampling(_oversampling);
     _engine.setSharpening(_sharpening);
@@ -425,6 +445,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF14171D),
+        scrollable: true, // long result list on a landscape phone
         title: Text(
           'GPU benchmark · budget ${budget.toStringAsFixed(1)} ms @ ${_fpsLabel(_fps)} fps',
           style: const TextStyle(color: Colors.white, fontSize: 14),

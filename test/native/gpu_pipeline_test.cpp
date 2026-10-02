@@ -555,32 +555,41 @@ int main() {
         std::printf("  frame time (lavapipe): HQ off %.1f ms, HQ on %.1f ms (+%.0f%%)\n", off, on, 100 * (on / off - 1));
     }
 
-    // 10. Benchmark A/B: the previous shaders (compile_shaders.sh *_prev) must
-    //     run, and the printed difference shows what the current optimisation
-    //     changes in the recording (0 = bit-identical).
+    // 10. Benchmark tools: the A/B baseline (previous GPU path) and the
+    //     pass-cost probe (a pass dispatched twice) must run; the printed
+    //     differences show what they change in the recording (0 = identical).
     {
         FrameParams ap = baseParams(0);
         ap.flags[3] = 16 | 1;
         ap.cleanFlags[0] = 1; ap.cleanFlags[1] = 1; ap.cleanFlags[3] = 1;
         ap.noise[0] = 0.7f; ap.noise[1] = 0.5f; ap.noise[2] = 2e-4f; ap.noise[3] = 2e-6f;
-        auto runSeq = [&](int prev, std::vector<uint16_t>& out) {
-            gpu.setPreviousShaders(prev);
+        auto runSeq = [&](int prev, int repeat, std::vector<uint16_t>& out) {
+            gpu.setPreviousSteps(prev);
+            gpu.setRepeatPass(repeat);
             P010 fr{};
-            bool ok = runFrame(gpu, raw, baseParams(0), nullptr, fr); // temporal NR off: both runs start without history
+            bool ok = runFrame(gpu, raw, baseParams(0), nullptr, fr); // temporal NR off: every run starts without history
             for (unsigned i = 0; i < 4; ++i) ok = runFrame(gpu, makeNoisyRaw10(TestScene(), 40 + i), ap, nullptr, fr) && ok;
             out.assign(fr.y, fr.y + OUT_W * OUT_H * 3 / 2);
             return ok;
         };
-        std::vector<uint16_t> cur, prev1, prev2;
-        bool ok = runSeq(0, cur) && runSeq(1, prev1) && runSeq(2, prev2);
-        gpu.setPreviousShaders(0);
-        int d1 = 0, d2 = 0;
-        for (size_t i = 0; i < cur.size(); ++i) {
-            d1 = std::max(d1, std::abs((cur[i] >> 6) - (prev1[i] >> 6)));
-            d2 = std::max(d2, std::abs((cur[i] >> 6) - (prev2[i] >> 6)));
+        auto maxDiff = [](const std::vector<uint16_t>& a, const std::vector<uint16_t>& b) {
+            int d = 0;
+            for (size_t i = 0; i < a.size(); ++i) d = std::max(d, std::abs((a[i] >> 6) - (b[i] >> 6)));
+            return d;
+        };
+        std::vector<uint16_t> cur, other;
+        bool ok = runSeq(0, -1, cur);
+        ok = runSeq(1, -1, other) && ok;
+        std::printf("  A/B previous GPU path: max difference %d codes (everything on)\n", maxDiff(cur, other));
+        int repeatDiff = 0;
+        for (int pass = 0; pass < 5; ++pass) {
+            ok = runSeq(0, pass, other) && ok;
+            repeatDiff = std::max(repeatDiff, maxDiff(cur, other));
         }
-        std::printf("  A/B previous shaders: max difference %d / %d codes (levels 1 / 2, everything on)\n", d1, d2);
-        check(ok, "previous shaders (benchmark A/B) run", ok, 1);
+        gpu.setPreviousSteps(0);
+        gpu.setRepeatPass(-1);
+        check(ok, "benchmark A/B and pass-cost probe frames run", ok, 1);
+        check(repeatDiff == 0, "pass-cost probe (a pass run twice) leaves the output unchanged", repeatDiff, 0);
     }
 
     // 7. Ring: many frames in a row must all complete (fence/slot reuse).

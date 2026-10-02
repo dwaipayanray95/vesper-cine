@@ -7,11 +7,6 @@
 #include "shaders/green_rgba_fp16_spv.h"
 #include "shaders/green_spv.h"
 #include "shaders/green_rgba_spv.h"
-#include "shaders/clean_fp16_spv.h"
-#include "shaders/clean_prev_spv.h"
-#include "shaders/render_prev_spv.h"
-#include "shaders/green_prev_spv.h"
-#include "shaders/green_fp16_prev_spv.h"
 
 #include <algorithm>
 #include <cmath>
@@ -254,7 +249,7 @@ bool VulkanEngine::createPipelines() {
         {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 6 * kRingSize},
     };
     VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    dpi.maxSets = 8 * kRingSize; // unpack + green, and render/clean/align per ping-pong parity
+    dpi.maxSets = 10 * kRingSize; // unpack + green (device + host raw), and render/clean/align per ping-pong parity
     dpi.poolSizeCount = 4;
     dpi.pPoolSizes = sizes;
     if (vkCreateDescriptorPool(device_, &dpi, nullptr, &descPool_) != VK_SUCCESS) return false;
@@ -274,6 +269,9 @@ bool VulkanEngine::createPipelines() {
         }
         ai.pSetLayouts = &greenLayout_;
         if (vkAllocateDescriptorSets(device_, &ai, &s.greenSet) != VK_SUCCESS) return false;
+        if (vkAllocateDescriptorSets(device_, &ai, &s.greenSetHost) != VK_SUCCESS) return false;
+        ai.pSetLayouts = &unpackLayout_;
+        if (vkAllocateDescriptorSets(device_, &ai, &s.unpackSetHost) != VK_SUCCESS) return false;
     }
 
     VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
@@ -309,21 +307,14 @@ bool VulkanEngine::createPipelines() {
         return r == VK_SUCCESS;
     };
     return makePipe(kUnpackSpv, sizeof(kUnpackSpv), unpackLayout_, unpackPipeLayout_, unpackPipe_) &&
-           (fp16_ ? makePipe(kCleanFp16Spv, sizeof(kCleanFp16Spv), cleanLayout_, cleanPipeLayout_, cleanPipe_)
-                  : makePipe(kCleanSpv, sizeof(kCleanSpv), cleanLayout_, cleanPipeLayout_, cleanPipe_)) &&
-           makePipe(kCleanPrevSpv, sizeof(kCleanPrevSpv), cleanLayout_, cleanPipeLayout_, cleanPrevPipe_) &&
+           makePipe(kCleanSpv, sizeof(kCleanSpv), cleanLayout_, cleanPipeLayout_, cleanPipe_) &&
            makePipe(kAlignSpv, sizeof(kAlignSpv), alignLayout_, alignPipeLayout_, alignPipe_, sizeof(int32_t)) &&
            makePipe(kRenderSpv, sizeof(kRenderSpv), renderLayout_, renderPipeLayout_, renderPipe_) &&
            (hqFormat_ == VK_FORMAT_R16_SFLOAT
                 ? (fp16_ ? makePipe(kGreenFp16Spv, sizeof(kGreenFp16Spv), greenLayout_, greenPipeLayout_, greenPipe_)
                          : makePipe(kGreenSpv, sizeof(kGreenSpv), greenLayout_, greenPipeLayout_, greenPipe_))
                 : (fp16_ ? makePipe(kGreenRgbaFp16Spv, sizeof(kGreenRgbaFp16Spv), greenLayout_, greenPipeLayout_, greenPipe_)
-                         : makePipe(kGreenRgbaSpv, sizeof(kGreenRgbaSpv), greenLayout_, greenPipeLayout_, greenPipe_))) &&
-           makePipe(kRenderPrevSpv, sizeof(kRenderPrevSpv), renderLayout_, renderPipeLayout_, renderPrevPipe_) &&
-           // Previous green variant only for the R16F image (the phone's path); otherwise A/B uses the current one.
-           (hqFormat_ != VK_FORMAT_R16_SFLOAT ||
-            (fp16_ ? makePipe(kGreenFp16PrevSpv, sizeof(kGreenFp16PrevSpv), greenLayout_, greenPipeLayout_, greenPrevPipe_)
-                   : makePipe(kGreenPrevSpv, sizeof(kGreenPrevSpv), greenLayout_, greenPipeLayout_, greenPrevPipe_)));
+                         : makePipe(kGreenRgbaSpv, sizeof(kGreenRgbaSpv), greenLayout_, greenPipeLayout_, greenPipe_)));
 }
 
 void VulkanEngine::release() {
@@ -354,10 +345,6 @@ void VulkanEngine::release() {
     if (cleanPipe_) vkDestroyPipeline(device_, cleanPipe_, nullptr);
     if (alignPipe_) vkDestroyPipeline(device_, alignPipe_, nullptr);
     if (greenPipe_) vkDestroyPipeline(device_, greenPipe_, nullptr);
-    if (greenPrevPipe_) vkDestroyPipeline(device_, greenPrevPipe_, nullptr);
-    if (renderPrevPipe_) vkDestroyPipeline(device_, renderPrevPipe_, nullptr);
-    if (cleanPrevPipe_) vkDestroyPipeline(device_, cleanPrevPipe_, nullptr);
-    greenPrevPipe_ = renderPrevPipe_ = cleanPrevPipe_ = VK_NULL_HANDLE;
     if (greenPipeLayout_) vkDestroyPipelineLayout(device_, greenPipeLayout_, nullptr);
     if (greenLayout_) vkDestroyDescriptorSetLayout(device_, greenLayout_, nullptr);
     greenPipe_ = VK_NULL_HANDLE;
@@ -591,6 +578,27 @@ bool VulkanEngine::createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, boo
     if (vkMapMemory(device_, out.memory, 0, VK_WHOLE_SIZE, 0, &out.mapped) != VK_SUCCESS) return false;
     out.size = size;
     out.coherent = (memProps_.memoryTypes[type].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
+    out.memType = static_cast<uint32_t>(type);
+    return true;
+}
+
+bool VulkanEngine::createDeviceBuffer(VkDeviceSize size, VkBufferUsageFlags usage, Buffer& out) {
+    VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bi.size = size;
+    bi.usage = usage;
+    bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (vkCreateBuffer(device_, &bi, nullptr, &out.buffer) != VK_SUCCESS) return false;
+    VkMemoryRequirements req;
+    vkGetBufferMemoryRequirements(device_, out.buffer, &req);
+    int32_t type = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0);
+    if (type < 0) return false;
+    VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    ai.allocationSize = req.size;
+    ai.memoryTypeIndex = static_cast<uint32_t>(type);
+    if (vkAllocateMemory(device_, &ai, nullptr, &out.memory) != VK_SUCCESS) return false;
+    vkBindBufferMemory(device_, out.buffer, out.memory, 0);
+    out.size = size;
+    out.memType = static_cast<uint32_t>(type);
     return true;
 }
 
@@ -640,6 +648,7 @@ void VulkanEngine::destroyImage(Image& img) {
 void VulkanEngine::destroyResources() {
     for (auto& s : slots_) {
         destroyBuffer(s.raw);
+        destroyBuffer(s.rawDev);
         destroyBuffer(s.shading);
         destroyBuffer(s.params);
         destroyBuffer(s.p010);
@@ -674,7 +683,8 @@ bool VulkanEngine::ensureResources(const Geometry& g) {
     const VkDeviceSize vfBytes = static_cast<VkDeviceSize>(g.outW) * g.outH * 4;
 
     for (auto& s : slots_) {
-        if (!createBuffer(rawBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false, s.raw) ||
+        if (!createBuffer(rawBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, false, s.raw) ||
+            !createDeviceBuffer(rawBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, s.rawDev) ||
             !createBuffer(shadingBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false, s.shading) ||
             !createBuffer(sizeof(FrameParams), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, false, s.params) ||
             !createBuffer(p010Bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, s.p010) ||
@@ -739,6 +749,20 @@ bool VulkanEngine::ensureResources(const Geometry& g) {
     swapchainStale_ = true; // viewfinder extent may need to follow the new output size
     VK_LOGI("GPU resources: raw %dx%d (stride %d) -> quad %ux%u -> out %dx%d",
             g.rawW, g.rawH, g.stride, quadW, quadH, g.outW, g.outH);
+    {
+        auto flags = [&](uint32_t t) {
+            VkMemoryPropertyFlags f = memProps_.memoryTypes[t].propertyFlags;
+            std::string s;
+            if (f & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) s += " device-local";
+            if (f & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) s += " host-visible";
+            if (f & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) s += " coherent";
+            if (f & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) s += " cached";
+            return s;
+        };
+        VK_LOGI("Memory: raw upload type %u (%s), raw GPU copy type %u (%s), P010 type %u (%s)",
+                slots_[0].raw.memType, flags(slots_[0].raw.memType).c_str(), slots_[0].rawDev.memType,
+                flags(slots_[0].rawDev.memType).c_str(), slots_[0].p010.memType, flags(slots_[0].p010.memType).c_str());
+    }
     return true;
 }
 
@@ -747,6 +771,39 @@ bool VulkanEngine::ensureResources(const Geometry& g) {
 // history; render samples pingPong(p). Each slot has a set pair per parity.
 void VulkanEngine::writeDescriptors(Slot& s) {
     for (int par = 0; par < 2; ++par) writeDescriptors(s, par);
+    writeRawDescriptors(s, s.unpackSet, s.greenSet, s.rawDev);
+    writeRawDescriptors(s, s.unpackSetHost, s.greenSetHost, s.raw);
+}
+
+// The unpack and HQ sets read the raw frame from `raw`: the device-local copy
+// (normal), or the host upload buffer directly (benchmark A/B, kPrevLevelRawCopy).
+void VulkanEngine::writeRawDescriptors(Slot& s, VkDescriptorSet unpackSet, VkDescriptorSet greenSet, const Buffer& raw) {
+    VkDescriptorBufferInfo params{s.params.buffer, 0, VK_WHOLE_SIZE};
+    VkDescriptorBufferInfo rawInfo{raw.buffer, 0, VK_WHOLE_SIZE};
+    VkDescriptorBufferInfo shading{s.shading.buffer, 0, VK_WHOLE_SIZE};
+    VkDescriptorImageInfo quadStorage{VK_NULL_HANDLE, quadImage_.view, VK_IMAGE_LAYOUT_GENERAL};
+    VkDescriptorImageInfo greenStorage{VK_NULL_HANDLE, greenImage_.view, VK_IMAGE_LAYOUT_GENERAL};
+    VkWriteDescriptorSet writes[9];
+    auto w = [&](int i, VkDescriptorSet set, uint32_t binding, VkDescriptorType type,
+                 const VkDescriptorBufferInfo* b, const VkDescriptorImageInfo* img) {
+        writes[i] = VkWriteDescriptorSet{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        writes[i].dstSet = set;
+        writes[i].dstBinding = binding;
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = type;
+        writes[i].pBufferInfo = b;
+        writes[i].pImageInfo = img;
+    };
+    w(0, unpackSet, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &params, nullptr);
+    w(1, unpackSet, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &rawInfo, nullptr);
+    w(2, unpackSet, 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &shading, nullptr);
+    w(3, unpackSet, 3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, nullptr, &quadStorage);
+    w(4, greenSet, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &params, nullptr);
+    w(5, greenSet, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &rawInfo, nullptr);
+    w(6, greenSet, 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &shading, nullptr);
+    w(7, greenSet, 3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, nullptr, &greenStorage);
+    w(8, greenSet, 4, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, nullptr, &quadStorage);
+    vkUpdateDescriptorSets(device_, 9, writes, 0, nullptr);
 }
 
 void VulkanEngine::writeDescriptors(Slot& s, int par) {
@@ -754,7 +811,7 @@ void VulkanEngine::writeDescriptors(Slot& s, int par) {
     const Image& prev = pingPong(par ^ 1);
     const VkDescriptorSet renderSet = s.renderSets[par], cleanSet = s.cleanSets[par], alignSet = s.alignSets[par];
     VkDescriptorBufferInfo params{s.params.buffer, 0, VK_WHOLE_SIZE};
-    VkDescriptorBufferInfo raw{s.raw.buffer, 0, VK_WHOLE_SIZE};
+    VkDescriptorBufferInfo raw{s.rawDev.buffer, 0, VK_WHOLE_SIZE};
     VkDescriptorBufferInfo shading{s.shading.buffer, 0, VK_WHOLE_SIZE};
     VkDescriptorBufferInfo p010{s.p010.buffer, 0, VK_WHOLE_SIZE};
     VkDescriptorImageInfo quadStorage{VK_NULL_HANDLE, quadImage_.view, VK_IMAGE_LAYOUT_GENERAL};
@@ -1054,8 +1111,10 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
     std::memcpy(s.params.mapped, &params, sizeof(params));
     auto tCopy = Clock::now();
 
-    const int prevLevel = prevLevel_;
-    const bool prevClean = prevLevel >= kPrevLevelClean, prev = prevLevel >= kPrevLevelRenderGreen;
+    const int prevLevel = prevLevel_, repeat = repeatPass_;
+    const bool rawCopy = prevLevel < kPrevLevelRawCopy;
+    const VkDescriptorSet unpackSet = rawCopy ? s.unpackSet : s.unpackSetHost;
+    const VkDescriptorSet greenSet = rawCopy ? s.greenSet : s.greenSetHost;
     VkCommandBuffer cb = s.cmd;
     vkResetCommandBuffer(cb, 0);
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -1068,18 +1127,45 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
     mb.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
                        VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
     mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_UNIFORM_READ_BIT;
+    mb.dstAccessMask |= VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+
+    // Benchmark pass-cost probe: the pass runs again on the same inputs
+    // (writing the same output), after a barrier so the two don't overlap.
+    VkMemoryBarrier passDone{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    passDone.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    passDone.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    auto runPass = [&](int pass, const auto& dispatch) {
+        dispatch();
+        if (repeat != pass) return;
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+                             1, &passDone, 0, nullptr, 0, nullptr);
+        dispatch();
+    };
 
     const uint32_t q0 = static_cast<uint32_t>(idx) * kStamps;
     if (queryPool_) {
         vkCmdResetQueryPool(cb, queryPool_, q0, kStamps);
         vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queryPool_, q0);
     }
-    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, unpackPipe_);
-    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, unpackPipeLayout_, 0, 1, &s.unpackSet, 0, nullptr);
-    uint32_t groups = static_cast<uint32_t>((g.rawW + 3) / 4);
-    vkCmdDispatch(cb, (groups + 15) / 16, static_cast<uint32_t>((g.rawH / 2 + 7) / 8), 1);
+    if (rawCopy) {
+        // The shaders read the raw frame ~3x (unpack once, HQ tiles with
+        // their borders ~2x): from GPU-local memory instead of the upload buffer.
+        VkBufferCopy region{0, 0, s.raw.size};
+        vkCmdCopyBuffer(cb, s.raw.buffer, s.rawDev.buffer, 1, &region);
+        VkMemoryBarrier copied{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        copied.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        copied.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+                             1, &copied, 0, nullptr, 0, nullptr);
+    }
+    runPass(0, [&] {
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, unpackPipe_);
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, unpackPipeLayout_, 0, 1, &unpackSet, 0, nullptr);
+        uint32_t groups = static_cast<uint32_t>((g.rawW + 3) / 4);
+        vkCmdDispatch(cb, (groups + 15) / 16, static_cast<uint32_t>((g.rawH / 2 + 7) / 8), 1);
+    });
 
     VkImageMemoryBarrier quadReady = imageBarrier(quadImage_.image, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
                                                   VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
@@ -1087,9 +1173,11 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
                          0, nullptr, 0, nullptr, 1, &quadReady);
     if (hq) {
         // HQ luma detail per 16x16-quad tile (raw + quad image -> detail image).
-        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, prev && greenPrevPipe_ ? greenPrevPipe_ : greenPipe_);
-        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, greenPipeLayout_, 0, 1, &s.greenSet, 0, nullptr);
-        vkCmdDispatch(cb, static_cast<uint32_t>((g.rawW / 2 + 15) / 16), static_cast<uint32_t>((g.rawH / 2 + 15) / 16), 1);
+        runPass(1, [&] {
+            vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, greenPipe_);
+            vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, greenPipeLayout_, 0, 1, &greenSet, 0, nullptr);
+            vkCmdDispatch(cb, static_cast<uint32_t>((g.rawW / 2 + 15) / 16), static_cast<uint32_t>((g.rawH / 2 + 15) / 16), 1);
+        });
         VkImageMemoryBarrier detailReady = imageBarrier(greenImage_.image, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
                                                         VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
         vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
@@ -1100,27 +1188,31 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
     if (align) {
         // Motion field: 1/4-res luma of current + history, then a per-tile search.
         const uint32_t qw = static_cast<uint32_t>(g.rawW / 2), qh = static_cast<uint32_t>(g.rawH / 2);
-        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, alignPipe_);
-        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, alignPipeLayout_, 0, 1, &s.alignSets[pingParity_], 0, nullptr);
-        int32_t mode = 0;
-        vkCmdPushConstants(cb, alignPipeLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(mode), &mode);
-        vkCmdDispatch(cb, ((qw + 3) / 4 + 15) / 16, ((qh + 3) / 4 + 7) / 8, 1);
         VkMemoryBarrier lowReady{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         lowReady.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
         lowReady.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
-                             1, &lowReady, 0, nullptr, 0, nullptr);
-        mode = 1;
-        vkCmdPushConstants(cb, alignPipeLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(mode), &mode);
-        vkCmdDispatch(cb, (qw + 31) / 32, (qh + 31) / 32, 1); // one workgroup per tile
+        runPass(2, [&] {
+            vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, alignPipe_);
+            vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, alignPipeLayout_, 0, 1, &s.alignSets[pingParity_], 0, nullptr);
+            int32_t mode = 0;
+            vkCmdPushConstants(cb, alignPipeLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(mode), &mode);
+            vkCmdDispatch(cb, ((qw + 3) / 4 + 15) / 16, ((qh + 3) / 4 + 7) / 8, 1);
+            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+                                 1, &lowReady, 0, nullptr, 0, nullptr);
+            mode = 1;
+            vkCmdPushConstants(cb, alignPipeLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(mode), &mode);
+            vkCmdDispatch(cb, (qw + 31) / 32, (qh + 31) / 32, 1); // one workgroup per tile
+        });
         vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
                              1, &lowReady, 0, nullptr, 0, nullptr);
     }
 
     if (queryPool_) vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool_, q0 + 2);
-    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, prevClean ? cleanPrevPipe_ : cleanPipe_);
-    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cleanPipeLayout_, 0, 1, &s.cleanSets[pingParity_], 0, nullptr);
-    vkCmdDispatch(cb, static_cast<uint32_t>((g.rawW / 2 + 15) / 16), static_cast<uint32_t>((g.rawH / 2 + 7) / 8), 1);
+    runPass(3, [&] {
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cleanPipe_);
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cleanPipeLayout_, 0, 1, &s.cleanSets[pingParity_], 0, nullptr);
+        vkCmdDispatch(cb, static_cast<uint32_t>((g.rawW / 2 + 15) / 16), static_cast<uint32_t>((g.rawH / 2 + 7) / 8), 1);
+    });
 
     VkImageMemoryBarrier cleanReady = imageBarrier(pingPong(pingParity_).image, VK_ACCESS_SHADER_WRITE_BIT,
                                                    VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
@@ -1130,9 +1222,11 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
     historyValid_ = temporal;
 
     if (queryPool_) vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool_, q0 + 3);
-    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, prev ? renderPrevPipe_ : renderPipe_);
-    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, renderPipeLayout_, 0, 1, &s.renderSets[pingParity_], 0, nullptr);
-    vkCmdDispatch(cb, static_cast<uint32_t>((g.outW / 2 + 7) / 8), static_cast<uint32_t>((g.outH / 2 + 7) / 8), 1);
+    runPass(4, [&] {
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, renderPipe_);
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, renderPipeLayout_, 0, 1, &s.renderSets[pingParity_], 0, nullptr);
+        vkCmdDispatch(cb, static_cast<uint32_t>((g.outW / 2 + 7) / 8), static_cast<uint32_t>((g.outH / 2 + 7) / 8), 1);
+    });
 
     if (window_) {
         VkImageMemoryBarrier vfReady = imageBarrier(vfImage_.image, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,

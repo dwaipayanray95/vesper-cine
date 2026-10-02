@@ -112,12 +112,10 @@ void main() {
         uint lo = sh8 == 0u ? w0 : ((w0 >> sh8) | (w1 << (32u - sh8)));
         uint b4 = (sh8 == 0u ? w1 : (w1 >> sh8)) & 0xFFu;
         int ay = y;
-#ifndef VESPER_PREV
         // Tile-relative position this value stands for (the clamped frame-edge
         // copies keep their nominal CFA site, as step 2 sees them).
         const int ry = row - RBY;
         const bool greenRow = ry >= -GB && ry < T + GB;
-#endif
         for (int b = 0; b < 4; ++b) {
             int x = grp * 4 + b;
             float dn = float((((lo >> (8u * uint(b))) & 0xFFu) << 2) | ((b4 >> (2 * b)) & 3u));
@@ -128,28 +126,17 @@ void main() {
                        : (site == 3 ? sh.w * P.wbGains.b : ((ay & 1) == 0 ? sh.y : sh.z) * P.wbGains.g);
             HF val = HF(v * gain);
             sRaw[row * RNX + gx * 4 + b] = val;
-#ifndef VESPER_PREV
             // Green photosites are their own full-res green: store them now, so
             // step 2 only has to interpolate the red/blue sites.
             const int rx = gx * 4 + b - RBX;
             const int ns = cfaSite(rx & 1, ry & 1);
             if (greenRow && rx >= -GB && rx < T + GB && (ns == 1 || ns == 2))
                 sGreen[(ry + GB) * GN + (rx + GB)] = val;
-#endif
         }
     }
     barrier();
 
     // 2. Full-resolution green (Hamilton-Adams) over the filter support.
-#ifdef VESPER_PREV
-    for (int i = lid; i < GN * GN; i += NT) {
-        int x = i % GN - GB, y = i / GN - GB;
-        int site = cfaSite((org.x + x) & 1, (org.y + y) & 1);
-        HF g;
-        if (site == 1 || site == 2) {
-            g = R(x, y);
-        } else {
-#else
     // Only the red/blue half of the sites: every thread runs the same
     // interpolation (no idle lanes waiting on neighbours that just copy).
     for (int i = lid; i < GN * GN / 2; i += NT) {
@@ -157,26 +144,18 @@ void main() {
         int x = 2 * (i % (GN / 2)) - GB;
         int s0 = cfaSite(0, y & 1);           // org is even: tile-relative parity is the CFA parity
         x += (s0 == 1 || s0 == 2) ? 1 : 0;    // the row's non-green column parity
-        HF g;
-        {
-#endif
-            HF c = R(x, y);
-            HF gl = R(x - 1, y), gr = R(x + 1, y), gu = R(x, y - 1), gd = R(x, y + 1);
-            HF lapH = HF(2.0) * c - R(x - 2, y) - R(x + 2, y);
-            HF lapV = HF(2.0) * c - R(x, y - 2) - R(x, y + 2);
-            HF dH = abs(gl - gr) + abs(lapH);
-            HF dV = abs(gu - gd) + abs(lapV);
-            HF gH = HF(0.5) * (gl + gr) + HF(0.25) * lapH;
-            HF gV = HF(0.5) * (gu + gd) + HF(0.25) * lapV;
-            g = dH < dV ? gH : (dV < dH ? gV : HF(0.5) * (gH + gV));
-            HF lo = min(min(gl, gr), min(gu, gd)), hi = max(max(gl, gr), max(gu, gd));
-            g = clamp(g, lo, hi); // no overshoot: edges stay halo-free
-        }
-#ifdef VESPER_PREV
-        sGreen[i] = g;
-#else
+        HF c = R(x, y);
+        HF gl = R(x - 1, y), gr = R(x + 1, y), gu = R(x, y - 1), gd = R(x, y + 1);
+        HF lapH = HF(2.0) * c - R(x - 2, y) - R(x + 2, y);
+        HF lapV = HF(2.0) * c - R(x, y - 2) - R(x, y + 2);
+        HF dH = abs(gl - gr) + abs(lapH);
+        HF dV = abs(gu - gd) + abs(lapV);
+        HF gH = HF(0.5) * (gl + gr) + HF(0.25) * lapH;
+        HF gV = HF(0.5) * (gu + gd) + HF(0.25) * lapV;
+        HF g = dH < dV ? gH : (dV < dH ? gV : HF(0.5) * (gH + gV));
+        HF lo = min(min(gl, gr), min(gu, gd)), hi = max(max(gl, gr), max(gu, gd));
+        g = clamp(g, lo, hi); // no overshoot: edges stay halo-free
         sGreen[(y + GB) * GN + (x + GB)] = g;
-#endif
     }
     barrier();
 

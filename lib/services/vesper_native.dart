@@ -227,7 +227,8 @@ class VesperNative {
   late final void Function(int) _setProcessingPaused;
   late final void Function(int, int) _setNativeIsos;
   late final void Function(int) _setBudgetGuard;
-  late final void Function(int) _setPreviousShaders;
+  late final void Function(int) _setPreviousSteps;
+  late final void Function(int) _setRepeatPass;
   late final int Function(Pointer<Utf8>, Pointer<Utf8>) _isoSweepStart;
   late final void Function() _isoSweepCancel;
   late final int Function(Pointer<Float>, Pointer<Float>) _getScopes;
@@ -315,8 +316,8 @@ class VesperNative {
       _isoSweepCancel = _lib.lookupFunction<Void Function(), void Function()>('vesper_iso_sweep_cancel');
       _setNativeIsos = _lib.lookupFunction<Void Function(Int32, Int32), void Function(int, int)>('vesper_set_native_isos');
       _setBudgetGuard = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_budget_guard');
-      _setPreviousShaders =
-          _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_previous_shaders');
+      _setPreviousSteps = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_previous_steps');
+      _setRepeatPass = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_repeat_pass');
       _setProcessingPaused = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_processing_paused');
       _setOversampling = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_oversampling');
       _setSharpening = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_sharpening');
@@ -545,9 +546,13 @@ class VesperNative {
   /// GPU budget guard: auto-pause alignment / HQ / NR when frames would drop.
   void setBudgetGuard(bool on) => _loaded ? _setBudgetGuard(on ? 1 : 0) : null;
 
-  /// GPU benchmark A/B: 0 = current shaders, 1 = without the latest
+  /// GPU benchmark A/B: 0 = current GPU path, 1 = without the latest
   /// optimisation step, 2 = without the last two.
-  void setPreviousShaders(int level) => _loaded ? _setPreviousShaders(level) : null;
+  void setPreviousSteps(int level) => _loaded ? _setPreviousSteps(level) : null;
+
+  /// GPU benchmark pass-cost probe: run one pass twice per frame
+  /// (-1 off, 0 unpack, 1 HQ, 2 alignment, 3 NR, 4 render).
+  void setRepeatPass(int pass) => _loaded ? _setRepeatPass(pass) : null;
 
   /// Asks for camera + microphone permission and waits for the answer.
   /// True only when both are granted (every recording has sound).
