@@ -356,18 +356,16 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     ('All on, + HQ load', 7),
     ('All on, + HQ load+demos', 8),
   ];
-  // Opt-in experiments: (label, VulkanEngine::kExp* bit).
-  static const _benchExperiments = [
-    ('Exp: HQ site scales', 1),
-    ('Exp: align 4 reads', 2),
-    ('Exp: align split search', 4),
-  ];
+  // Opt-in experiments: (label, VulkanEngine::kExp* bit). None pending.
+  static const List<(String, int)> _benchExperiments = [];
+  // The guard's first step: motion search every 4th frame instead of every 2nd.
+  static const _benchAlignReduced = 'All on, align every 4th';
 
   Future<void> _runGpuBenchmark() async {
     if (_benchmarking || !_streaming || _recording) return;
     setState(() => _benchmarking = true);
     void apply({bool hq = false, int sharp = 0, double tnr = 0, double cnr = 0, bool align = false,
-        int exps = 0, int repeat = -1}) {
+        int exps = 0, int repeat = -1, int alignEvery = 0}) {
       _engine.setOversampling(hq);
       _engine.setSharpening(sharp);
       _engine.setTemporalNr(tnr);
@@ -375,10 +373,11 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       _engine.setNrAlignment(align);
       _engine.setExperiments(exps);
       _engine.setRepeatPass(repeat);
+      _engine.setAlignInterval(alignEvery);
     }
 
-    void allOn({int exps = 0, int repeat = -1}) =>
-        apply(hq: true, sharp: 1, tnr: 0.7, cnr: 0.5, align: true, exps: exps, repeat: repeat);
+    void allOn({int exps = 0, int repeat = -1, int alignEvery = 0}) =>
+        apply(hq: true, sharp: 1, tnr: 0.7, cnr: 0.5, align: true, exps: exps, repeat: repeat, alignEvery: alignEvery);
 
     _engine.setBudgetGuard(false);
     final configs = <(String, void Function())>[
@@ -391,6 +390,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       ('Everything on', () => allOn()),
       for (var p = 0; p < _benchPasses.length; p++) ('All on, ${_benchPasses[p]} x2', () => allOn(repeat: p)),
       for (final (label, probe) in _benchParts) (label, () => allOn(repeat: probe)),
+      (_benchAlignReduced, () => allOn(alignEvery: 4)),
       for (final (label, bit) in _benchExperiments) (label, () => allOn(exps: bit)),
       ('Everything on (again)', () => allOn()),
     ];
@@ -429,6 +429,8 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       final summary = [
         'Pass costs (ms): ${[for (final p in _benchPasses) '$p ${extra('All on, $p x2')}'].join(', ')}',
         'Align (ms): 1/4-res luma ${extra(_benchParts[0].$1)}, search ${extra(_benchParts[1].$1)}',
+        if (measured[_benchAlignReduced] != null)
+          'Align every 4th frame instead of 2nd: saves ${(-double.parse(extra(_benchAlignReduced))).toStringAsFixed(1)} ms',
         'HQ (ms): load ${extra(hqLoad)}, demosaic ${diff(hqDemosaic, hqLoad)}, '
             'filter+output ${measured['All on, HQ x2'] == null || measured[hqDemosaic] == null ? '?' : (measured['All on, HQ x2']! - measured[hqDemosaic]!).toStringAsFixed(1)}',
         for (final (label, _) in _benchExperiments)
@@ -445,6 +447,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     }
     _engine.setExperiments(0);
     _engine.setRepeatPass(-1);
+    _engine.setAlignInterval(0);
     // Restore the user's settings.
     _engine.setOversampling(_oversampling);
     _engine.setSharpening(_sharpening);
@@ -941,6 +944,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       parts.add(!s.hqSupported ? 'HQ N/A' : (s.hqAvailable ? 'HQ' : 'HQ PAUSED'));
     }
     if (_temporalNr > 0 && _nrAlignment && s.alignThrottled) parts.add('ALIGN PAUSED');
+    if (_temporalNr > 0 && _nrAlignment && s.alignReduced) parts.add('ALIGN REDUCED');
     if ((_temporalNr > 0 || _chromaNr > 0) && s.nrThrottled) parts.add('NR PAUSED');
     if (s.gpuOverloaded) parts.add('FPS NOT SUSTAINABLE');
     final drops = s.cameraDrops + s.framesDropped;

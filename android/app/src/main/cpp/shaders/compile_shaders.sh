@@ -44,10 +44,6 @@ variant green_fp16 GreenFp16 green -DHQ_FP16
 variant green_rgba_fp16 GreenRgbaFp16 green -DGREEN_RGBA16F -DHQ_FP16
 # GPU benchmark experiments (opt-in, VulkanEngine::setExperiments) and probes
 # (partial passes whose cost shows where a pass spends its time).
-variant green_fp16_exp_load GreenFp16ExpLoad green -DHQ_FP16 -DHQ_EXP_LOAD
 variant green_fp16_probe1 GreenFp16Probe1 green -DHQ_FP16 -DHQ_PROBE=1
 variant green_fp16_probe2 GreenFp16Probe2 green -DHQ_FP16 -DHQ_PROBE=2
-variant align_exp_ds AlignExpDs align -DALIGN_EXP_DS
-variant align_exp_argmin AlignExpArgmin align -DALIGN_EXP_ARGMIN
-variant align_exp_both AlignExpBoth align -DALIGN_EXP_DS -DALIGN_EXP_ARGMIN
 echo "SPIR-V headers regenerated"

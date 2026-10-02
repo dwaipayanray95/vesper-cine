@@ -17,14 +17,14 @@ A cinema camera app for Google Pixel phones (developed on a **Pixel 10**). It re
 | HQ oversampling (full-sensor luma, anti-aliased to 1080p), noise-aware sharpening, lens distortion correction, hot-pixel repair | Working |
 | Temporal NR (motion-adaptive, tile alignment) and chroma NR, noise model from the sensor profile and lens-shading gain | Working |
 | Recording: HEVC/AV1 Main10 1080p (P010 input) + AAC, MP4 in `Movies/Vesper Cine`; thermal / storage stops | Working |
-| GPU performance guard: pauses alignment → HQ → NR when frames would drop, restores them when they fit; always on while recording | Working |
+| GPU performance guard: alignment at reduced rate → alignment off → HQ → NR when frames would drop, restores them when they fit; always on while recording | Working |
 | Native viewfinder (Android `SurfaceView` under a transparent Flutter UI), submit/present on its own thread | Working |
 | PDAF/laser tap AF (track or lock), face detection; clean auto-exposure (native ISO first, shutter to 180°, then gain); native ISO analysis | Working |
 | Side-rail Settings with Info tab (version, changelog, how-to, FAQ); in-app log (developer builds) | Working |
 | **4K (UHD) output** | Engine has a `resolution` setting that upsamples the 2000-px quad image; not exposed in the UI. A real UHD path is the next big feature (see Roadmap). |
 | Gyroflow IMU log, external SSD, audio levels | Planned |
 
-Performance at 1080p on Pixel 10 (GPU time per frame, everything on): **~34 ms** — fits 24/25 fps (41.7/40 ms budgets). At 30 fps the guard pauses alignment; at 48/60 fps it pauses HQ and NR as well. Details in `CLAUDE.md`.
+Performance at 1080p on Pixel 10 (GPU time per frame, everything on): **~29–32 ms** — fits 24/25 fps (41.7/40 ms budgets). At 30 fps the guard first runs alignment at a reduced rate (then pauses it if needed); at 48/60 fps it pauses HQ and NR as well. Details in `CLAUDE.md`.
 
 ## Using it
 

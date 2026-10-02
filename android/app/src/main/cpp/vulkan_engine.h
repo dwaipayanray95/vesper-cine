@@ -92,16 +92,19 @@ public:
     double gpuFrameMs() const { return gpuFrameMs_; }
     // True once alignment was switched off automatically because the GPU ran over budget.
     bool alignmentThrottled() const { return alignThrottled_; }
+    // First guard step: the motion search runs every 4th frame instead of every 2nd.
+    bool alignmentReduced() const { return alignReduced_ && !alignThrottled_; }
     // Second stage: temporal + chroma NR paused too because alignment alone wasn't enough.
     bool noiseReductionThrottled() const { return nrThrottled_; }
     // HQ oversampled luma: unsupported on this GPU, or paused by the budget guard.
     bool oversamplingAvailable() const { return hqSupported_ && !hqThrottled_; }
-    // GPU benchmark A/B: opt-in optimisation experiments (kExp* bits), off in
-    // normal use until the benchmark on the phone has confirmed them.
-    static constexpr int kExpHqLoad = 1;        // HQ: per-tile site scales instead of a division per pixel
-    static constexpr int kExpAlignDownsample = 2; // alignment: 1/4-res luma from 4 filtered reads, not 16 loads
-    static constexpr int kExpAlignArgmin = 4;   // alignment: best-candidate search split over threads
+    // GPU benchmark A/B: opt-in optimisation experiments (kExp* bits, none
+    // pending right now), off in normal use until the benchmark on the phone
+    // has confirmed them.
     void setExperiments(int mask) { experiments_ = mask; }
+    // GPU benchmark: run the motion search every n-th frame (2 = normal,
+    // 4 = the guard's reduced rate); 0 = automatic (guard decides).
+    void setAlignInterval(int n) { alignInterval_ = n; }
     // GPU benchmark pass-cost probe: dispatch one pass (or part of one) an
     // extra time per frame, same output, so the frame-time increase is its
     // cost. -1 off, 0 unpack, 1 HQ, 2 alignment, 3 clean (NR), 4 render,
@@ -203,10 +206,9 @@ private:
     VkPipeline alignPipe_ = VK_NULL_HANDLE;
     VkPipelineLayout unpackPipeLayout_ = VK_NULL_HANDLE, cleanPipeLayout_ = VK_NULL_HANDLE, renderPipeLayout_ = VK_NULL_HANDLE;
     VkPipeline unpackPipe_ = VK_NULL_HANDLE, cleanPipe_ = VK_NULL_HANDLE, renderPipe_ = VK_NULL_HANDLE;
-    std::atomic<int> experiments_{0}, repeatPass_{-1};
+    std::atomic<int> experiments_{0}, repeatPass_{-1}, alignInterval_{0};
     // Benchmark experiments / probes (VK_NULL_HANDLE where the variant doesn't apply: HQ ones need fp16 + R16F).
-    VkPipeline greenExpLoadPipe_ = VK_NULL_HANDLE, greenProbe1Pipe_ = VK_NULL_HANDLE, greenProbe2Pipe_ = VK_NULL_HANDLE;
-    VkPipeline alignExpDsPipe_ = VK_NULL_HANDLE, alignExpArgminPipe_ = VK_NULL_HANDLE, alignExpBothPipe_ = VK_NULL_HANDLE;
+    VkPipeline greenProbe1Pipe_ = VK_NULL_HANDLE, greenProbe2Pipe_ = VK_NULL_HANDLE;
     VkSampler sampler_ = VK_NULL_HANDLE;
 
     Slot slots_[kRingSize];
@@ -224,8 +226,12 @@ private:
     int underBudgetFrames_ = 0;
     std::atomic<bool> overloaded_{false};
     bool recordingNow_ = false;
-    double stageCostMs_[3] = {6.0, 12.0, 6.0}; // measured when paused (initial guesses)
-    bool costReliable_[3] = {false, false, false}; // measured by a restore (under budget)
+    // Guard stages: 0 alignment off, 1 HQ off, 2 NR off, 3 alignment at reduced rate.
+    // Paused in the order 3, 0, 1, 2 and restored in reverse.
+    double stageCostMs_[4] = {6.0, 12.0, 6.0, 1.5}; // measured when paused (initial guesses)
+    bool costReliable_[4] = {false, false, false, false}; // measured by a restore (under budget)
+    bool alignReduced_ = false;   // stage 3
+    bool alignRequested_ = false; // temporal NR with alignment is on: the alignment stages can save something
     bool measuringRestore_ = false;
     int measuringStage_ = -1, lastRestored_ = -1;
     double costBeforeMs_ = 0;

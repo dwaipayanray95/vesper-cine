@@ -316,16 +316,24 @@ int main() {
         FrameParams single = baseParams(0);
         runFrame(gpu, noisyPan(last), single, nullptr, f);
         double noNr = errorVsTruth(f);
-        for (int alignOn = 0; alignOn < 2; ++alignOn) {
+        // 0: no alignment; 1: motion search every 2nd frame (normal);
+        // 2: every 4th frame (the guard's first step when the GPU is tight).
+        double errs[3] = {};
+        for (int mode = 0; mode < 3; ++mode) {
             FrameParams tp = baseParams(0);
             tp.cleanFlags[1] = 1;
-            tp.cleanFlags[3] = alignOn;
+            tp.cleanFlags[3] = mode > 0;
             tp.noise[0] = 0.8f;
+            gpu.setAlignInterval(mode == 2 ? 4 : 0);
             for (int fr = 0; fr <= last; ++fr) runFrame(gpu, noisyPan(fr), tp, nullptr, f);
-            double err = errorVsTruth(f);
-            if (alignOn) check(err < noNr * 0.75, "aligned temporal NR denoises a pan (RMS error vs truth)", err, noNr * 0.75);
+            double err = errs[mode] = errorVsTruth(f);
+            if (mode == 1) check(err < noNr * 0.75, "aligned temporal NR denoises a pan (RMS error vs truth)", err, noNr * 0.75);
+            else if (mode == 2) check(err < noNr * 0.75, "alignment every 4th frame still denoises a pan", err, noNr * 0.75);
             else check(err < noNr * 1.3, "unaligned temporal NR does not ghost on a pan", err, noNr * 1.3);
         }
+        gpu.setAlignInterval(0);
+        std::printf("  pan RMS error vs truth: no NR %.2f, TNR unaligned %.2f, aligned %.2f, aligned 1/4 rate %.2f\n",
+                    noNr, errs[0], errs[1], errs[2]);
     }
 
     // 5c. Negative noise-profile offset (Pixel reports one) must not create
@@ -580,12 +588,9 @@ int main() {
         };
         std::vector<uint16_t> cur, other;
         bool ok = runSeq(0, -1, cur);
-        std::printf("  experiments, max difference (codes):");
-        for (int bit : {VulkanEngine::kExpHqLoad, VulkanEngine::kExpAlignDownsample, VulkanEngine::kExpAlignArgmin}) {
-            ok = runSeq(bit, -1, other) && ok;
-            std::printf(" exp %d: %d", bit, maxDiff(cur, other));
-        }
-        std::printf("\n");
+        // Pending experiments (VulkanEngine::kExp* bits) go here, e.g.:
+        //   ok = runSeq(VulkanEngine::kExpSomething, -1, other) && ok;
+        //   std::printf("  experiment X: max difference %d codes\n", maxDiff(cur, other));
         int repeatDiff = 0;
         for (int pass = 0; pass <= 8; ++pass) {
             ok = runSeq(0, pass, other) && ok;

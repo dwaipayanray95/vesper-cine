@@ -1265,6 +1265,11 @@ EXPORT void vesper_set_experiments(int32_t mask) {
     if (gGpu) gGpu->setExperiments(mask);
 }
 
+// GPU benchmark (developer tool): motion search every n-th frame, 0 = automatic.
+EXPORT void vesper_set_align_interval(int32_t n) {
+    if (gGpu) gGpu->setAlignInterval(n);
+}
+
 // GPU benchmark pass-cost probe (developer tool): run one pass (or part of
 // one) an extra time per frame; see VulkanEngine::setRepeatPass.
 EXPORT void vesper_set_repeat_pass(int32_t pass) {
@@ -1643,7 +1648,7 @@ EXPORT int32_t vesper_get_status(char* out, int32_t maxLen) {
                   "\"kelvin\":%.0f,\"tint\":%.1f,\"recording\":%s,\"durationMs\":%lld,\"framesEncoded\":%lld,"
                   "\"framesDropped\":%lld,\"thermal\":%d,\"audio\":%s,\"codec\":\"%s\",\"stopReason\":\"%s\","
                   "\"exposureNs\":%lld,\"iso\":%d,\"awbAuto\":%s,\"afState\":%d,\"focusDiopters\":%.3f,"
-                  "\"face\":[%.4f,%.4f,%.4f,%.4f],\"gpuMs\":%.2f,\"alignThrottled\":%s,\"nrThrottled\":%s,\"hqAvailable\":%s,\"hqSupported\":%s,\"calibrationSaved\":\"%s\",\"profileActive\":%s,"
+                  "\"face\":[%.4f,%.4f,%.4f,%.4f],\"gpuMs\":%.2f,\"alignThrottled\":%s,\"alignReduced\":%s,\"nrThrottled\":%s,\"hqAvailable\":%s,\"hqSupported\":%s,\"calibrationSaved\":\"%s\",\"profileActive\":%s,"
                   "\"focusPulling\":%s,\"exposureRamping\":%s,\"isoSweep\":%.3f,\"isoSweepResult\":\"%s\",\"isoSweepError\":\"%s\",\"focusLocked\":%s,\"gpuOverloaded\":%s}",
                   gCamera && gCamera->isStreaming() ? "true" : "false", fps, rw, rh, ow, oh, drops, kelvin, tint,
                   r.recording ? "true" : "false", static_cast<long long>(r.durationUs / 1000),
@@ -1651,6 +1656,7 @@ EXPORT int32_t vesper_get_status(char* out, int32_t maxLen) {
                   r.audio ? "true" : "false", jsonEscape(r.codecName).c_str(), jsonEscape(r.stopReason).c_str(), expNs, iso,
                   awbAuto ? "true" : "false", afState, focusD, face[0], face[1], face[2], face[3],
                   gGpu ? gGpu->gpuFrameMs() : 0.0, gGpu && gGpu->alignmentThrottled() ? "true" : "false",
+                  gGpu && gGpu->alignmentReduced() ? "true" : "false",
                   gGpu && gGpu->noiseReductionThrottled() ? "true" : "false", gGpu && gGpu->oversamplingAvailable() ? "true" : "false", gGpu && gGpu->oversamplingSupported() ? "true" : "false", jsonEscape(calSaved).c_str(),
                   profileActive ? "true" : "false", focusSearching ? "true" : "false", gExposureRamping ? "true" : "false", static_cast<double>(gSweepProgress.load()), jsonEscape(sweepResult).c_str(), jsonEscape(sweepError).c_str(), focusLocked ? "true" : "false", gGpu && gGpu->overloaded() ? "true" : "false");
     return writeString(buf, out, maxLen);

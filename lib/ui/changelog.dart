@@ -7,6 +7,10 @@ class ChangelogEntry {
 }
 
 const changelog = <ChangelogEntry>[
+  ChangelogEntry('0.12.0', [
+    'At 30 fps temporal NR keeps its motion alignment: when the GPU is tight it runs every 4th frame (ALIGN REDUCED) instead of switching off',
+    'Faster motion alignment (about 1–1.5 ms less GPU time per frame)',
+  ]),
   ChangelogEntry('0.11.6', [
     'Raw-copy experiment from 0.11.5 removed (it was slower)',
     'GPU Benchmark (developer builds) breaks HQ and alignment down further and tries three speed-ups',

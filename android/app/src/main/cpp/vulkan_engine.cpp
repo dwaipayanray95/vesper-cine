@@ -7,12 +7,8 @@
 #include "shaders/green_rgba_fp16_spv.h"
 #include "shaders/green_spv.h"
 #include "shaders/green_rgba_spv.h"
-#include "shaders/green_fp16_exp_load_spv.h"
 #include "shaders/green_fp16_probe1_spv.h"
 #include "shaders/green_fp16_probe2_spv.h"
-#include "shaders/align_exp_ds_spv.h"
-#include "shaders/align_exp_argmin_spv.h"
-#include "shaders/align_exp_both_spv.h"
 
 #include <algorithm>
 #include <cmath>
@@ -320,13 +316,9 @@ bool VulkanEngine::createPipelines() {
                          : makePipe(kGreenSpv, sizeof(kGreenSpv), greenLayout_, greenPipeLayout_, greenPipe_))
                 : (fp16_ ? makePipe(kGreenRgbaFp16Spv, sizeof(kGreenRgbaFp16Spv), greenLayout_, greenPipeLayout_, greenPipe_)
                          : makePipe(kGreenRgbaSpv, sizeof(kGreenRgbaSpv), greenLayout_, greenPipeLayout_, greenPipe_))) &&
-           makePipe(kAlignExpDsSpv, sizeof(kAlignExpDsSpv), alignLayout_, alignPipeLayout_, alignExpDsPipe_, sizeof(int32_t)) &&
-           makePipe(kAlignExpArgminSpv, sizeof(kAlignExpArgminSpv), alignLayout_, alignPipeLayout_, alignExpArgminPipe_, sizeof(int32_t)) &&
-           makePipe(kAlignExpBothSpv, sizeof(kAlignExpBothSpv), alignLayout_, alignPipeLayout_, alignExpBothPipe_, sizeof(int32_t)) &&
-           // HQ experiment / probes exist for the phone's path only (16-bit maths, R16F detail image).
+           // HQ probes exist for the phone's path only (16-bit maths, R16F detail image).
            (!fp16_ || hqFormat_ != VK_FORMAT_R16_SFLOAT ||
-            (makePipe(kGreenFp16ExpLoadSpv, sizeof(kGreenFp16ExpLoadSpv), greenLayout_, greenPipeLayout_, greenExpLoadPipe_) &&
-             makePipe(kGreenFp16Probe1Spv, sizeof(kGreenFp16Probe1Spv), greenLayout_, greenPipeLayout_, greenProbe1Pipe_) &&
+            (makePipe(kGreenFp16Probe1Spv, sizeof(kGreenFp16Probe1Spv), greenLayout_, greenPipeLayout_, greenProbe1Pipe_) &&
              makePipe(kGreenFp16Probe2Spv, sizeof(kGreenFp16Probe2Spv), greenLayout_, greenPipeLayout_, greenProbe2Pipe_)));
 }
 
@@ -358,8 +350,7 @@ void VulkanEngine::release() {
     if (cleanPipe_) vkDestroyPipeline(device_, cleanPipe_, nullptr);
     if (alignPipe_) vkDestroyPipeline(device_, alignPipe_, nullptr);
     if (greenPipe_) vkDestroyPipeline(device_, greenPipe_, nullptr);
-    for (VkPipeline* p : {&greenExpLoadPipe_, &greenProbe1Pipe_, &greenProbe2Pipe_,
-                          &alignExpDsPipe_, &alignExpArgminPipe_, &alignExpBothPipe_}) {
+    for (VkPipeline* p : {&greenProbe1Pipe_, &greenProbe2Pipe_}) {
         if (*p) vkDestroyPipeline(device_, *p, nullptr);
         *p = VK_NULL_HANDLE;
     }
@@ -1069,20 +1060,22 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
     if (!hqSupported_ || hqThrottled_) params.flags[3] &= ~16;
     const bool hq = (params.flags[3] & 16) != 0;
     params.cleanFlags[2] = temporal && historyValid_ ? 1 : 0;
+    alignRequested_ = temporal && params.cleanFlags[3] != 0;
     const bool wantAlign = params.cleanFlags[2] != 0 && params.cleanFlags[3] != 0 && !alignThrottled_;
     if (!wantAlign) params.cleanFlags[3] = 0;
     // The motion search runs every other frame; in between, clean reuses the
-    // previous motion field (motion changes little over 1/24 s) — halves its cost.
-    const bool align = wantAlign && (!motionValid_ || (++alignTick_ & 1) == 0);
+    // previous motion field (motion changes little over 1/24 s) — halves its
+    // cost. The guard's first step stretches that to every 4th frame: the
+    // reused field assumes steady motion, and where it doesn't hold, clean's
+    // motion test blends less (more noise for a moment, no ghosting).
+    const int forcedInterval = alignInterval_;
+    const uint32_t alignEvery = forcedInterval > 0 ? static_cast<uint32_t>(forcedInterval) : (alignReduced_ ? 4u : 2u);
+    const bool align = wantAlign && (!motionValid_ || (++alignTick_ % alignEvery) == 0);
     motionValid_ = wantAlign;
     std::memcpy(s.params.mapped, &params, sizeof(params));
     auto tCopy = Clock::now();
 
-    const int exps = experiments_, repeat = repeatPass_;
-    VkPipeline greenPipe = (exps & kExpHqLoad) && greenExpLoadPipe_ ? greenExpLoadPipe_ : greenPipe_;
-    const bool alignDs = (exps & kExpAlignDownsample) != 0, alignArgmin = (exps & kExpAlignArgmin) != 0;
-    VkPipeline alignPipe = alignDs && alignArgmin ? alignExpBothPipe_
-                         : alignDs ? alignExpDsPipe_ : (alignArgmin ? alignExpArgminPipe_ : alignPipe_);
+    const int repeat = repeatPass_;
     VkCommandBuffer cb = s.cmd;
     vkResetCommandBuffer(cb, 0);
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -1141,7 +1134,7 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
             vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
                                  1, &passDone, 0, nullptr, 0, nullptr);
         }
-        runPass(1, [&] { dispatchGreen(greenPipe); });
+        runPass(1, [&] { dispatchGreen(greenPipe_); });
         VkImageMemoryBarrier detailReady = imageBarrier(greenImage_.image, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
                                                         VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
         vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
@@ -1155,7 +1148,7 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
         VkMemoryBarrier lowReady{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         lowReady.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
         lowReady.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, alignPipe);
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, alignPipe_);
         vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, alignPipeLayout_, 0, 1, &s.alignSets[pingParity_], 0, nullptr);
         auto alignMode = [&](int32_t mode) {
             vkCmdPushConstants(cb, alignPipeLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(mode), &mode);
@@ -1264,6 +1257,7 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
         if (timedFrames_ > 0) {
             std::string paused;
             if (alignThrottled_) paused += " align";
+            else if (alignReduced_) paused += " align-rate(1/4)";
             if (hqThrottled_) paused += " HQ";
             if (nrThrottled_) paused += " NR";
             VK_LOGI("GPU per frame: unpack %.2fms, align %.2fms, clean %.2fms, render+present %.2fms = %.2fms (budget %.1fms)%s%s",
@@ -1296,11 +1290,11 @@ void VulkanEngine::readTimestamps(int slot) {
     // The guard is on when enabled in Settings, and always while recording
     // (a clip must never silently lose frames).
     const bool guard = guardEnabled_ || recordingNow_;
-    const bool allPaused = alignThrottled_ && nrThrottled_ && (hqThrottled_ || !hqSupported_);
+    const bool allPaused = (alignThrottled_ || !alignRequested_) && nrThrottled_ && (hqThrottled_ || !hqSupported_);
     overloaded_ = gpuFrameMs_ > 0.97 * frameBudgetMs_ && (!guard || allPaused);
     if (!guard) {
-        if (alignThrottled_ || hqThrottled_ || nrThrottled_) {
-            alignThrottled_ = hqThrottled_ = nrThrottled_ = false; // recording ended, guard is OFF
+        if (alignThrottled_ || hqThrottled_ || nrThrottled_ || alignReduced_) {
+            alignThrottled_ = hqThrottled_ = nrThrottled_ = alignReduced_ = false; // recording ended, guard is OFF
             graceFrames_ = 24;
         }
         return;
@@ -1326,7 +1320,9 @@ void VulkanEngine::readTimestamps(int slot) {
         return;
     }
     // Sustained >85% of the frame interval means we are about to drop frames:
-    // pause optional stages, cheapest-to-lose first (alignment, HQ, NR).
+    // pause optional stages, cheapest-to-lose first (alignment at a quarter
+    // of the frames, alignment, HQ, NR; the alignment steps are skipped when
+    // alignment isn't in use, they'd save nothing).
     // A paused stage comes back after ~1 s when its measured cost fits under
     // the pause threshold, or — since a cost measured while overloaded (or
     // at another frame rate) tends to be too high — as a trial after ~3 s
@@ -1334,7 +1330,7 @@ void VulkanEngine::readTimestamps(int slot) {
     // it is paused (and re-measured) and the next try waits twice as long.
     const double budget = frameBudgetMs_;
     overBudgetFrames_ = gpuFrameMs_ > 0.85 * budget ? overBudgetFrames_ + 1 : 0;
-    int next = nrThrottled_ ? 2 : (hqThrottled_ ? 1 : (alignThrottled_ ? 0 : -1)); // next stage to restore
+    int next = nrThrottled_ ? 2 : (hqThrottled_ ? 1 : (alignThrottled_ ? 0 : (alignReduced_ ? 3 : -1))); // next stage to restore
     const bool fitsByCost = next >= 0 && gpuFrameMs_ + stageCostMs_[next] < 0.85 * budget - 0.5;
     // Trial when the cost is only an (inflated) pause estimate and there is room below the pause line.
     const bool headroom = next >= 0 && !costReliable_[next] && gpuFrameMs_ < 0.85 * budget - 1.5;
@@ -1344,11 +1340,12 @@ void VulkanEngine::readTimestamps(int slot) {
     if (overBudgetFrames_ > 12) {
         overBudgetFrames_ = underBudgetFrames_ = 0;
         int stage = -1;
-        if (!alignThrottled_) { alignThrottled_ = true; stage = 0; }
+        if (alignRequested_ && !alignReduced_ && !alignThrottled_) { alignReduced_ = true; stage = 3; }
+        else if (alignRequested_ && !alignThrottled_) { alignThrottled_ = true; stage = 0; }
         else if (hqSupported_ && !hqThrottled_) { hqThrottled_ = true; stage = 1; }
         else if (!nrThrottled_) { nrThrottled_ = true; stage = 2; }
         if (stage >= 0) {
-            VK_LOGW("GPU %.1fms over %.1fms budget: paused stage %d (0 align, 1 HQ, 2 NR)", gpuFrameMs_, budget, stage);
+            VK_LOGW("GPU %.1fms over %.1fms budget: paused stage %d (3 align 1/4 rate, 0 align, 1 HQ, 2 NR)", gpuFrameMs_, budget, stage);
             if (stage == lastRestored_) recoverFrames_ = std::min(recoverFrames_ * 2, 24 * 60); // flapping: back off
             measuringStage_ = stage;
             measuringRestore_ = false;
@@ -1359,7 +1356,8 @@ void VulkanEngine::readTimestamps(int slot) {
         underBudgetFrames_ = 0;
         if (next == 2) nrThrottled_ = false;
         else if (next == 1) hqThrottled_ = false;
-        else alignThrottled_ = false;
+        else if (next == 0) alignThrottled_ = false;
+        else alignReduced_ = false;
         lastRestored_ = next;
         measuringStage_ = next;
         measuringRestore_ = true;
@@ -1374,9 +1372,9 @@ void VulkanEngine::setFrameBudgetMs(double ms) {
         // New frame rate: start from everything on, let the load settle
         // (~1 s), then pause only what this frame rate can't carry. No
         // decision carries over from the previous rate.
-        if (alignThrottled_ || hqThrottled_ || nrThrottled_)
+        if (alignThrottled_ || hqThrottled_ || nrThrottled_ || alignReduced_)
             VK_LOGI("Guard: frame rate changed (%.1f -> %.1f ms budget): all stages back on, re-checking", frameBudgetMs_.load(), ms);
-        alignThrottled_ = hqThrottled_ = nrThrottled_ = false;
+        alignThrottled_ = hqThrottled_ = nrThrottled_ = alignReduced_ = false;
         for (bool& r : costReliable_) r = false;
         measuringStage_ = -1;
         overBudgetFrames_ = underBudgetFrames_ = 0;
@@ -1391,7 +1389,7 @@ void VulkanEngine::setBudgetGuard(bool enabled) {
     std::lock_guard<std::mutex> lock(frameMutex_);
     guardEnabled_ = enabled;
     if (!enabled) {
-        alignThrottled_ = hqThrottled_ = nrThrottled_ = false;
+        alignThrottled_ = hqThrottled_ = nrThrottled_ = alignReduced_ = false;
         overBudgetFrames_ = underBudgetFrames_ = 0;
     }
 }

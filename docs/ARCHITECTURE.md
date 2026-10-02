@@ -18,7 +18,8 @@ viewfinder that shows what is being recorded. Nothing from the ISP's processed p
                 WB, neutral highlight clip; alpha = clip flag or 0.1×shading gain
    green.comp   [HQ] full-res green (Hamilton-Adams) per 16x16-quad tile, 8-tap
                 anti-alias filter → luma detail D = G_hq − G_quad (R16F); fp16 variant
-   align.comp   [TNR+align, every other frame] 1/4-res luma, per-tile motion search
+   align.comp   [TNR+align, every 2nd frame, every 4th when the guard is tight] 1/4-res luma
+                (4 bilinear reads per 4x4 block), per-tile motion search
    clean.comp   hot-pixel repair, chroma NR (cross-bilateral), temporal NR against
                 the ping-pong history (motion-warped); noise model × shading gain
    render.comp  crop/rotate, Catmull-Rom luma + bilinear chroma, + HQ detail,
@@ -49,7 +50,10 @@ viewfinder that shows what is being recorded. Nothing from the ISP's processed p
 ## GPU performance guard (`VulkanEngine::readTimestamps`)
 
 The frame budget is the camera's frame interval. The guard pauses optional stages when the
-smoothed GPU frame time stays > 85% of budget (~0.5 s): alignment (0), then HQ (1), then NR (2).
+smoothed GPU frame time stays > 85% of budget (~0.5 s): first the motion search drops from every
+2nd to every 4th frame (stage 3; clean reuses the field, assuming steady motion), then alignment
+off (0), then HQ (1), then NR (2); restored in reverse. The alignment stages are skipped when
+temporal NR + alignment isn't in use.
 It measures what each pause saved; that number is inflated while overloaded, so it is only a
 placeholder until a **restore** measures the stage's real cost (`costReliable_`). A paused stage
 comes back when `gpu + cost < 85% − 0.5 ms` (~1 s), or by trial when its cost isn't reliable and

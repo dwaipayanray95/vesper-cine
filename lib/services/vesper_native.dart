@@ -46,6 +46,7 @@ class EngineStatus {
   final List<double> face; // largest face: x, y, w, h (output-normalised); w == 0 if none
   final double gpuMs; // measured GPU time per frame
   final bool alignThrottled; // NR alignment auto-disabled: GPU over budget
+  final bool alignReduced; // guard's first step: motion search every 4th frame instead of every 2nd
   final bool nrThrottled; // temporal/chroma NR also paused: GPU still over budget
   final bool hqAvailable; // HQ oversampling supported by the GPU and not paused by the budget guard
   final bool hqSupported; // the GPU can run HQ oversampling at all
@@ -81,6 +82,7 @@ class EngineStatus {
       face = (j['face'] as List).map((e) => (e as num).toDouble()).toList(),
       gpuMs = (j['gpuMs'] as num).toDouble(),
       alignThrottled = j['alignThrottled'] as bool,
+      alignReduced = (j['alignReduced'] as bool?) ?? false,
       nrThrottled = j['nrThrottled'] as bool,
       hqAvailable = (j['hqAvailable'] as bool?) ?? false,
       hqSupported = (j['hqSupported'] as bool?) ?? false,
@@ -228,6 +230,7 @@ class VesperNative {
   late final void Function(int, int) _setNativeIsos;
   late final void Function(int) _setBudgetGuard;
   late final void Function(int) _setExperiments;
+  late final void Function(int) _setAlignInterval;
   late final void Function(int) _setRepeatPass;
   late final int Function(Pointer<Utf8>, Pointer<Utf8>) _isoSweepStart;
   late final void Function() _isoSweepCancel;
@@ -317,6 +320,7 @@ class VesperNative {
       _setNativeIsos = _lib.lookupFunction<Void Function(Int32, Int32), void Function(int, int)>('vesper_set_native_isos');
       _setBudgetGuard = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_budget_guard');
       _setExperiments = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_experiments');
+      _setAlignInterval = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_align_interval');
       _setRepeatPass = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_repeat_pass');
       _setProcessingPaused = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_processing_paused');
       _setOversampling = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_oversampling');
@@ -549,6 +553,9 @@ class VesperNative {
   /// GPU benchmark A/B: opt-in optimisation experiments (bit mask, see
   /// VulkanEngine::kExp*); 0 = the proven GPU path.
   void setExperiments(int mask) => _loaded ? _setExperiments(mask) : null;
+
+  /// GPU benchmark: motion search every n-th frame (0 = automatic, the guard decides).
+  void setAlignInterval(int n) => _loaded ? _setAlignInterval(n) : null;
 
   /// GPU benchmark pass-cost probe: run one pass (or part of one) an extra
   /// time per frame (-1 off, 0 unpack, 1 HQ, 2 alignment, 3 NR, 4 render,
