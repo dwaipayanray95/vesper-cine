@@ -9,9 +9,7 @@
 #include "shaders/green_rgba_spv.h"
 #include "shaders/green_fp16_probe1_spv.h"
 #include "shaders/green_fp16_probe2_spv.h"
-#include "shaders/green_fp16_wide_spv.h"
 #include "shaders/green_fp16_exact_spv.h"
-#include "shaders/green_fp16_smooth_spv.h"
 
 #include <algorithm>
 #include <cmath>
@@ -319,11 +317,9 @@ bool VulkanEngine::createPipelines() {
                          : makePipe(kGreenSpv, sizeof(kGreenSpv), greenLayout_, greenPipeLayout_, greenPipe_))
                 : (fp16_ ? makePipe(kGreenRgbaFp16Spv, sizeof(kGreenRgbaFp16Spv), greenLayout_, greenPipeLayout_, greenPipe_)
                          : makePipe(kGreenRgbaSpv, sizeof(kGreenRgbaSpv), greenLayout_, greenPipeLayout_, greenPipe_))) &&
-           // HQ probes / wide tiles exist for the phone's path only (16-bit maths, R16F detail image).
+           // HQ probes / exact-shading reference exist for the phone's path only (16-bit maths, R16F detail image).
            (!fp16_ || hqFormat_ != VK_FORMAT_R16_SFLOAT ||
-            (makePipe(kGreenFp16WideSpv, sizeof(kGreenFp16WideSpv), greenLayout_, greenPipeLayout_, greenWidePipe_) &&
-             makePipe(kGreenFp16ExactSpv, sizeof(kGreenFp16ExactSpv), greenLayout_, greenPipeLayout_, greenExactPipe_) &&
-             makePipe(kGreenFp16SmoothSpv, sizeof(kGreenFp16SmoothSpv), greenLayout_, greenPipeLayout_, greenSmoothPipe_) &&
+            (makePipe(kGreenFp16ExactSpv, sizeof(kGreenFp16ExactSpv), greenLayout_, greenPipeLayout_, greenExactPipe_) &&
              makePipe(kGreenFp16Probe1Spv, sizeof(kGreenFp16Probe1Spv), greenLayout_, greenPipeLayout_, greenProbe1Pipe_) &&
              makePipe(kGreenFp16Probe2Spv, sizeof(kGreenFp16Probe2Spv), greenLayout_, greenPipeLayout_, greenProbe2Pipe_)));
 }
@@ -356,7 +352,7 @@ void VulkanEngine::release() {
     if (cleanPipe_) vkDestroyPipeline(device_, cleanPipe_, nullptr);
     if (alignPipe_) vkDestroyPipeline(device_, alignPipe_, nullptr);
     if (greenPipe_) vkDestroyPipeline(device_, greenPipe_, nullptr);
-    for (VkPipeline* p : {&greenProbe1Pipe_, &greenProbe2Pipe_, &greenWidePipe_, &greenExactPipe_, &greenSmoothPipe_}) {
+    for (VkPipeline* p : {&greenProbe1Pipe_, &greenProbe2Pipe_, &greenExactPipe_}) {
         if (*p) vkDestroyPipeline(device_, *p, nullptr);
         *p = VK_NULL_HANDLE;
     }
@@ -1084,12 +1080,8 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
     auto tCopy = Clock::now();
 
     const int repeat = repeatPass_, exps = experiments_;
-    // Benchmark experiments: pipeline variant + its tile / workgroup size.
-    const bool hqWide = (exps & kExpHqWide) && greenWidePipe_;
-    VkPipeline greenPipe = hqWide ? greenWidePipe_
-                         : ((exps & kExpHqExactShading) && greenExactPipe_ ? greenExactPipe_
-                            : ((exps & kExpHqSmoothShading) && greenSmoothPipe_ ? greenSmoothPipe_ : greenPipe_));
-    const uint32_t greenTileX = hqWide ? 32 : 16;
+    // Experiments: pipeline variant.
+    VkPipeline greenPipe = (exps & kExpHqExactShading) && greenExactPipe_ ? greenExactPipe_ : greenPipe_;
     constexpr uint32_t renderWgX = 16, renderWgY = 8; // render.comp workgroup
     constexpr uint32_t cleanWgX = 16, cleanWgY = 8;   // clean.comp workgroup
     VkCommandBuffer cb = s.cmd;
@@ -1141,8 +1133,7 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
         auto dispatchGreen = [&](VkPipeline pipe) {
             vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
             vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, greenPipeLayout_, 0, 1, &s.greenSet, 0, nullptr);
-            const uint32_t tileX = pipe == greenPipe ? greenTileX : 16; // probes use the normal tiles
-            vkCmdDispatch(cb, (static_cast<uint32_t>(g.rawW / 2) + tileX - 1) / tileX, static_cast<uint32_t>((g.rawH / 2 + 15) / 16), 1);
+            vkCmdDispatch(cb, static_cast<uint32_t>((g.rawW / 2 + 15) / 16), static_cast<uint32_t>((g.rawH / 2 + 15) / 16), 1);
         };
         // Probes 7/8: a partial HQ pass first (its output is overwritten).
         VkPipeline probe = repeat == 7 ? greenProbe1Pipe_ : (repeat == 8 ? greenProbe2Pipe_ : VK_NULL_HANDLE);

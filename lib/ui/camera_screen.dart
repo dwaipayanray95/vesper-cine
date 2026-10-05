@@ -365,12 +365,9 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     ('All on, + HQ load', 7),
     ('All on, + HQ load+demos', 8),
   ];
-  // Opt-in experiments: (label, VulkanEngine::kExp* bit).
-  static const List<(String, int)> _benchExperiments = [
-    ('Exp: HQ smooth vignetting', 64),
-    ('Exp: HQ exact vignetting', 32),
-    ('Exp: HQ exact + wide tiles', 1),
-  ];
+  // Opt-in experiments: (label, VulkanEngine::kExp* bit). None pending
+  // (0.13.3: HQ smooth vignetting became the default; exact / wide dropped).
+  static const List<(String, int)> _benchExperiments = [];
   // The guard's first step: motion search every 4th frame instead of every 2nd.
   static const _benchAlignReduced = 'All on, align every 4th';
 
@@ -534,7 +531,11 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   // benchmark's experiment numbers unreliable: +14 ms drift on 5 Oct) hits
   // both sides alike. ~35 s at 60 fps.
   Future<void> _runGpuAbTest() async {
-    if (_benchmarking || !_streaming || _recording || _benchExperiments.isEmpty) return;
+    if (_benchmarking || !_streaming || _recording) return;
+    if (_benchExperiments.isEmpty) {
+      _showBenchResults('GPU A/B test', ['No experiments to test in this build.']);
+      return;
+    }
     setState(() => _benchmarking = true);
     final generation = _streamGeneration;
     String? interrupted;

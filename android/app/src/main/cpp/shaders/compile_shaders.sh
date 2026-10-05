@@ -42,11 +42,10 @@ PY
 variant green_rgba GreenRgba green -DGREEN_RGBA16F
 variant green_fp16 GreenFp16 green -DHQ_FP16
 variant green_rgba_fp16 GreenRgbaFp16 green -DGREEN_RGBA16F -DHQ_FP16
-# GPU benchmark experiments (opt-in, VulkanEngine::setExperiments) and probes
-# (partial passes whose cost shows where a pass spends its time).
+# GPU benchmark probes (partial passes whose cost shows where a pass spends
+# its time) and the exact-shading reference for the GPU test
+# (VulkanEngine::setExperiments).
 variant green_fp16_probe1 GreenFp16Probe1 green -DHQ_FP16 -DHQ_PROBE=1
 variant green_fp16_probe2 GreenFp16Probe2 green -DHQ_FP16 -DHQ_PROBE=2
 variant green_fp16_exact GreenFp16Exact green -DHQ_FP16 -DHQ_EXACT_SHADING
-variant green_fp16_smooth GreenFp16Smooth green -DHQ_FP16 -DHQ_SMOOTH_SHADING
-variant green_fp16_wide GreenFp16Wide green -DHQ_FP16 -DHQ_WIDE
 echo "SPIR-V headers regenerated"

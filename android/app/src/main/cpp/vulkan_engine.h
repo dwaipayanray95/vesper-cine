@@ -107,9 +107,9 @@ public:
     bool oversamplingAvailable() const { return hqSupported_ && !hqThrottled_; }
     // GPU benchmark A/B: opt-in optimisation experiments (kExp* bits), off in
     // normal use until the benchmark on the phone has confirmed them.
-    static constexpr int kExpHqWide = 1;       // HQ on 32x16-quad tiles (64x32 px), halo shared; implies exact shading
-    static constexpr int kExpHqExactShading = 32; // HQ: lens shading per raw pixel (quality fix) instead of per 32x32 block
-    static constexpr int kExpHqSmoothShading = 64; // HQ: shading interpolated from the tile's corners (cheaper fix)
+    // HQ lens shading exactly per raw pixel: the GPU test's reference for the
+    // default corner interpolation (too slow for use: +3.2 ms on the phone).
+    static constexpr int kExpHqExactShading = 32;
     void setExperiments(int mask) { experiments_ = mask; }
     // GPU benchmark: run the motion search every n-th frame (2 = normal,
     // 4 = the guard's reduced rate); 0 = automatic (guard decides).
@@ -217,8 +217,7 @@ private:
     VkPipeline unpackPipe_ = VK_NULL_HANDLE, cleanPipe_ = VK_NULL_HANDLE, renderPipe_ = VK_NULL_HANDLE;
     std::atomic<int> experiments_{0}, repeatPass_{-1}, alignInterval_{0};
     // Benchmark experiments / probes (VK_NULL_HANDLE where the variant doesn't apply: HQ ones need fp16 + R16F).
-    VkPipeline greenProbe1Pipe_ = VK_NULL_HANDLE, greenProbe2Pipe_ = VK_NULL_HANDLE, greenWidePipe_ = VK_NULL_HANDLE;
-    VkPipeline greenExactPipe_ = VK_NULL_HANDLE, greenSmoothPipe_ = VK_NULL_HANDLE;
+    VkPipeline greenProbe1Pipe_ = VK_NULL_HANDLE, greenProbe2Pipe_ = VK_NULL_HANDLE, greenExactPipe_ = VK_NULL_HANDLE;
     VkSampler sampler_ = VK_NULL_HANDLE;
 
     Slot slots_[kRingSize];

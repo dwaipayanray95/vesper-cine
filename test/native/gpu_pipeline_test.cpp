@@ -600,26 +600,21 @@ int main() {
         };
         std::vector<uint16_t> cur, other;
         bool ok = runSeq(0, -1, cur);
-        std::printf("  experiments, max difference (codes):");
-        for (int bit : {VulkanEngine::kExpHqExactShading, VulkanEngine::kExpHqSmoothShading, VulkanEngine::kExpHqWide}) {
-            ok = runSeq(bit, -1, other) && ok;
-            int d = maxDiff(cur, other);
-            std::printf(" exp %d: %d", bit, d);
-            check(d == 0, "experiment leaves the output unchanged (no vignetting)", d, 0);
-        }
-        std::printf("\n");
         {
-            // With vignetting: exact per-pixel shading changes HQ a little (it's the fix);
-            // wide tiles must then give exactly the same result as 32-px tiles.
-            std::vector<uint16_t> shadedCur, shadedExact, shadedWide, shadedSmooth;
-            ok = runSeq(0, -1, shadedCur, true) && runSeq(VulkanEngine::kExpHqExactShading, -1, shadedExact, true) &&
-                 runSeq(VulkanEngine::kExpHqWide, -1, shadedWide, true) &&
-                 runSeq(VulkanEngine::kExpHqSmoothShading, -1, shadedSmooth, true) && ok;
-            int dFix = maxDiff(shadedCur, shadedExact), dWide = maxDiff(shadedExact, shadedWide);
-            int dSmooth = maxDiff(shadedSmooth, shadedExact);
-            std::printf("  with vignetting: exact shading vs per-block max %d codes; wide vs 32-px tiles (both exact) %d;"
-                        " smooth (tile corners) vs exact %d\n", dFix, dWide, dSmooth);
-            check(dWide == 0, "HQ wide tiles give the same output as 32-px tiles (exact shading)", dWide, 0);
+            // HQ lens shading: the default (map interpolated from the loaded
+            // region's corners) against the exact per-pixel reference. Same
+            // output without vignetting; with it, at most a few dozen codes at
+            // a few pixels near map-cell boundaries (the old one value per
+            // 32x32 block was 92 codes off on this map, 0.13.2).
+            ok = runSeq(VulkanEngine::kExpHqExactShading, -1, other) && ok;
+            int dFlat = maxDiff(cur, other);
+            std::vector<uint16_t> shadedCur, shadedExact;
+            ok = runSeq(0, -1, shadedCur, true) && runSeq(VulkanEngine::kExpHqExactShading, -1, shadedExact, true) && ok;
+            int dShaded = maxDiff(shadedCur, shadedExact);
+            std::printf("  HQ shading vs exact reference, max difference: no vignetting %d codes, with vignetting %d\n",
+                        dFlat, dShaded);
+            check(dFlat == 0, "HQ shading matches the exact reference without vignetting", dFlat, 0);
+            check(dShaded <= 50, "HQ shading close to the exact reference with vignetting (<= 50 codes)", dShaded, 50);
         }
         int repeatDiff = 0;
         for (int pass = 0; pass <= 8; ++pass) {
