@@ -139,12 +139,13 @@ struct TestScene : Scene {
 };
 
 static bool runFrame(VulkanEngine& gpu, const std::vector<uint8_t>& raw, const FrameParams& p,
-                     const std::vector<float>* shading, P010& out) {
+                     const std::vector<float>* shading, P010& out, const std::vector<int32_t>* defects = nullptr) {
     FrameInput in;
     in.raw = raw.data();
     in.rawSize = raw.size();
     in.params = p;
     if (shading) { in.shading = shading->data(); in.shadingFloats = shading->size(); }
+    if (defects) { in.defects = defects->data(); in.defectCount = defects->size() / 2; }
     int slot = -1;
     if (!gpu.processFrame(in, &slot) || slot < 0) return false;
     size_t size = 0;
@@ -226,6 +227,52 @@ int main() {
         int fixedPeak = peak(f);
         check(unfixed > greyY + 40, "hot pixel visible without the fix", unfixed, greyY + 40);
         check(fixedPeak <= greyY + 4, "hot pixel removed by the fix", fixedPeak, greyY + 4);
+    }
+
+    // 4c. A moderate hot pixel in a noisy dark area (10 sigma, like most of the
+    //     Pixel 10's at high ISO, dark sweep 5 Oct): the noise threshold must
+    //     come from the neighbours' level. At the hot value itself (shot-noise
+    //     term S * v) the old rule demanded ~12 sigma and kept it.
+    {
+        struct Dark : Scene {
+            Vec3 at(int, int) const override { return {0.005f, 0.005f, 0.005f}; }
+        };
+        const std::vector<uint8_t> darkRaw = makeNoisyRaw10(Dark(), 7);
+        std::vector<uint8_t> hotRaw = darkRaw;
+        const int hx = W / 2 + 1, hy = H / 2; // GRBG: odd column, even row = R
+        {
+            uint8_t* gp = &hotRaw[hy * STRIDE + (hx / 4) * 5];
+            int i = hx % 4, dn = ((gp[i] << 2) | ((gp[4] >> (2 * i)) & 3)) + 58; // +0.06 of the range: ~10 sigma
+            gp[i] = static_cast<uint8_t>(dn >> 2);
+            gp[4] = static_cast<uint8_t>((gp[4] & ~(3 << (2 * i))) | ((dn & 3) << (2 * i)));
+        }
+        FrameParams dp = baseParams(0);
+        dp.noise[2] = 1e-3f; dp.noise[3] = 2.8e-5f; // S, O: 3.3e-5 at the scene level, as the generated noise
+        dp.cleanFlags[0] = 1;
+        auto spot = [&](const P010& fr) {
+            int m = 0;
+            for (int dy = -2; dy <= 2; ++dy)
+                for (int dx = -2; dx <= 2; ++dx) m = std::max(m, fr.luma(hx * OUT_W / W + dx, hy * OUT_H / H + dy));
+            return m;
+        };
+        runFrame(gpu, darkRaw, dp, nullptr, f);
+        int clean = spot(f);
+        runFrame(gpu, hotRaw, dp, nullptr, f);
+        int fixedSpot = spot(f);
+        dp.cleanFlags[0] = 0;
+        runFrame(gpu, hotRaw, dp, nullptr, f);
+        int unfixedSpot = spot(f);
+        check(unfixedSpot > clean + 15, "moderate hot pixel visible without the fix", unfixedSpot, clean + 15);
+        check(fixedSpot <= clean + 4, "moderate hot pixel (10 sigma) in noisy shadows repaired", fixedSpot, clean + 4);
+        std::printf("  moderate hot pixel in shadows: clean %d, unfixed %d, fixed %d (Y codes)\n", clean, unfixedSpot, fixedSpot);
+
+        // 4d. Static hot-pixel map (sensor profile): a listed pixel is replaced
+        //     by its neighbours' median before the GPU sees the frame, with the
+        //     per-frame rule off.
+        std::vector<int32_t> map = {hx, hy};
+        runFrame(gpu, hotRaw, dp, nullptr, f, &map);
+        int mapped = spot(f);
+        check(std::abs(mapped - clean) <= 2, "static hot-pixel map repairs a listed pixel", mapped, clean);
     }
 
     // 4b. Fine detail must survive the hot-pixel fix. A small white glint on

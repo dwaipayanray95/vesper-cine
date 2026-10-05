@@ -102,6 +102,20 @@ std::string gCalibrationRequest;  // base path for the next frame dump ("" = non
 std::string gCalibrationDevice;
 std::string gCalibrationSaved;    // last written base path (reported in status)
 
+// Per-device sensor profile (assets/sensor_profiles, tools/calibration/sensor.py
+// --profile), gStateMutex: measured / HAL dark noise (O) per ISO, and the
+// static hot-pixel map in pre-correction array coordinates.
+struct SensorProfile {
+    std::vector<float> isos, noiseFactors;
+    std::vector<int32_t> defects;   // x, y pairs
+    int version = 0;
+};
+SensorProfile gSensorProfile;
+
+float sensorNoiseFactorLocked(int iso) {
+    return static_cast<float>(noiseFactorAt(gSensorProfile.isos, gSensorProfile.noiseFactors, iso));
+}
+
 std::string jsonEscape(const std::string& in);
 
 DngCalibration withProfile(DngCalibration cal) {
@@ -127,10 +141,16 @@ std::string jsonArray(const float* v, size_t n) {
 
 // Noise model the GPU passes use (clean / align / render): SENSOR_NOISE_PROFILE
 // averaged over channels, with fallbacks where the HAL omits it or reports a
-// non-positive value (Pixel reports a slightly negative O).
-void engineNoise(const CaptureMetadata& m, float& s, float& o) {
+// non-positive value; O (the dark noise) times the sensor profile's measured
+// correction for this ISO (Pixel 10: the HAL's O is 2-2.7x too low from ISO ~960).
+void engineNoise(const CaptureMetadata& m, float oFactor, float& s, float& o) {
     s = m.noiseS > 0 ? m.noiseS : 2e-4f; // typical phone sensor at base ISO if the HAL omits it
-    o = m.noiseO > 0 ? m.noiseO : 2e-6f;
+    o = (m.noiseO > 0 ? m.noiseO : 2e-6f) * oFactor;
+}
+
+float sensorNoiseFactor(int iso) {
+    std::lock_guard<std::mutex> lk(gStateMutex);
+    return sensorNoiseFactorLocked(iso);
 }
 
 // A RAW frame copied off the camera thread (calibration captures and sweeps).
@@ -224,7 +244,7 @@ std::string frameMetaJson(const CaptureMetadata& m, const SensorInfo& info) {
     double analogIso, digital;
     isoSplit(info, m.iso, analogIso, digital);
     float es, eo;
-    engineNoise(m, es, eo);
+    engineNoise(m, sensorNoiseFactor(m.iso), es, eo);
     std::string j;
     char b[512];
     std::snprintf(b, sizeof(b), "\"iso\":%d,\"exposureNs\":%lld,\"frameDurationNs\":%lld,\"timestampNs\":%lld,"
@@ -1267,11 +1287,34 @@ void onFrame(const RawFrame& f) {
     if ((frameIndex & 3) == 3 && gScopesEnabled) computeScopes(f);
 
     Settings s;
+    float noiseFactor;
+    // Static hot-pixel map in this readout's raw coordinates (camera thread only).
+    static std::vector<int32_t> defectsRaw;
+    static int defectsVersion = -1, defectsW = 0, defectsH = 0;
     {
         std::lock_guard<std::mutex> lk(gStateMutex);
         s = gSettings;
         gRawW = f.width;
         gRawH = f.height;
+        noiseFactor = sensorNoiseFactorLocked(meta.iso);
+        if (defectsVersion != gSensorProfile.version || defectsW != f.width || defectsH != f.height) {
+            defectsVersion = gSensorProfile.version;
+            defectsW = f.width;
+            defectsH = f.height;
+            float map[4];
+            rawToArrayMap(info, f.width, f.height, map);
+            std::vector<int32_t> xy;
+            // Only an unscaled readout maps photosites 1:1 (true for both Pixel 10 modes).
+            if (map[0] == 1.0f && (static_cast<int>(map[3]) & 1) == 0)
+                for (size_t i = 0; i + 1 < gSensorProfile.defects.size(); i += 2) {
+                    xy.push_back(gSensorProfile.defects[i] - static_cast<int32_t>(map[2]));
+                    xy.push_back(gSensorProfile.defects[i + 1] - static_cast<int32_t>(map[3]));
+                }
+            defectsRaw = prepareDefects(std::move(xy), f.width, f.height);
+            if (!gSensorProfile.defects.empty())
+                LOGI("Hot-pixel map: %zu of %zu pixels inside this %dx%d readout", defectsRaw.size() / 2,
+                     gSensorProfile.defects.size() / 2, f.width, f.height);
+        }
     }
     int outW, outH;
     outputSize(s, outW, outH);
@@ -1350,7 +1393,7 @@ void onFrame(const RawFrame& f) {
     p.flags[3] = s.sharpening | (s.oversampling ? 16 : 0);
     p.noise[0] = s.temporalNr;
     p.noise[1] = s.chromaNr;
-    engineNoise(meta, p.noise[2], p.noise[3]);
+    engineNoise(meta, noiseFactor, p.noise[2], p.noise[3]);
     p.cleanFlags[0] = s.hotPixelFix ? 1 : 0;
     p.cleanFlags[1] = s.temporalNr > 0 ? 1 : 0;
     p.cleanFlags[3] = s.nrAlignment ? 1 : 0;
@@ -1410,6 +1453,10 @@ void onFrame(const RawFrame& f) {
     }
     in.raw = f.data;
     in.rawSize = f.size;
+    if (s.hotPixelFix && !defectsRaw.empty()) {
+        in.defects = defectsRaw.data();
+        in.defectCount = defectsRaw.size() / 2;
+    }
 
     const bool recording = gRecorder && gRecorder->isRecording();
     int slot = -1;
@@ -2060,6 +2107,27 @@ EXPORT void vesper_set_color_profile(int32_t count, const float* matrices, const
         gColor.setCalibration(withProfile(gCamera->sensorInfo().calibration));
         setColorLocked(gColor.fromKelvinTint(gSettings.color.kelvin, gSettings.color.tint));
     }
+}
+
+// Per-device sensor profile (assets/sensor_profiles/*.json, written by
+// tools/calibration/sensor.py --profile): dark-noise (O) correction factors at
+// `nIso` ISOs, and `nDefects` hot pixels as (x, y) in pre-correction array
+// coordinates. Zero counts clear.
+EXPORT void vesper_set_sensor_profile(int32_t nIso, const float* isos, const float* factors, int32_t nDefects,
+                                      const int32_t* xy) {
+    std::lock_guard<std::mutex> lk(gStateMutex);
+    SensorProfile& p = gSensorProfile;
+    p.isos.assign(isos, isos + std::max(nIso, 0));
+    p.noiseFactors.assign(factors, factors + std::max(nIso, 0));
+    for (float& f : p.noiseFactors) f = std::clamp(f, 0.25f, 8.0f);
+    p.defects.assign(xy, xy + 2 * std::max(nDefects, 0));
+    ++p.version;
+    float lo = 1, hi = 1;
+    if (!p.noiseFactors.empty()) {
+        lo = *std::min_element(p.noiseFactors.begin(), p.noiseFactors.end());
+        hi = *std::max_element(p.noiseFactors.begin(), p.noiseFactors.end());
+    }
+    LOGI("Sensor profile: dark-noise correction at %d ISOs (x%.2f..x%.2f), %d hot pixels mapped", nIso, lo, hi, nDefects);
 }
 
 // Switch between the chart profile (if loaded) and the factory calibration.

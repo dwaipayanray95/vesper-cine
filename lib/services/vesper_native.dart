@@ -256,6 +256,7 @@ class VesperNative {
   late final void Function(int, double, double) _setMetering;
   late final void Function(Pointer<Utf8>, Pointer<Utf8>) _captureCalibration;
   late final void Function(int, Pointer<Float>, Pointer<Float>) _setColorProfile;
+  late final void Function(int, Pointer<Float>, Pointer<Float>, int, Pointer<Int32>) _setSensorProfile;
   late final void Function(int) _useColorProfile;
 
   VesperNative._() {
@@ -376,6 +377,10 @@ class VesperNative {
             Void Function(Int32, Pointer<Float>, Pointer<Float>),
             void Function(int, Pointer<Float>, Pointer<Float>)
           >('vesper_set_color_profile');
+      _setSensorProfile = _lib.lookupFunction<
+        Void Function(Int32, Pointer<Float>, Pointer<Float>, Int32, Pointer<Int32>),
+        void Function(int, Pointer<Float>, Pointer<Float>, int, Pointer<Int32>)
+      >('vesper_set_sensor_profile');
       _useColorProfile = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_use_color_profile');
       _loaded = true;
     } catch (_) {
@@ -777,6 +782,29 @@ class VesperNative {
     } finally {
       calloc.free(m);
       calloc.free(k);
+    }
+  }
+
+  /// Per-device sensor profile (tools/calibration/sensor.py --profile): dark-noise
+  /// correction factors per ISO and the static hot-pixel map (array x, y pairs).
+  void setSensorProfile(List<double> isos, List<double> noiseFactors, List<int> defectsXY) {
+    if (!_loaded) return;
+    final n = isos.length < noiseFactors.length ? isos.length : noiseFactors.length;
+    final d = defectsXY.length ~/ 2;
+    final pi = calloc<Float>(n + 1), pf = calloc<Float>(n + 1), pd = calloc<Int32>(d * 2 + 1);
+    try {
+      for (var i = 0; i < n; i++) {
+        pi[i] = isos[i];
+        pf[i] = noiseFactors[i];
+      }
+      for (var i = 0; i < d * 2; i++) {
+        pd[i] = defectsXY[i];
+      }
+      _setSensorProfile(n, pi, pf, d, pd);
+    } finally {
+      calloc.free(pi);
+      calloc.free(pf);
+      calloc.free(pd);
     }
   }
 

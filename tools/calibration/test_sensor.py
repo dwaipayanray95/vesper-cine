@@ -84,6 +84,16 @@ def main(argv):
     assert all(c["hot"] == truth["hot"] for c in counts), counts
     assert r["defects"]["levels"][0]["caught"] == 1.0, r["defects"]["levels"][0]
 
+    # Sensor profile for the app (from the dark sweep alone: O measured, S from the camera).
+    with tempfile.TemporaryDirectory() as tmp:
+        prof_path = os.path.join(tmp, "profile.json")
+        rd = sensor.report([files[0]], file=io.StringIO(), profile=prof_path, device="Synthetic", camera="0")
+        prof = json.load(open(prof_path))
+    assert prof["format"] == "vesper-sensor-profile/1" and prof["device"] == "Synthetic"
+    assert not rd["noise"][50]["sMeasured"] and abs(rd["noise"][50]["O"] / truth["O"][0] - 1) < 0.15
+    assert prof["defectCount"] == truth["hot"] and len(prof["defects"]) == 2 * truth["hot"], prof["defectCount"]
+    assert prof["darkNoise"] == []  # the synthetic HAL O is negative: no ratio to correct
+
     # Helpers.
     assert abs(float(sensor.apple_log(0.18)) - 0.4883) < 2e-4
     rng = np.random.default_rng(2)

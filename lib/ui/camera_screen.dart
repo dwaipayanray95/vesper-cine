@@ -280,6 +280,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       _loadSettings();
     }
     await _loadColorProfile();
+    await _loadSensorProfile();
     final recovered = await _engine.recoverRecordings();
     if (recovered.isNotEmpty && mounted) {
       final (name, complete) = recovered.first;
@@ -858,6 +859,31 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       }
     } catch (_) {
       // No or malformed profile: factory calibration.
+    }
+  }
+
+  // Sensor calibrations (tools/calibration/sensor.py --profile) ship as
+  // assets/sensor_profiles/*.json: dark-noise correction per ISO and the
+  // static hot-pixel map. Applied automatically for the matching phone/camera.
+  Future<void> _loadSensorProfile() async {
+    try {
+      final manifest = await AssetManifest.loadFromAssetBundle(rootBundle);
+      for (final path in manifest.listAssets().where(
+        (a) => a.startsWith('assets/sensor_profiles/') && a.endsWith('.json'),
+      )) {
+        final j = jsonDecode(await rootBundle.loadString(path)) as Map<String, dynamic>;
+        if (j['format'] != 'vesper-sensor-profile/1') continue;
+        if (j['device'] != _deviceModel || '${j['cameraId']}' != _cameraId) continue;
+        final noise = (j['darkNoise'] as List).cast<Map<String, dynamic>>();
+        _engine.setSensorProfile(
+          [for (final n in noise) (n['iso'] as num).toDouble()],
+          [for (final n in noise) (n['factor'] as num).toDouble()],
+          (j['defects'] as List).map((e) => (e as num).toInt()).toList(),
+        );
+        return;
+      }
+    } catch (_) {
+      // No or malformed profile: the camera's own noise model, no static map.
     }
   }
 

@@ -25,7 +25,7 @@ fi
 # SIGPIPE now and then, which silently skipped this whole test.)
 if [ -f /usr/include/vulkan/vulkan.h ] && ldconfig -p | grep libvulkan.so >/dev/null; then
   g++ -std=c++20 -O1 -Wno-missing-field-initializers -I"$ROOT/test/native/android_stubs" -I"$CPP" \
-    "$CPP/vulkan_engine.cpp" "$ROOT/test/native/gpu_pipeline_test.cpp" -lvulkan -o "$OUT/gpu_test"
+    "$CPP/vulkan_engine.cpp" "$CPP/sensor_calib.cpp" "$ROOT/test/native/gpu_pipeline_test.cpp" -lvulkan -o "$OUT/gpu_test"
   "$OUT/gpu_test" | grep -v "^\[Vesper_Vulkan\]" || exit 1
 fi
 

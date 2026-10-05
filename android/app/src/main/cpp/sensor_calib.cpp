@@ -318,4 +318,66 @@ double rawPatchMean(const uint8_t* data, int width, int height, int rowStride, i
     return n ? acc / n : 0.0;
 }
 
+namespace {
+int rawAt(const uint8_t* src, int rowStride, int x, int y) {
+    const uint8_t* g = src + static_cast<size_t>(y) * rowStride + (x >> 2) * 5;
+    int i = x & 3;
+    return (g[i] << 2) | ((g[4] >> (2 * i)) & 3);
+}
+} // namespace
+
+void repairRawDefects(const uint8_t* src, uint8_t* dst, int width, int height, int rowStride, const int32_t* xy,
+                      size_t count) {
+    size_t k = 0;
+    while (k < count) {
+        const int y = xy[2 * k + 1], gx = xy[2 * k] >> 2;
+        uint8_t group[5];
+        std::copy(src + static_cast<size_t>(y) * rowStride + gx * 5, src + static_cast<size_t>(y) * rowStride + gx * 5 + 5, group);
+        for (; k < count && xy[2 * k + 1] == y && (xy[2 * k] >> 2) == gx; ++k) {
+            const int x = xy[2 * k];
+            if (x < 2 || y < 2 || x >= width - 2 || y >= height - 2) continue;
+            int n[8], c = 0;
+            for (int dy = -2; dy <= 2; dy += 2)
+                for (int dx = -2; dx <= 2; dx += 2)
+                    if (dx || dy) n[c++] = rawAt(src, rowStride, x + dx, y + dy);
+            std::sort(n, n + 8);
+            const int v = (n[3] + n[4] + 1) >> 1;
+            const int i = x & 3;
+            group[i] = static_cast<uint8_t>(v >> 2);
+            group[4] = static_cast<uint8_t>((group[4] & ~(3 << (2 * i))) | ((v & 3) << (2 * i)));
+        }
+        std::copy(group, group + 5, dst + static_cast<size_t>(y) * rowStride + gx * 5);
+    }
+}
+
+std::vector<int32_t> prepareDefects(std::vector<int32_t> xy, int width, int height) {
+    std::vector<std::pair<int32_t, int32_t>> p;
+    for (size_t i = 0; i + 1 < xy.size(); i += 2) {
+        int32_t x = xy[i], y = xy[i + 1];
+        if (x >= 2 && y >= 2 && x < width - 2 && y < height - 2) p.push_back({y, x});
+    }
+    std::sort(p.begin(), p.end());
+    p.erase(std::unique(p.begin(), p.end()), p.end());
+    std::vector<int32_t> out;
+    out.reserve(p.size() * 2);
+    for (const auto& [y, x] : p) {
+        out.push_back(x);
+        out.push_back(y);
+    }
+    return out;
+}
+
+double noiseFactorAt(const std::vector<float>& isos, const std::vector<float>& factors, double iso) {
+    const size_t n = std::min(isos.size(), factors.size());
+    if (n == 0 || iso <= 0) return 1.0;
+    if (iso <= isos[0]) return factors[0];
+    if (iso >= isos[n - 1]) return factors[n - 1];
+    for (size_t i = 1; i < n; ++i) {
+        if (iso > isos[i]) continue;
+        double t = std::log(iso / isos[i - 1]) / std::log(static_cast<double>(isos[i]) / isos[i - 1]);
+        return std::exp(std::log(factors[i - 1]) + t * (std::log(factors[i]) - std::log(factors[i - 1])));
+    }
+    return factors[n - 1];
+}
+
 } // namespace vesper

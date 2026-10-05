@@ -1,4 +1,5 @@
 #include "vulkan_engine.h"
+#include "sensor_calib.h"
 #include "shaders/unpack_spv.h"
 #include "shaders/render_spv.h"
 #include "shaders/clean_spv.h"
@@ -1048,6 +1049,9 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
     presentCpuFallback(s);
 
     std::memcpy(s.raw.mapped, in.raw, in.rawSize);
+    if (in.defects && in.defectCount) // ~600 pixels: a few µs
+        repairRawDefects(in.raw, static_cast<uint8_t*>(s.raw.mapped), in.params.rawInfo[0], in.params.rawInfo[1],
+                         in.params.rawInfo[2], in.defects, in.defectCount);
     if (in.shading && g.shadingFloats > 0) std::memcpy(s.shading.mapped, in.shading, sizeof(float) * g.shadingFloats);
     FrameParams params = in.params;
     params.flags[0] = encoderSlot ? 1 : 0;

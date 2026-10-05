@@ -261,11 +261,18 @@ def analyse_noise(white, dark, black):
     out = {}
     for iso in sorted(set(pts[:, 0].astype(int))):
         p = pts[pts[:, 0] == iso]
-        S, O = fit_sv(p[:, 2], p[:, 3])
-        per_site = [fit_sv(p[p[:, 1] == k, 2], p[p[:, 1] == k, 3]) if np.sum(p[:, 1] == k) > 3 else (S, O)
-                    for k in range(4)]
         ref = next((s for s in white + dark if s.iso == iso), None)
-        res = {"iso": iso, "S": S, "O": O, "perSite": per_site, "points": int(len(p)),
+        s_measured = bool(p[:, 2].max() > 0.01)
+        if s_measured:
+            S, O = fit_sv(p[:, 2], p[:, 3])
+            per_site = [fit_sv(p[p[:, 1] == k, 2], p[p[:, 1] == k, 3]) if np.sum(p[:, 1] == k) > 3 else (S, O)
+                        for k in range(4)]
+        else:
+            # Dark frames only: the noise floor O is measured, the slope S needs
+            # lit frames (White sweep), so the camera's S stands in.
+            S, O = ref.hal_s, float(np.median(p[:, 3]))
+            per_site = [(S, float(np.median(p[p[:, 1] == k, 3]))) for k in range(4)]
+        res = {"iso": iso, "S": S, "O": O, "sMeasured": s_measured, "perSite": per_site, "points": int(len(p)),
                "xMax": float(p[:, 2].max()), "halS": ref.hal_s, "halO": ref.hal_o, "engS": ref.eng_s, "engO": ref.eng_o,
                "halSites": ref.hal_sites.tolist()}
         res["fitError"] = float(np.median(np.abs(p[:, 3] / np.maximum(S * p[:, 2] + O, 1e-15) - 1)))
@@ -276,7 +283,7 @@ def analyse_noise(white, dark, black):
 def iso_model(noise):
     """S(iso) = a * iso, O(iso) = b + c * iso^2 (read noise before / after the amplifier)."""
     isos = np.array(sorted(noise), float)
-    if len(isos) < 2:
+    if len(isos) < 2 or not all(n["sMeasured"] for n in noise.values()):
         return None
     S = np.array([noise[i]["S"] for i in isos.astype(int)])
     O = np.array([noise[i]["O"] for i in isos.astype(int)])
@@ -425,9 +432,10 @@ def analyse_linearity(white, black):
 def clean_catch_rate(excess, is_green, x, S_true, O_true, S_eng, O_eng, clip=1.0, trials=48, seed=1):
     """Fraction of trials in which clean.comp's rule repairs a defect of
     `excess` (normalised) at raw level x, per defect. Mirrors clean.comp:
-    v > max(8 neighbours) + 6 * model sigma (+ G factor 0.5 on variance)
-    + 0.25 * (max - min); the quad G is the mean of two photosites, and the
-    defective photosite can't exceed the sensor clip."""
+    v > max(8 neighbours) + 4 * model sigma at the neighbours' mean (+ G
+    factor 0.5 on variance) + 0.25 * (max - min); the quad G is the mean of
+    two photosites, and the defective photosite can't exceed the sensor clip.
+    (Until 0.15.1: 6 sigma at v itself, which caught ~12% on the Pixel 10.)"""
     rng = np.random.default_rng(seed)
     excess = np.asarray(excess, float)
     g = np.asarray(is_green, bool)
@@ -440,8 +448,8 @@ def clean_catch_rate(excess, is_green, x, S_true, O_true, S_eng, O_eng, clip=1.0
     v = np.where(g[None, :], 0.5 * (bad + good), bad)
     e_q = np.where(g, 0.5, 1.0) * (np.clip(x + excess, 0, clip) - x)
     hi, lo = nb.max(axis=2), nb.min(axis=2)
-    model_var = np.maximum(S_eng * np.maximum(v, 0) + O_eng, 1e-7) * np.where(g, 0.5, 1.0)[None, :]
-    t = 6 * np.sqrt(model_var) + 0.25 * (hi - lo)
+    model_var = np.maximum(S_eng * np.maximum(nb.mean(axis=2), 0) + O_eng, 1e-7) * np.where(g, 0.5, 1.0)[None, :]
+    t = 4 * np.sqrt(model_var) + 0.25 * (hi - lo)
     hot = e_q >= 0
     caught = np.where(hot[None, :], v > hi + t, v < lo - t)
     return caught.mean(axis=0), np.abs(e_q) / sd  # catch rate, excess in noise sigmas
@@ -476,6 +484,53 @@ def analyse_defects(dark, noise, black, clip_dn=None):
     return out
 
 
+def defect_maps(dark_reports):
+    """Per dark sweep: every pixel flagged in any step, in pre-correction array coordinates."""
+    maps = []
+    for r in dark_reports:
+        sm = r.get("sensorMap", [1, 1, 0, 0])
+        m = set()
+        for s in r["steps"]:
+            d = np.asarray(s["stats"]["defects"], float).reshape(-1, 6)
+            for x, y in d[:, :2]:
+                m.add((int(round(x * sm[0] + sm[2])), int(round(y * sm[1] + sm[3]))))
+        maps.append(m)
+    return maps
+
+
+def map_crossval(dark_reports):
+    """Static map from the other sweeps vs this sweep's worst step: share of its defects covered."""
+    maps = defect_maps(dark_reports)
+    out = []
+    for i, r in enumerate(dark_reports):
+        others = set().union(*(m for j, m in enumerate(maps) if j != i))
+        sm = r.get("sensorMap", [1, 1, 0, 0])
+        worst = max(r["steps"], key=lambda s: (s["iso"], s["exposureNs"]))
+        d = np.asarray(worst["stats"]["defects"], float).reshape(-1, 6)
+        inm = np.array([(int(round(x * sm[0] + sm[2])), int(round(y * sm[1] + sm[3]))) in others for x, y in d[:, :2]])
+        strong = np.abs(d[:, 4]) > 10 * np.maximum(d[:, 5], 1e-6)
+        out.append({"date": r.get("date", ""), "iso": worst["iso"], "all": float(inm.mean()) if len(d) else 1.0,
+                    "strong": float(inm[strong].mean()) if strong.any() else 1.0, "n": int(len(d))})
+    return out
+
+
+def write_profile(path, reports, noise, device=None, camera=None):
+    """assets/sensor_profiles/*.json for the app: per-ISO dark-noise correction
+    (measured / HAL O; the app multiplies the camera's O by it) and the static
+    hot-pixel map (union of every dark sweep, pre-correction array x, y)."""
+    dark_reports = [r for r in reports if r["kind"] == "dark"]
+    table = [{"iso": int(iso), "O": float(n["O"]), "halO": float(n["halO"]), "factor": round(float(n["O"] / n["halO"]), 4)}
+             for iso, n in sorted(noise.items()) if n["halO"] > 0]
+    defects = sorted(set().union(*defect_maps(dark_reports))) if dark_reports else []
+    prof = {"format": "vesper-sensor-profile/1", "device": device or reports[0].get("device"),
+            "cameraId": str(camera if camera is not None else reports[0].get("cameraId")),
+            "source": [f"{r['kind']} sweep {r.get('date', '')}" for r in reports],
+            "darkNoise": table, "defectCount": len(defects), "defects": [v for xy in defects for v in xy]}
+    with open(path, "w") as f:
+        json.dump(prof, f, separators=(",", ":"))
+    return prof
+
+
 # --- Report ------------------------------------------------------------------
 def pct(x):
     return f"{100 * x:+.1f}%"
@@ -485,7 +540,7 @@ def verdict(ok, text):
     return f"  [{'OK ' if ok else 'FIX'}] {text}"
 
 
-def report(paths, out_json=None, file=sys.stdout):
+def report(paths, out_json=None, file=sys.stdout, profile=None, device=None, camera=None):
     dark, white, reports = load(paths)
     p = lambda *a: print(*a, file=file)  # noqa: E731
     r0 = reports[0]
@@ -525,15 +580,18 @@ def report(paths, out_json=None, file=sys.stdout):
         p("   ISO   measured S   measured O |  camera S     camera O  |  app uses S/O     | app sigma / real sigma at:"
           " black  grey-3  grey  half")
         worst = 0.0
+        levels = lambda n: (0.0, GREY / 8, GREY) if n["sMeasured"] else (0.0,)  # noqa: E731
         for iso, n in noise.items():
             ratios = []
             for x in (0.0, GREY / 8, GREY, 0.5):
                 real = math.sqrt(max(n["S"] * x + n["O"], 1e-15))
                 eng = math.sqrt(max(n["engS"] * x + n["engO"], 1e-15))
                 ratios.append(eng / real)
-            worst = max(worst, max(abs(math.log(r)) for r in ratios[:3]))
-            p(f"  {iso:5d}  {n['S']:.3e}  {n['O']:.3e} | {n['halS']:.3e}  {n['halO']:+.2e} | "
-              f"{n['engS']:.2e}/{n['engO']:.1e} |   " + "  ".join(f"{r:5.2f}" for r in ratios))
+            worst = max(worst, max(abs(math.log(ratios[i])) for i in range(len(levels(n)))))
+            s_txt = f"{n['S']:.3e}" if n["sMeasured"] else "   (white)"
+            r_txt = "  ".join(f"{r:5.2f}" for r in ratios) if n["sMeasured"] else f"{ratios[0]:5.2f}   (lit levels need the White sweep)"
+            p(f"  {iso:5d}  {s_txt}  {n['O']:.3e} | {n['halS']:.3e}  {n['halO']:+.2e} | "
+              f"{n['engS']:.2e}/{n['engO']:.1e} |   {r_txt}")
         m = iso_model(noise)
         result["isoModel"] = m
         if m:
@@ -542,18 +600,21 @@ def report(paths, out_json=None, file=sys.stdout):
         lo = min(noise)
         n = noise[lo]
         rng = 1023 - (black[lo]["reported"][1] if black else 64)
-        p(f"   at ISO {lo}: {1 / (n['S'] * rng):.2f} electrons per DN, full well ~{1 / n['S']:.0f} e-, read noise "
-          f"{math.sqrt(max(n['O'], 0)) / n['S']:.1f} e-, dynamic range {math.log2(1 / math.sqrt(max(n['O'], 1e-15))):.1f} stops")
+        if n["sMeasured"]:
+            p(f"   at ISO {lo}: {1 / (n['S'] * rng):.2f} electrons per DN, full well ~{1 / n['S']:.0f} e-, read noise "
+              f"{math.sqrt(max(n['O'], 0)) / n['S']:.1f} e-")
+        p("   engineering dynamic range (clip / dark noise): " +
+          ", ".join(f"ISO {i} {math.log2(1 / math.sqrt(max(v['O'], 1e-15))):.1f}" for i, v in noise.items()) + " stops")
         fit_err = max(n["fitError"] for n in noise.values())
         p(f"   (median misfit of the model to the measured points: {100 * fit_err:.0f}%)")
         lo_r, hi_r = math.inf, 0.0
         for n in noise.values():
-            for x in (0.0, GREY / 8, GREY):
+            for x in levels(n):
                 r = math.sqrt(max(n["engS"] * x + n["engO"], 1e-15) / max(n["S"] * x + n["O"], 1e-15))
                 lo_r, hi_r = min(lo_r, r), max(hi_r, r)
         summary.append(verdict(worst < math.log(1.15),
                                f"noise model: the app assumes {lo_r:.2f}x to {hi_r:.2f}x the real noise "
-                               "(black .. 18% grey, all ISOs; 1.00 = right)"))
+                               "(measured levels, all ISOs; 1.00 = right)"))
         uni = noise_uniformity(white, noise, black)
         result["noiseUniformity"] = uni
         if uni:
@@ -664,10 +725,21 @@ def report(paths, out_json=None, file=sys.stdout):
             p("   clean.comp hot-pixel repair on those, by scene brightness: caught / visible but missed")
             for lv in defects["levels"]:
                 p(f"     {lv['level']:14s}: {100 * lv['caught']:5.1f}% caught, {lv['visibleMissed']} of {lv['visible']} visible ones missed")
+            dark_reports = [r for r in reports if r["kind"] == "dark"]
+            if len(dark_reports) >= 2:
+                cv = map_crossval(dark_reports)
+                result["defectMapCrossval"] = cv
+                p("   static hot-pixel map (pixels found in the OTHER sweep(s)) covers, at the worst step:")
+                for c in cv:
+                    p(f"     sweep {c['date']} ISO {c['iso']}: {100 * c['all']:.0f}% of its {c['n']} defects, "
+                      f"{100 * c['strong']:.0f}% of the strong ones (> 10 sigma)")
             missed = max(lv["visibleMissed"] for lv in defects["levels"])
             summary.append(verdict(missed == 0, f"hot pixels: up to {missed} visible ones missed by the repair "
                                    f"({defects['worst']})"))
 
+    if profile:
+        prof = write_profile(profile, reports, noise, device, camera)
+        p(f"\nSensor profile written: {profile} ({len(prof['darkNoise'])} noise points, {prof['defectCount']} hot pixels)")
     p("\nSUMMARY")
     for line in summary:
         p(line)
@@ -689,8 +761,11 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("files", nargs="+", help="VSENSOR_dark_*.json / VSENSOR_white_*.json")
     ap.add_argument("--json", help="also write the numbers as JSON")
+    ap.add_argument("--profile", help="write an app sensor profile (assets/sensor_profiles/<phone>_cam<id>.json)")
+    ap.add_argument("--device", help="profile: Android Build.MODEL (default: from the sweep)")
+    ap.add_argument("--camera", help="profile: camera id (default: from the sweep)")
     a = ap.parse_args(argv)
-    return report(a.files, a.json)
+    return report(a.files, a.json, profile=a.profile, device=a.device, camera=a.camera)
 
 
 if __name__ == "__main__":

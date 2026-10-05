@@ -7,6 +7,10 @@ class ChangelogEntry {
 }
 
 const changelog = <ChangelogEntry>[
+  ChangelogEntry('0.15.1', [
+    'Hot pixels: the ~650 known hot pixels of the Pixel 10 main camera (measured with the new dark calibration) are repaired before any processing, and the automatic repair catches far more of the rest. At high ISO about 95-100% are now removed (was ~12%)',
+    'Noise reduction and motion alignment use the measured sensor noise: from ISO ~1000 up the camera\'s own figure was 40% too low in the shadows, so NR was too weak there',
+  ]),
   ChangelogEntry('0.15.0', [
     'Sensor calibration without a colour chart (developer builds, Settings › Developer): DARK (lens covered) and WHITE (paper over the lens, daylight) sweeps measure noise, black level, lens shading, clip point, linearity and hot pixels; results go to Download/Vesper Calibration',
     'Calibration Frame also saves a DNG with the full camera metadata (Google AWB, noise profile, colour matrices, lens-shading map), and works with Settings open',

@@ -194,6 +194,53 @@ static void testStatistics() {
     check(j.front() == '{' && j.back() == '}' && j.find("\"tvar\":[[") != std::string::npos, "step JSON", 0, 0);
 }
 
+// --- Static hot-pixel map and per-ISO noise correction ------------------------
+static void testDefectMapAndNoiseTable() {
+    std::mt19937 rng(5);
+    Sensor s;
+    s.defects.clear();
+    s.vig[0] = s.vig[1] = s.vig[2] = s.vig[3] = 0;
+    auto fr = s.burst(400, 30e6, 300.0 / 8.0 / 30e6, 1, rng);
+    std::vector<uint8_t> src = fr[0];
+    auto get = [&](const std::vector<uint8_t>& b, int x, int y) {
+        const uint8_t* g = &b[static_cast<size_t>(y) * s.stride() + (x / 4) * 5];
+        return (g[x % 4] << 2) | ((g[4] >> (2 * (x % 4))) & 3);
+    };
+    auto put = [&](std::vector<uint8_t>& b, int x, int y, int v) {
+        uint8_t* g = &b[static_cast<size_t>(y) * s.stride() + (x / 4) * 5];
+        g[x % 4] = static_cast<uint8_t>(v >> 2);
+        g[4] = static_cast<uint8_t>((g[4] & ~(3 << (2 * (x % 4)))) | ((v & 3) << (2 * (x % 4))));
+    };
+    // Two stuck pixels in one 4-px group, one near another of its colour, one at the edge (dropped).
+    put(src, 100, 50, 1023);
+    put(src, 101, 50, 1023);
+    put(src, 102, 52, 900);
+    std::vector<int32_t> list = prepareDefects({102, 52, 101, 50, 100, 50, 1, 1}, s.w, s.h);
+    check(list.size() == 6 && list[0] == 100 && list[1] == 50, "defects sorted, edge pixel dropped", list.size(), 6);
+    std::vector<uint8_t> dst = src;
+    std::fill(dst.begin(), dst.end(), 0); // the upload buffer: only repaired groups may be written
+    repairRawDefects(src.data(), dst.data(), s.w, s.h, s.stride(), list.data(), list.size() / 2);
+    auto median8 = [&](int x, int y) {
+        int n[8], c = 0;
+        for (int dy = -2; dy <= 2; dy += 2)
+            for (int dx = -2; dx <= 2; dx += 2)
+                if (dx || dy) n[c++] = get(src, x + dx, y + dy);
+        std::sort(n, n + 8);
+        return (n[3] + n[4] + 1) / 2;
+    };
+    check(get(dst, 100, 50) == median8(100, 50), "stuck pixel -> neighbour median", get(dst, 100, 50), median8(100, 50));
+    check(get(dst, 101, 50) == median8(101, 50), "second stuck pixel in the same group", get(dst, 101, 50), median8(101, 50));
+    check(get(dst, 102, 52) == median8(102, 52), "hot pixel next to another defect", get(dst, 102, 52), median8(102, 52));
+    check(get(dst, 103, 50) == get(src, 103, 50), "rest of the group copied", get(dst, 103, 50), get(src, 103, 50));
+    check(get(dst, 104, 50) == 0, "other groups untouched", get(dst, 104, 50), 0);
+
+    const std::vector<float> isos = {100, 400, 1600}, f = {1.0f, 2.0f, 2.0f};
+    check(std::fabs(noiseFactorAt(isos, f, 200) - std::sqrt(2.0)) < 1e-6, "noise factor log-log interpolation",
+          noiseFactorAt(isos, f, 200), std::sqrt(2.0));
+    check(noiseFactorAt(isos, f, 50) == 1.0 && noiseFactorAt(isos, f, 6400) == 2.0, "noise factor held at the ends", 0, 0);
+    check(noiseFactorAt({}, {}, 800) == 1.0, "no table: factor 1", noiseFactorAt({}, {}, 800), 1);
+}
+
 // --- DNG round trip: parse the IFD back --------------------------------------
 static uint32_t rd(const std::vector<uint8_t>& b, size_t o, int n) {
     uint32_t v = 0;
@@ -360,6 +407,7 @@ static void writeSweep(const std::string& dir, bool white) {
 
 int main(int argc, char** argv) {
     testStatistics();
+    testDefectMapAndNoiseTable();
     std::string dir = argc > 1 ? argv[1] : "/tmp";
     testDng(dir);
     if (argc > 1) {

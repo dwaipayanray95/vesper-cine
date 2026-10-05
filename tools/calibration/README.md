@@ -42,6 +42,13 @@ prints, in DN of the 10-bit raw data:
   black, grey −3 stops, grey and grey +3 stops.
 - **SUMMARY**: one OK / FIX line per item.
 
+**Applying it to the app:** `python3 sensor.py VSENSOR_dark_*.json [VSENSOR_white_*.json] --profile
+../../assets/sensor_profiles/<phone>_cam<id>.json` writes the per-ISO dark-noise correction (measured / camera
+noise floor O; the app multiplies the camera's O by it) and the static hot-pixel map (every pixel flagged in any
+dark sweep, pre-correction array coordinates). The app loads the file matching `Build.MODEL` + camera id at start;
+the map is applied when Hot Pixel Fix is on. Use two or more dark sweeps: the report then shows how much of one
+sweep's defects the others' map covers.
+
 `python3 test_sensor.py` checks the chain end to end: `test/native/sensor_calib_test.cpp`
 simulates a sensor with planted faults and writes sweeps in the phone's format; `sensor.py` must find them.
 

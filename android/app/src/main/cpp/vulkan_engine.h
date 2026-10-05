@@ -50,6 +50,8 @@ struct FrameInput {
     size_t rawSize = 0;
     const float* shading = nullptr; // [rows][cols][4] gain map, or nullptr
     size_t shadingFloats = 0;
+    const int32_t* defects = nullptr; // static hot-pixel map: sorted raw (x, y) pairs (sensor_calib.h prepareDefects)
+    size_t defectCount = 0;
     FrameParams params{};
 };
 

@@ -71,4 +71,21 @@ std::string sensorStepJson(const SensorStepStats& s);
 double rawPatchMean(const uint8_t* data, int width, int height, int rowStride, int cfa, const float black[4],
                     float white, double fraction, int siteMask);
 
+// Static defect (hot-pixel) map, applied before the GPU sees a frame: every
+// listed raw pixel (x, y pairs, raw-stream coordinates) is replaced by the
+// median of its 8 same-colour neighbours (2 px apart), read from `src`. The
+// GPU's upload buffer `dst` is write-combined (slow to read), so the repaired
+// 5-byte RAW10 groups are built from `src` and only those are written.
+// `xy` must be sorted by (y, x / 4) so pixels of one group are applied together.
+void repairRawDefects(const uint8_t* src, uint8_t* dst, int width, int height, int rowStride, const int32_t* xy,
+                      size_t count);
+
+// Sorts defect pixels for repairRawDefects and drops those within 2 px of the
+// frame edge (no full neighbourhood).
+std::vector<int32_t> prepareDefects(std::vector<int32_t> xy, int width, int height);
+
+// Measured / HAL dark-noise ratio for this ISO from a calibration table
+// (log-log interpolation, held flat beyond the ends). 1 without a table.
+double noiseFactorAt(const std::vector<float>& isos, const std::vector<float>& factors, double iso);
+
 } // namespace vesper
