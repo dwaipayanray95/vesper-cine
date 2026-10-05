@@ -7,6 +7,10 @@ class ChangelogEntry {
 }
 
 const changelog = <ChangelogEntry>[
+  ChangelogEntry('0.14.1', [
+    'Faster HQ oversampling (about 1.4 ms less GPU time per frame, same image)',
+    'Heat safeguard keeps quality much longer: it steps down at most once a minute and only while the phone keeps heating up; noise reduction stays on until "severe"',
+  ]),
   ChangelogEntry('0.14.0', [
     'Fixed: "swimming" grain in dark areas with motion alignment on (worst towards the frame edges). The motion search no longer mistakes noise for movement',
     'Heat safeguard: when Android forecasts the phone getting too hot, processing steps down gently (one stage every ~15 s) instead of the take being cut; at "severe" the take continues with minimal processing and stops only at "critical"',

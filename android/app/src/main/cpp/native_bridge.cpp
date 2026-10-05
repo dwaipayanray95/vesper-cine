@@ -1651,7 +1651,7 @@ void pollHeat() {
         vesperLog(ANDROID_LOG_INFO, "Vesper", "Heat: status %d, forecast headroom %.2f -> level %d (was %d)",
                   gHeat.status, gHeat.headroom, level, gHeat.level);
     gHeat.level = level;
-    if (gGpu) gGpu->setThermalLevel(level);
+    if (gGpu) gGpu->setThermalLevel(level, gHeat.headroom);
 }
 
 EXPORT int32_t vesper_get_status(char* out, int32_t maxLen) {

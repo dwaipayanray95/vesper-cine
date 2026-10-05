@@ -16,7 +16,7 @@ viewfinder that shows what is being recorded. Nothing from the ISP's processed p
  VulkanEngine::processFrame — records one command buffer, queues it
    unpack.comp  RAW10 → quad image (rgba16f, 2000x1128): black level, lens shading,
                 WB, neutral highlight clip; alpha = clip flag or 0.1×shading gain
-   green.comp   [HQ] full-res green (Hamilton-Adams) per 16x16-quad tile, 8-tap
+   green.comp   [HQ] full-res green (Hamilton-Adams) per 32x16-quad tile, 8-tap
                 anti-alias filter → luma detail D = G_hq − G_quad (R16F); fp16 variant
    align.comp   [TNR+align, every 2nd frame, every 4th when the guard is tight] 1/4-res luma
                 (4 bilinear reads per 4x4 block), per-tile motion search

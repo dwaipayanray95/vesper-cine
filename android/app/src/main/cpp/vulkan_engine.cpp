@@ -10,7 +10,6 @@
 #include "shaders/green_fp16_probe1_spv.h"
 #include "shaders/green_fp16_probe2_spv.h"
 #include "shaders/green_fp16_exact_spv.h"
-#include "shaders/green_fp16_wide_spv.h"
 
 #include <algorithm>
 #include <cmath>
@@ -321,7 +320,6 @@ bool VulkanEngine::createPipelines() {
            // HQ probes / exact-shading reference exist for the phone's path only (16-bit maths, R16F detail image).
            (!fp16_ || hqFormat_ != VK_FORMAT_R16_SFLOAT ||
             (makePipe(kGreenFp16ExactSpv, sizeof(kGreenFp16ExactSpv), greenLayout_, greenPipeLayout_, greenExactPipe_) &&
-             makePipe(kGreenFp16WideSpv, sizeof(kGreenFp16WideSpv), greenLayout_, greenPipeLayout_, greenWidePipe_) &&
              makePipe(kGreenFp16Probe1Spv, sizeof(kGreenFp16Probe1Spv), greenLayout_, greenPipeLayout_, greenProbe1Pipe_) &&
              makePipe(kGreenFp16Probe2Spv, sizeof(kGreenFp16Probe2Spv), greenLayout_, greenPipeLayout_, greenProbe2Pipe_)));
 }
@@ -354,7 +352,7 @@ void VulkanEngine::release() {
     if (cleanPipe_) vkDestroyPipeline(device_, cleanPipe_, nullptr);
     if (alignPipe_) vkDestroyPipeline(device_, alignPipe_, nullptr);
     if (greenPipe_) vkDestroyPipeline(device_, greenPipe_, nullptr);
-    for (VkPipeline* p : {&greenProbe1Pipe_, &greenProbe2Pipe_, &greenExactPipe_, &greenWidePipe_}) {
+    for (VkPipeline* p : {&greenProbe1Pipe_, &greenProbe2Pipe_, &greenExactPipe_}) {
         if (*p) vkDestroyPipeline(device_, *p, nullptr);
         *p = VK_NULL_HANDLE;
     }
@@ -1082,11 +1080,8 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
     auto tCopy = Clock::now();
 
     const int repeat = repeatPass_, exps = experiments_;
-    // Experiments: pipeline variant + its tile width.
-    const bool hqWide = (exps & kExpHqWide) && greenWidePipe_;
-    VkPipeline greenPipe = hqWide ? greenWidePipe_
-                         : ((exps & kExpHqExactShading) && greenExactPipe_ ? greenExactPipe_ : greenPipe_);
-    const uint32_t greenTileX = hqWide ? 32 : 16;
+    // Experiments: pipeline variant.
+    VkPipeline greenPipe = (exps & kExpHqExactShading) && greenExactPipe_ ? greenExactPipe_ : greenPipe_;
     constexpr uint32_t renderWgX = 16, renderWgY = 8; // render.comp workgroup
     constexpr uint32_t cleanWgX = 16, cleanWgY = 8;   // clean.comp workgroup
     VkCommandBuffer cb = s.cmd;
@@ -1134,12 +1129,12 @@ bool VulkanEngine::processFrame(const FrameInput& in, int* encoderSlot) {
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
                          0, nullptr, 0, nullptr, 1, &quadReady);
     if (hq) {
-        // HQ luma detail per 16x16-quad tile (raw + quad image -> detail image).
+        // HQ luma detail per 32x16-quad tile (raw + quad image -> detail image).
         auto dispatchGreen = [&](VkPipeline pipe) {
             vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
             vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, greenPipeLayout_, 0, 1, &s.greenSet, 0, nullptr);
-            const uint32_t tileX = pipe == greenPipe ? greenTileX : 16; // probes use the normal tiles
-            vkCmdDispatch(cb, (static_cast<uint32_t>(g.rawW / 2) + tileX - 1) / tileX, static_cast<uint32_t>((g.rawH / 2 + 15) / 16), 1);
+            // 32x16-quad tiles (green.comp), every variant.
+            vkCmdDispatch(cb, static_cast<uint32_t>((g.rawW / 2 + 31) / 32), static_cast<uint32_t>((g.rawH / 2 + 15) / 16), 1);
         };
         // Probes 7/8: a partial HQ pass first (its output is overwritten).
         VkPipeline probe = repeat == 7 ? greenProbe1Pipe_ : (repeat == 8 ? greenProbe2Pipe_ : VK_NULL_HANDLE);
@@ -1362,13 +1357,14 @@ void VulkanEngine::readTimestamps(int slot) {
     const int heat = thermalLevel_;
     const bool fits = heat == 0 && (fitsByCost ? underBudgetFrames_ > recoverFrames_
                                                : (headroom && underBudgetFrames_ > trialWait));
-    // Pauses the next optional stage in the usual order; false if all are paused.
-    auto pauseNext = [&](bool forHeat) {
+    // Pauses the next optional stage in the usual order; false if all are
+    // paused (or only NR is left and NR isn't allowed).
+    auto pauseNext = [&](bool forHeat, bool allowNr = true) {
         int stage = -1;
         if (alignRequested_ && !alignReduced_ && !alignThrottled_) { alignReduced_ = true; stage = 3; }
         else if (alignRequested_ && !alignThrottled_) { alignThrottled_ = true; stage = 0; }
         else if (hqSupported_ && !hqThrottled_) { hqThrottled_ = true; stage = 1; }
-        else if (!nrThrottled_) { nrThrottled_ = true; stage = 2; }
+        else if (!nrThrottled_ && allowNr) { nrThrottled_ = true; stage = 2; }
         if (stage < 0) return false;
         overBudgetFrames_ = underBudgetFrames_ = 0;
         if (forHeat) {
@@ -1387,16 +1383,28 @@ void VulkanEngine::readTimestamps(int slot) {
         graceFrames_ = 24; // let the timing settle (then measure what the pause saved)
         return true;
     };
-    const int frames15s = static_cast<int>(15000.0 / budget);
-    if (heat < 2) thermalStepFrames_ = frames15s; // the first step on getting hot comes at once
+    // Hot: one step at once, then one a minute while the forecast keeps
+    // rising. The phone heats over minutes, so a step needs that long to
+    // show. 15 s steps (0.14.0) had everything off 90 s into a take, and it
+    // still reached "severe": the GPU is only part of the heat (sensor,
+    // encoder, screen, charging), so quality must not be given away early.
+    const int frames60s = static_cast<int>(60000.0 / budget);
+    if (heat < 2) {
+        thermalStepFrames_ = frames60s; // the first step on getting hot comes at once
+        lastStepHeadroom_ = -1.0f;
+    }
     if (heat >= 3) {
         // Severe: minimal processing at once, so the recording can go on.
         bool any = false;
         while (pauseNext(true)) any = true;
         if (any) return;
-    } else if (heat == 2 && ++thermalStepFrames_ > frames15s) {
+    } else if (heat == 2 && ++thermalStepFrames_ > frames60s) {
         thermalStepFrames_ = 0;
-        if (pauseNext(true)) return;
+        const float h = thermalHeadroom_;
+        if (h < 0.0f || lastStepHeadroom_ < 0.0f || h > lastStepHeadroom_ + 0.005f) {
+            lastStepHeadroom_ = h;
+            if (pauseNext(true, false)) return; // NR stays on until "severe"
+        }
     }
     if (overBudgetFrames_ > 12) {
         overBudgetFrames_ = underBudgetFrames_ = 0;

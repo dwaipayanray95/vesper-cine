@@ -653,41 +653,28 @@ int main() {
         bool ok = runSeq(0, -1, cur);
         {
             // HQ lens shading: the default (map interpolated from the loaded
-            // region's corners) against the exact per-pixel reference. Same
-            // output without vignetting; with it, at most a few dozen codes at
-            // a few pixels near map-cell boundaries (the old one value per
-            // 32x32 block was 92 codes off on this map, 0.13.2).
+            // region's corners, 32x16-quad tiles) against the exact per-pixel
+            // reference. Same output without vignetting; with it, a few dozen
+            // codes at most at a few pixels near map-cell boundaries (the
+            // test map's cells are 40 px, the phone's ~125: worst case here).
+            // Until 0.13.2 one value per 32x32 block was 92 codes off.
             ok = runSeq(VulkanEngine::kExpHqExactShading, -1, other) && ok;
             int dFlat = maxDiff(cur, other);
             std::vector<uint16_t> shadedCur, shadedExact;
             ok = runSeq(0, -1, shadedCur, true) && runSeq(VulkanEngine::kExpHqExactShading, -1, shadedExact, true) && ok;
             int dShaded = maxDiff(shadedCur, shadedExact);
-            std::printf("  HQ shading vs exact reference, max difference: no vignetting %d codes, with vignetting %d\n",
-                        dFlat, dShaded);
+            double sum = 0; size_t over2 = 0;
+            for (size_t i = 0; i < shadedCur.size(); ++i) {
+                int d = std::abs((shadedCur[i] >> 6) - (shadedExact[i] >> 6));
+                sum += d; over2 += d > 2;
+            }
+            double mean = sum / shadedCur.size(), pctOver2 = 100.0 * over2 / shadedCur.size();
+            std::printf("  HQ shading vs exact reference: no vignetting %d codes; with vignetting max %d, mean %.3f, %.3f%% > 2 codes\n",
+                        dFlat, dShaded, mean, pctOver2);
             check(dFlat == 0, "HQ shading matches the exact reference without vignetting", dFlat, 0);
-            check(dShaded <= 50, "HQ shading close to the exact reference with vignetting (<= 50 codes)", dShaded, 50);
-            // Experiment: wide HQ tiles (32x16 quads). Identical without
-            // vignetting; with it, the corner interpolation spans a wider
-            // region, so it may differ slightly but must stay as close to exact.
-            std::vector<uint16_t> wideFlat, wideShaded;
-            ok = runSeq(VulkanEngine::kExpHqWide, -1, wideFlat) && runSeq(VulkanEngine::kExpHqWide, -1, wideShaded, true) && ok;
-            // Mean |difference| and share of values > 2 codes off, vs exact.
-            auto offStats = [](const std::vector<uint16_t>& a, const std::vector<uint16_t>& b, double& mean, double& over2) {
-                double sum = 0; size_t n2 = 0;
-                for (size_t i = 0; i < a.size(); ++i) {
-                    int d = std::abs((a[i] >> 6) - (b[i] >> 6));
-                    sum += d; n2 += d > 2;
-                }
-                mean = sum / a.size(); over2 = 100.0 * n2 / a.size();
-            };
-            double mStd, oStd, mWide, oWide;
-            offStats(shadedCur, shadedExact, mStd, oStd);
-            offStats(wideShaded, shadedExact, mWide, oWide);
-            int dWideFlat = maxDiff(cur, wideFlat), dWideExact = maxDiff(wideShaded, shadedExact);
-            std::printf("  HQ vs exact with vignetting: 32-px tiles mean %.3f codes, %.3f%% > 2; wide tiles mean %.3f, %.3f%% > 2, max %d;"
-                        " wide without vignetting %d codes from 32-px tiles\n", mStd, oStd, mWide, oWide, dWideExact, dWideFlat);
-            check(dWideFlat == 0, "HQ wide tiles give the same output without vignetting", dWideFlat, 0);
-            check(dWideExact <= 100, "HQ wide tiles: no gross shading error (<= 100 codes)", dWideExact, 100);
+            check(dShaded <= 100, "HQ shading: no gross error with vignetting (<= 100 codes)", dShaded, 100);
+            check(mean <= 0.25 && pctOver2 <= 0.1, "HQ shading close to the exact reference with vignetting (mean, > 2 codes)",
+                  mean, 0.25);
         }
         int repeatDiff = 0;
         for (int pass = 0; pass <= 8; ++pass) {

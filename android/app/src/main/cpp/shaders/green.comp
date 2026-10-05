@@ -11,7 +11,7 @@
 #else
 #define HF float
 #endif
-// HQ (oversampled) luma detail, computed per 16x16-quad tile in shared memory.
+// HQ (oversampled) luma detail, computed per 32x16-quad tile in shared memory.
 //
 // The quad image keeps one green per 2x2 site (the mean of Gr and Gb), which
 // throws away about half of the sensor's luma resolution. This pass:
@@ -29,9 +29,11 @@
 //   4. writes D = G_hq - G_quad at quad resolution. The render pass samples D
 //      with 5 taps. (Sharpening stays in render: folding it in here needed a
 //      one-quad tile border that cost more on the phone GPU than it saved.)
-// 16x16-quad tiles (256 threads): the halo each tile must also load and
-// demosaic is ~half the relative size of an 8x8 tile's (green 1.56x vs 2.25x
-// the output area, raw 2.1x vs 3.5x), which was most of this pass's cost.
+// 32x16-quad tiles (256 threads, two output columns each): the halo each tile
+// must also load and demosaic is shared by a wide tile (raw loaded 1.72x the
+// output, green 1.41x; 16x16 tiles: 2.06x / 1.56x, 8x8: 3.5x / 2.25x), which
+// was most of this pass's cost. 32x16 measured 1.4 ms faster than 16x16 on
+// the phone (0.14.0 GPU A/B Test, 60 fps).
 layout(local_size_x = 16, local_size_y = 16) in;
 
 #include "frame_params.glsl"
@@ -45,25 +47,17 @@ layout(set = 0, binding = 3, r16f) uniform writeonly image2D detailImage;
 #endif
 layout(set = 0, binding = 4, rgba16f) uniform readonly image2D quadImage;
 
-// Tile: 16x16 quads = 32x32 raw px. Filter reach +-3.5 px -> green needed for
-// px -4..35 (40x40); Hamilton-Adams reach +-2 px -> raw rows -6..37 (44) and
-// raw columns -8..39 (48: whole RAW10 groups, so loads start on a group).
-// HQ_WIDE (A/B experiment, 0.14.0): 32x16-quad tiles (64x32 px, the same 256
-// threads with two output columns each), so the halo is shared by twice the
-// width: raw loaded 1.72x instead of 2.06x the output, green 1.41x vs 1.56x.
-// With exact shading it measured 1.8 ms faster than 32-px tiles on the phone.
-#ifdef HQ_WIDE
-const int QX = 32;
-#else
-const int QX = 16;
-#endif
+// Tile: 32x16 quads = 64x32 raw px. Filter reach +-3.5 px -> green needed for
+// px -4..67 x -4..35 (72x40); Hamilton-Adams reach +-2 px -> raw rows -6..37
+// (44) and raw columns -8..71 (80: whole RAW10 groups, so loads start on a group).
+const int QX = 32;                                     // quads per tile row (Q per column)
 const int Q = 16, T = 2 * Q, TX = 2 * QX;
-const int GB = 4, GN = T + 2 * GB, GNX = TX + 2 * GB; // green: rows -4..35 (40), cols -4..TX+3
-const int RBX = 8, RNX = TX + 2 * RBX;  // raw cols: -8..TX+7 (48 / 80)
+const int GB = 4, GN = T + 2 * GB, GNX = TX + 2 * GB; // green: rows -4..35 (40), cols -4..67 (72)
+const int RBX = 8, RNX = TX + 2 * RBX;  // raw cols: -8..71 (80)
 const int RBY = 6, RNY = T + 2 * RBY;   // raw rows: -6..37 (44)
 const int NT = Q * Q;
-shared HF sRaw[RNX * RNY];           // 2112 / 3520; later reused for row-filter results (GN x QX = 640 / 1280)
-shared HF sGreen[GNX * GN];          // 1600 / 2880
+shared HF sRaw[RNX * RNY];           // 3520; later reused for row-filter results (GN x QX = 1280)
+shared HF sGreen[GNX * GN];          // 2880
 // Lens shading (0.13.3): the map at the four corners of the loaded region
 // (tile + halo), interpolated for every pixel, so it matches the quad image's
 // smooth shading. Exact while the region lies inside one map cell (~125 px
