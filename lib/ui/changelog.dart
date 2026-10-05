@@ -7,6 +7,7 @@ class ChangelogEntry {
 }
 
 const changelog = <ChangelogEntry>[
+  ChangelogEntry('0.13.2', ['GPU A/B Test (developer builds): each speed-up experiment against the normal path in alternating blocks, so the phone heating up cancels out']),
   ChangelogEntry('0.13.1', [
     'While recording, paused processing (e.g. HQ on a hot phone) comes back only with clear headroom and at most every 30 s: no more sharpness pumping in a clip',
     'Slightly faster viewfinder/recording step on the GPU',

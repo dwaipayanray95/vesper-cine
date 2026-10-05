@@ -39,6 +39,7 @@ class SettingsScreen extends StatefulWidget {
   final ValueChanged<bool> onUseProfileChanged;
   final VoidCallback? onCaptureCalibration;
   final VoidCallback? onRunGpuBenchmark; // developer tool
+  final VoidCallback? onRunGpuAbTest; // developer tool
   final bool tapLocks;
   final ValueChanged<bool> onTapLocksChanged;
   final bool tapSetsExposure;
@@ -79,6 +80,7 @@ class SettingsScreen extends StatefulWidget {
     required this.onUseProfileChanged,
     this.onCaptureCalibration,
     this.onRunGpuBenchmark,
+    this.onRunGpuAbTest,
     required this.tapLocks,
     required this.onTapLocksChanged,
     required this.tapSetsExposure,
@@ -526,8 +528,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
     ),
     _settingRow(
       'GPU Benchmark',
-      'Measures each processing option\'s GPU cost on this phone (~25 s)',
+      'Measures each processing option\'s GPU cost on this phone (~70 s)',
       _button('RUN', widget.onRunGpuBenchmark, icon: Icons.speed),
+    ),
+    _settingRow(
+      'GPU A/B Test',
+      'Each speed-up experiment against the normal path, in alternating blocks so heat cancels out (~35 s, best at 60 fps)',
+      _button('RUN', widget.onRunGpuAbTest, icon: Icons.compare_arrows),
     ),
     if (onCaptureCalibration != null)
       _settingRow(

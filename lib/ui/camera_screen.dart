@@ -483,10 +483,16 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
         _engine.log(line, tag: 'VesperBench');
       }
     }
+    _endBenchmark();
+    if (!mounted) return;
+    _showBenchResults('GPU benchmark', results);
+  }
+
+  // Back to the user's settings after a benchmark / A/B test.
+  void _endBenchmark() {
     _engine.setExperiments(0);
     _engine.setRepeatPass(-1);
     _engine.setAlignInterval(0);
-    // Restore the user's settings.
     _engine.setOversampling(_oversampling);
     _engine.setSharpening(_sharpening);
     _engine.setTemporalNr(_temporalNr);
@@ -498,6 +504,9 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       _benchmarking = false;
       _benchStep = '';
     });
+  }
+
+  void _showBenchResults(String title, List<String> lines) {
     final budget = 1000 / _fps;
     showDialog<void>(
       context: context,
@@ -505,16 +514,92 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
         backgroundColor: const Color(0xFF14171D),
         scrollable: true, // long result list on a landscape phone
         title: Text(
-          'GPU benchmark · budget ${budget.toStringAsFixed(1)} ms @ ${_fpsLabel(_fps)} fps',
+          '$title · budget ${budget.toStringAsFixed(1)} ms @ ${_fpsLabel(_fps)} fps',
           style: const TextStyle(color: Colors.white, fontSize: 14),
         ),
         content: Text(
-          results.join('\n'),
+          lines.join('\n'),
           style: const TextStyle(color: Colors.white70, fontSize: 11, fontFamily: 'monospace'),
         ),
         actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('OK'))],
       ),
     );
+  }
+
+  // --- GPU A/B test (developer tool) ---------------------------------------
+  // Each experiment against the normal GPU path, everything on, guard off, in
+  // short alternating blocks: normal, exp 1, normal, exp 2, normal, … for 3
+  // rounds. Every experiment block is compared with the normal blocks right
+  // before and after it, so the phone heating up (which made the long
+  // benchmark's experiment numbers unreliable: +14 ms drift on 5 Oct) hits
+  // both sides alike. ~35 s at 60 fps.
+  Future<void> _runGpuAbTest() async {
+    if (_benchmarking || !_streaming || _recording || _benchExperiments.isEmpty) return;
+    setState(() => _benchmarking = true);
+    final generation = _streamGeneration;
+    String? interrupted;
+    Future<double?> block(int exps, String step) async {
+      _engine.setOversampling(true);
+      _engine.setSharpening(1);
+      _engine.setTemporalNr(0.7);
+      _engine.setChromaNr(0.5);
+      _engine.setNrAlignment(true);
+      _engine.setRepeatPass(-1);
+      _engine.setAlignInterval(0);
+      _engine.setExperiments(exps);
+      _engine.setBudgetGuard(false);
+      if (mounted) setState(() => _benchStep = step);
+      await Future<void>.delayed(const Duration(milliseconds: 700)); // the smoothed GPU time settles in ~10 frames
+      var sum = 0.0;
+      for (var k = 0; k < 8; k++) {
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        sum += _engine.status()?.gpuMs ?? 0;
+      }
+      final st = _engine.status();
+      if (!mounted || _streamGeneration != generation || !_streaming) {
+        interrupted = 'Interrupted: the camera restarted (did the app leave the screen?). Run it again.';
+        return null;
+      }
+      if (st != null && (st.alignThrottled || st.alignReduced || st.nrThrottled || (st.hqSupported && !st.hqAvailable))) {
+        interrupted = 'Interrupted: the GPU guard had paused processing. Run it again.';
+        return null;
+      }
+      return sum / 8;
+    }
+
+    const rounds = 3;
+    final diffs = {for (final (label, _) in _benchExperiments) label: <double>[]};
+    final first = await block(0, 'GPU A/B: normal');
+    var prev = first;
+    outer:
+    for (var r = 0; r < rounds && prev != null; r++) {
+      for (final (label, bit) in _benchExperiments) {
+        final e = await block(bit, 'GPU A/B ${r + 1}/$rounds: ${label.substring(5)}');
+        if (e == null) break outer;
+        final n = await block(0, 'GPU A/B ${r + 1}/$rounds: normal');
+        if (n == null) break outer;
+        diffs[label]!.add(e - (prev! + n) / 2);
+        prev = n;
+      }
+    }
+    final results = <String>[];
+    if (first != null && prev != null) {
+      results.add('Everything on, normal: ${first.toStringAsFixed(1)} ms at the start, ${prev.toStringAsFixed(1)} ms at the end');
+    }
+    for (final (label, _) in _benchExperiments) {
+      final d = diffs[label]!;
+      if (d.isEmpty) continue;
+      final mean = d.reduce((a, b) => a + b) / d.length;
+      final runs = d.map((v) => '${v >= 0 ? '+' : ''}${v.toStringAsFixed(1)}').join(' ');
+      results.add('${label.substring(5)}: ${mean >= 0 ? 'costs' : 'saves'} ${mean.abs().toStringAsFixed(1)} ms  (rounds: $runs)');
+    }
+    if (interrupted != null) results.add(interrupted!);
+    for (final line in results) {
+      _engine.log(line, tag: 'VesperAB');
+    }
+    _endBenchmark();
+    if (!mounted) return;
+    _showBenchResults('GPU A/B test', results);
   }
 
   // --- Native ISO analysis ------------------------------------------------
@@ -1005,6 +1090,12 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
               ? () {
                   Navigator.of(context).pop();
                   _runGpuBenchmark();
+                }
+              : null,
+          onRunGpuAbTest: _streaming && !_recording
+              ? () {
+                  Navigator.of(context).pop();
+                  _runGpuAbTest();
                 }
               : null,
           tapLocks: _tapLocks,
