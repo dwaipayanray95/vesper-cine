@@ -7,6 +7,13 @@ class ChangelogEntry {
 }
 
 const changelog = <ChangelogEntry>[
+  ChangelogEntry('0.14.0', [
+    'Fixed: "swimming" grain in dark areas with motion alignment on (worst towards the frame edges). The motion search no longer mistakes noise for movement',
+    'Heat safeguard: when Android forecasts the phone getting too hot, processing steps down gently (one stage every ~15 s) instead of the take being cut; at "severe" the take continues with minimal processing and stops only at "critical"',
+    'Heat badge shows WARM / HOT / VERY HOT',
+    'Viewfinder-off power saver: the REC text moves every minute so it can\'t burn into the OLED screen',
+    'GPU A/B Test (developer builds): wide HQ tiles experiment',
+  ]),
   ChangelogEntry('0.13.4', [
     'Safer recording: if the encoder or storage fails mid-take, the clip is finished and saved with everything recorded so far (instead of the app freezing)',
     'If the microphone delivers nothing, the take records without audio instead of filling the phone\'s memory',

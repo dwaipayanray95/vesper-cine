@@ -34,7 +34,9 @@ class EngineStatus {
   final int durationMs;
   final int framesEncoded;
   final int framesDropped;
-  final int thermal; // AThermalStatus: 0 none, 1 light, 2 moderate, 3 severe
+  final int thermal; // AThermalStatus: 0 none, 1 light, 2 moderate, 3 severe, 4 critical
+  final int heatLevel; // engine heat level: 0 cool, 1 warm (hold), 2 hot (stepping down), 3 severe (minimal)
+  final double heatHeadroom; // Android's 10 s forecast, 1.0 = severe; -1 if unsupported
   final bool audio;
   final String codec;
   final String stopReason;
@@ -71,6 +73,8 @@ class EngineStatus {
       framesEncoded = j['framesEncoded'] as int,
       framesDropped = j['framesDropped'] as int,
       thermal = j['thermal'] as int,
+      heatLevel = (j['heatLevel'] as int?) ?? 0,
+      heatHeadroom = ((j['heatHeadroom'] as num?) ?? -1).toDouble(),
       audio = j['audio'] as bool,
       codec = j['codec'] as String,
       stopReason = j['stopReason'] as String,

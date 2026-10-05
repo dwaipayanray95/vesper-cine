@@ -9,6 +9,8 @@
 #include "vulkan_engine.h"
 
 #include <android/native_window_jni.h>
+#include <android/thermal.h>
+#include <dlfcn.h>
 #include <jni.h>
 #include <unistd.h>
 
@@ -1609,7 +1611,51 @@ EXPORT void vesper_stop_recording() {
     if (gRecorder) gRecorder->stop("user");
 }
 
+// --- Heat ---------------------------------------------------------------------
+// Polled once a second from the status call (UI thread: the thermal service is
+// a binder call, never made on the camera thread). Android 12+ forecasts the
+// "headroom" to the severe level (1.0 = severe) 10 s ahead; older versions
+// only report the current status. Mapped to the engine's heat level:
+//   3 severe (or worse)                 -> minimal processing, keep recording
+//   2 forecast >= 0.9  (or moderate)    -> step one stage down every ~15 s
+//   1 forecast >= 0.8  (or light)       -> hold: nothing comes back
+//   0 below that (0.75 to leave level 1) -> normal guard
+// The recorder stops a take only at "critical" (recorder.cpp).
+struct HeatState {
+    AThermalManager* mgr = nullptr;
+    std::chrono::steady_clock::time_point last{};
+    int status = 0;
+    float headroom = -1.0f; // -1: no forecast on this device
+    int level = 0;
+};
+HeatState gHeat;
+
+void pollHeat() {
+    auto now = std::chrono::steady_clock::now();
+    if (gHeat.last.time_since_epoch().count() != 0 && now - gHeat.last < std::chrono::seconds(1)) return;
+    gHeat.last = now;
+    if (!gHeat.mgr) gHeat.mgr = AThermal_acquireManager();
+    if (!gHeat.mgr) return;
+    // API 31: looked up at run time (minSdk 30).
+    using HeadroomFn = float (*)(AThermalManager*, int);
+    static const auto headroomFn = reinterpret_cast<HeadroomFn>(dlsym(RTLD_DEFAULT, "AThermal_getThermalHeadroom"));
+    gHeat.status = static_cast<int>(AThermal_getCurrentThermalStatus(gHeat.mgr));
+    const float h = headroomFn ? headroomFn(gHeat.mgr, 10) : NAN; // NaN: unsupported / asked too often
+    gHeat.headroom = std::isfinite(h) ? h : -1.0f;
+    int level;
+    if (gHeat.status >= ATHERMAL_STATUS_SEVERE) level = 3;
+    else if (gHeat.headroom >= 0.0f)
+        level = gHeat.headroom >= 0.9f ? 2 : (gHeat.headroom >= 0.8f || (gHeat.level >= 1 && gHeat.headroom >= 0.75f) ? 1 : 0);
+    else level = gHeat.status >= ATHERMAL_STATUS_MODERATE ? 2 : (gHeat.status >= ATHERMAL_STATUS_LIGHT ? 1 : 0);
+    if (level != gHeat.level)
+        vesperLog(ANDROID_LOG_INFO, "Vesper", "Heat: status %d, forecast headroom %.2f -> level %d (was %d)",
+                  gHeat.status, gHeat.headroom, level, gHeat.level);
+    gHeat.level = level;
+    if (gGpu) gGpu->setThermalLevel(level);
+}
+
 EXPORT int32_t vesper_get_status(char* out, int32_t maxLen) {
+    pollHeat();
     RecorderStatus r = gRecorder ? gRecorder->status() : RecorderStatus{};
     int ow, oh, rw, rh;
     double kelvin, tint, fps;
@@ -1651,13 +1697,13 @@ EXPORT int32_t vesper_get_status(char* out, int32_t maxLen) {
     std::snprintf(buf, sizeof(buf),
                   "{\"streaming\":%s,\"fps\":%.2f,\"raw\":[%d,%d],\"output\":[%d,%d],\"cameraDrops\":%lld,"
                   "\"kelvin\":%.0f,\"tint\":%.1f,\"recording\":%s,\"durationMs\":%lld,\"framesEncoded\":%lld,"
-                  "\"framesDropped\":%lld,\"thermal\":%d,\"audio\":%s,\"codec\":\"%s\",\"stopReason\":\"%s\","
+                  "\"framesDropped\":%lld,\"thermal\":%d,\"heatLevel\":%d,\"heatHeadroom\":%.2f,\"audio\":%s,\"codec\":\"%s\",\"stopReason\":\"%s\","
                   "\"exposureNs\":%lld,\"iso\":%d,\"awbAuto\":%s,\"afState\":%d,\"focusDiopters\":%.3f,"
                   "\"face\":[%.4f,%.4f,%.4f,%.4f],\"gpuMs\":%.2f,\"alignThrottled\":%s,\"alignReduced\":%s,\"nrThrottled\":%s,\"hqAvailable\":%s,\"hqSupported\":%s,\"calibrationSaved\":\"%s\",\"profileActive\":%s,"
                   "\"focusPulling\":%s,\"exposureRamping\":%s,\"isoSweep\":%.3f,\"isoSweepResult\":\"%s\",\"isoSweepError\":\"%s\",\"focusLocked\":%s,\"gpuOverloaded\":%s}",
                   gCamera && gCamera->isStreaming() ? "true" : "false", fps, rw, rh, ow, oh, drops, kelvin, tint,
                   r.recording ? "true" : "false", static_cast<long long>(r.durationUs / 1000),
-                  static_cast<long long>(r.framesEncoded), static_cast<long long>(r.framesDropped), r.thermalStatus,
+                  static_cast<long long>(r.framesEncoded), static_cast<long long>(r.framesDropped), gHeat.status, gHeat.level, static_cast<double>(gHeat.headroom),
                   r.audio ? "true" : "false", jsonEscape(r.codecName).c_str(), jsonEscape(r.stopReason).c_str(), expNs, iso,
                   awbAuto ? "true" : "false", afState, focusD, face[0], face[1], face[2], face[3],
                   gGpu ? gGpu->gpuFrameMs() : 0.0, gGpu && gGpu->alignmentThrottled() ? "true" : "false",

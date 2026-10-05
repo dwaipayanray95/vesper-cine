@@ -62,6 +62,12 @@ the GPU is under 85% − 1.5 ms (~3 s). A stage that overflows again is paused a
 While recording the guard is always active; release builds always run it on AUTO.
 `overloaded()` (status `gpuOverloaded`) = over budget with nothing left to pause → UI warns.
 
+**Heat** (`setThermalLevel`, fed once a second by `pollHeat()` in native_bridge from Android's
+10 s thermal-headroom forecast, 1.0 = "severe"): level 1 (≥ 0.8) holds — nothing is restored;
+level 2 (≥ 0.9, or status moderate without a forecast) pauses the next stage in the same order
+every ~15 s; level 3 (status severe) pauses every optional stage at once and the take continues.
+The recorder stops a take only at "critical".
+
 Per-pass GPU timestamps on PowerVR are unreliable (they lump into "unpack"); only the frame total
 (`gpuFrameMs_`) is meaningful.
 

@@ -510,7 +510,10 @@ void Recorder::checkGuards() {
         std::lock_guard<std::mutex> lk(statusMutex_);
         status_.thermalStatus = thermal;
     }
-    if (thermal >= ATHERMAL_STATUS_SEVERE) {
+    // At "severe" the engine already runs minimal processing (heat level 3,
+    // native_bridge.cpp) and the take goes on; "critical" means Android has
+    // done all it can: stop cleanly before it starts shutting things down.
+    if (thermal >= ATHERMAL_STATUS_CRITICAL) {
         RLOGW("Thermal status %d — stopping recording", thermal);
         stop("thermal");
         return;

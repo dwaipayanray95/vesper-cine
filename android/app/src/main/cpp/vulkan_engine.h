@@ -93,6 +93,13 @@ public:
     }
     // false: never pause alignment / HQ / NR automatically (frames may drop instead).
     void setBudgetGuard(bool enabled);
+    // Heat (0.14.0, from Android's thermal forecast, see native_bridge):
+    // 0 cool; 1 warm: paused stages stay paused; 2 hot: one more stage is
+    // paused every ~15 s (the guard's usual order), so the phone heats more
+    // slowly instead of reaching "severe"; 3 severe: every optional stage off
+    // (minimal processing, the recording continues). Acts while the guard is on.
+    void setThermalLevel(int level) { thermalLevel_ = level; }
+    int thermalLevel() const { return thermalLevel_; }
     bool oversamplingSupported() const { return hqSupported_; }
     bool oversamplingThrottled() const { return hqThrottled_; }
     // Averaged GPU time per frame (ms) from timestamp queries; 0 if unsupported.
@@ -110,6 +117,7 @@ public:
     // HQ lens shading exactly per raw pixel: the GPU test's reference for the
     // default corner interpolation (too slow for use: +3.2 ms on the phone).
     static constexpr int kExpHqExactShading = 32;
+    static constexpr int kExpHqWide = 1; // HQ on 32x16-quad tiles (64x32 px): the halo is shared by twice the width
     void setExperiments(int mask) { experiments_ = mask; }
     // GPU benchmark: run the motion search every n-th frame (2 = normal,
     // 4 = the guard's reduced rate); 0 = automatic (guard decides).
@@ -218,6 +226,7 @@ private:
     std::atomic<int> experiments_{0}, repeatPass_{-1}, alignInterval_{0};
     // Benchmark experiments / probes (VK_NULL_HANDLE where the variant doesn't apply: HQ ones need fp16 + R16F).
     VkPipeline greenProbe1Pipe_ = VK_NULL_HANDLE, greenProbe2Pipe_ = VK_NULL_HANDLE, greenExactPipe_ = VK_NULL_HANDLE;
+    VkPipeline greenWidePipe_ = VK_NULL_HANDLE;
     VkSampler sampler_ = VK_NULL_HANDLE;
 
     Slot slots_[kRingSize];
@@ -245,6 +254,8 @@ private:
     int measuringStage_ = -1, lastRestored_ = -1;
     double costBeforeMs_ = 0;
     int recoverFrames_ = 24;   // under-budget frames needed before re-enabling a stage (doubles on flapping)
+    std::atomic<int> thermalLevel_{0};
+    int thermalStepFrames_ = 0; // frames since the last heat step (level 2)
     bool historyValid_ = false;
 
     // GPU timing: kStamps timestamps per slot (start, unpack, align, clean, end).

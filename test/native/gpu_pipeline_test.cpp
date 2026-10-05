@@ -336,6 +336,57 @@ int main() {
                     noNr, errs[0], errs[1], errs[2]);
     }
 
+    // 5b2. Static, dark, noisy scene (deep shadows; on the phone worst towards
+    //      the frame edges, where lens shading amplifies the noise): the
+    //      motion search must not pick offsets from the noise. Those drag the
+    //      grain around from frame to frame ("swimming" shadows with
+    //      alignment on, 5 Oct 2026) — an RMS error against a smooth truth
+    //      even rewards that smear, so measure the movement: the frame-to-frame
+    //      change of the output, blurred over 8x8 px (the size of the waves).
+    {
+        struct Dark : Scene {
+            Vec3 at(int x, int y) const override {
+                float t = 0.5f + 0.5f * std::sin(x * 0.05f) * std::cos(y * 0.04f);
+                float v = 0.004f + 0.004f * t;
+                return {v / 2.0f, v, v / 1.25f};
+            }
+        };
+        const int bx0 = OUT_W / 4, by0 = OUT_H / 4, bw = OUT_W / 2 / 8, bh = OUT_H / 2 / 8;
+        auto blocks = [&](const P010& fr) {
+            std::vector<double> m(static_cast<size_t>(bw) * bh, 0.0);
+            for (int by = 0; by < bh; ++by)
+                for (int bxx = 0; bxx < bw; ++bxx) {
+                    double sum = 0;
+                    for (int y = 0; y < 8; ++y)
+                        for (int x = 0; x < 8; ++x) sum += fr.luma(bx0 + bxx * 8 + x, by0 + by * 8 + y);
+                    m[static_cast<size_t>(by) * bw + bxx] = sum / 64.0;
+                }
+            return m;
+        };
+        double wave[2] = {};
+        for (int aligned = 0; aligned < 2; ++aligned) {
+            runFrame(gpu, makeNoisyRaw10(Dark(), 300), baseParams(0), nullptr, f); // no history
+            FrameParams tp = baseParams(0);
+            tp.cleanFlags[1] = 1;
+            tp.cleanFlags[3] = aligned;
+            tp.noise[0] = 0.8f;
+            std::vector<double> prev;
+            double sum = 0; int n = 0;
+            for (unsigned fr = 0; fr < 14; ++fr) {
+                runFrame(gpu, makeNoisyRaw10(Dark(), 301 + fr), tp, nullptr, f);
+                std::vector<double> cur = blocks(f);
+                if (fr >= 6) { // history settled
+                    for (size_t i = 0; i < cur.size(); ++i) { double d = cur[i] - prev[i]; sum += d * d; ++n; }
+                }
+                prev = std::move(cur);
+            }
+            wave[aligned] = std::sqrt(sum / n);
+        }
+        std::printf("  dark static scene, frame-to-frame movement (8x8 px means): TNR unaligned %.2f, aligned %.2f\n",
+                    wave[0], wave[1]);
+        check(wave[1] < wave[0] * 1.15, "alignment doesn't drag noise around in dark static scenes", wave[1], wave[0] * 1.15);
+    }
+
     // 5c. Negative noise-profile offset (Pixel reports one) must not create
     //     NaNs in dark areas; they used to stick in the history as black streaks.
     {
@@ -615,6 +666,28 @@ int main() {
                         dFlat, dShaded);
             check(dFlat == 0, "HQ shading matches the exact reference without vignetting", dFlat, 0);
             check(dShaded <= 50, "HQ shading close to the exact reference with vignetting (<= 50 codes)", dShaded, 50);
+            // Experiment: wide HQ tiles (32x16 quads). Identical without
+            // vignetting; with it, the corner interpolation spans a wider
+            // region, so it may differ slightly but must stay as close to exact.
+            std::vector<uint16_t> wideFlat, wideShaded;
+            ok = runSeq(VulkanEngine::kExpHqWide, -1, wideFlat) && runSeq(VulkanEngine::kExpHqWide, -1, wideShaded, true) && ok;
+            // Mean |difference| and share of values > 2 codes off, vs exact.
+            auto offStats = [](const std::vector<uint16_t>& a, const std::vector<uint16_t>& b, double& mean, double& over2) {
+                double sum = 0; size_t n2 = 0;
+                for (size_t i = 0; i < a.size(); ++i) {
+                    int d = std::abs((a[i] >> 6) - (b[i] >> 6));
+                    sum += d; n2 += d > 2;
+                }
+                mean = sum / a.size(); over2 = 100.0 * n2 / a.size();
+            };
+            double mStd, oStd, mWide, oWide;
+            offStats(shadedCur, shadedExact, mStd, oStd);
+            offStats(wideShaded, shadedExact, mWide, oWide);
+            int dWideFlat = maxDiff(cur, wideFlat), dWideExact = maxDiff(wideShaded, shadedExact);
+            std::printf("  HQ vs exact with vignetting: 32-px tiles mean %.3f codes, %.3f%% > 2; wide tiles mean %.3f, %.3f%% > 2, max %d;"
+                        " wide without vignetting %d codes from 32-px tiles\n", mStd, oStd, mWide, oWide, dWideExact, dWideFlat);
+            check(dWideFlat == 0, "HQ wide tiles give the same output without vignetting", dWideFlat, 0);
+            check(dWideExact <= 100, "HQ wide tiles: no gross shading error (<= 100 codes)", dWideExact, 100);
         }
         int repeatDiff = 0;
         for (int pass = 0; pass <= 8; ++pass) {

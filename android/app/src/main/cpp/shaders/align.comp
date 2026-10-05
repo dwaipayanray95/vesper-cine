@@ -6,7 +6,12 @@
 //   mode 1: one workgroup per 32x32-quad tile, search +-4 px at 1/4 res (+-16 quad px), then
 //           refine +-2 quad px at full res. The result is the offset d such
 //           that history(q + d) matches current(q), stored per tile.
-// Zero motion wins ties so noise can't make static tiles jitter.
+// Zero motion wins unless a candidate is better by more than noise could
+// explain: the margin comes from
+// the sensor noise profile and the lens-shading gain, so dark noisy tiles
+// (above all towards the corners) don't pick random offsets that drag the
+// grain around ("swimming" noise in shadows, 0.14.0). Before, a fixed 3 %
+// margin was all that stood between noise and a random motion vector.
 layout(local_size_x = 16, local_size_y = 8) in;
 
 #include "frame_params.glsl"
@@ -33,10 +38,29 @@ shared float sCurF[256];
 shared float sHistF[1156];
 shared float sSadF[25];
 shared float sSadPart[100];
+shared float sVar[64];     // noise variance of each coarse sample (enc domain)
+shared float sVarF[256];   // same for the fine samples
+
+// Margin (in SAD units) a candidate must beat the reference by: kSig x the
+// noise std of a SAD difference, with the history taken as noisy as the
+// current frame (conservative: it is temporally denoised).
+const float kSig = 3.0;
 
 float luma(vec3 c) { return dot(c, vec3(0.25, 0.5, 0.25)); }
 // Compare in a compressed domain so bright areas don't dominate the SAD.
 float enc(float v) { return sqrt(max(v, 0.0)); }
+// Noise variance of a quad's luma (white-balanced linear), from the sensor
+// noise profile and the lens-shading gain in alpha (as clean.comp channelVar).
+float lumaVar(vec4 c) {
+    float shade = c.a > 0.5 ? 1.0 : max(c.a * 10.0, 1.0);
+    vec3 g = P.wbGains.rgb * shade;
+    vec3 v = g * g * max(P.noise.z * max(c.rgb, vec3(0.0)) / g + P.noise.w, vec3(1e-7));
+    // luma = 0.25 R + 0.5 G + 0.25 B; the quad's G is the mean of two photosites.
+    return 0.0625 * v.r + 0.125 * v.g + 0.0625 * v.b;
+}
+// The same after enc(): d sqrt(v) = dv / (2 sqrt v); near black the noise
+// itself bounds the slope.
+float encVar(float var, float v) { return var / (4.0 * max(v, sqrt(var))); }
 
 void main() {
     ivec2 id = ivec2(gl_GlobalInvocationID.xy);
@@ -45,18 +69,22 @@ void main() {
 
     if (pc.mode == 0) {
         if (id.x >= lowSize.x || id.y >= lowSize.y) return;
-        float c = 0.0, h = 0.0;
+        float c = 0.0, h = 0.0, var = 0.0;
         // Four filtered reads, each at the shared corner of a 2x2 block (the
         // filter averages it), instead of sixteen single loads per image.
         vec2 inv = 1.0 / vec2(size);
         for (int y = 1; y < kLowScale; y += 2)
             for (int x = 1; x < kLowScale; x += 2) {
                 vec2 uv = (vec2(id * kLowScale) + vec2(x, y)) * inv;
-                c += luma(texture(quadTex, uv).rgb);
+                vec4 t = texture(quadTex, uv);
+                c += luma(t.rgb);
+                var += lumaVar(t);
                 h += luma(texture(historyTex, uv).rgb);
             }
         float n = 4.0;
-        imageStore(curLow, id, vec4(enc(c / n)));
+        // Mean of 16 quads: variance / 16 (stored as a std: fp16 keeps it).
+        float sigma = sqrt(encVar(var / (n * 16.0), c / n));
+        imageStore(curLow, id, vec4(enc(c / n), sigma, 0.0, 0.0));
         imageStore(histLow, id, vec4(enc(h / n)));
         return;
     }
@@ -68,8 +96,11 @@ void main() {
 
     // Coarse level: 8x8 low-res tile vs a 16x16 history window, 81 candidates.
     ivec2 base = tile * kLowTile;
-    for (uint i = li; i < 64u; i += 128u)
-        sCur[i] = imageLoad(curLow, min(base + ivec2(i % 8u, i / 8u), lowSize - 1)).r;
+    for (uint i = li; i < 64u; i += 128u) {
+        vec2 cs = imageLoad(curLow, min(base + ivec2(i % 8u, i / 8u), lowSize - 1)).rg;
+        sCur[i] = cs.x;
+        sVar[i] = cs.y * cs.y;
+    }
     for (uint i = li; i < 256u; i += 128u)
         sHistLow[i] = imageLoad(histLow, clamp(base - 4 + ivec2(i % 16u, i / 16u), ivec2(0), lowSize - 1)).r;
     barrier();
@@ -85,7 +116,9 @@ void main() {
     if (li == 0u) {
         uint best = 40u; // zero motion
         for (uint i = 0u; i < 81u; ++i) if (sSad[i] < sSad[best]) best = i;
-        if (sSad[40] <= sSad[best] * 1.03) best = 40u;
+        float var = 0.0;
+        for (uint i = 0u; i < 64u; ++i) var += sVar[i];
+        if (sSad[40] <= sSad[best] * 1.03 + kSig * sqrt(2.0 * var)) best = 40u;
         sCenter = (ivec2(int(best % 9u), int(best / 9u)) - 4) * kLowScale;
     }
     barrier();
@@ -94,8 +127,12 @@ void main() {
     // 34x34 history window around the coarse estimate, 25 candidates.
     ivec2 center = sCenter;
     ivec2 qBase = tile * kTile;
-    for (uint i = li; i < 256u; i += 128u)
-        sCurF[i] = enc(luma(imageLoad(quadIn, min(qBase + ivec2(i % 16u, i / 16u) * 2, size - 1)).rgb));
+    for (uint i = li; i < 256u; i += 128u) {
+        vec4 c = imageLoad(quadIn, min(qBase + ivec2(i % 16u, i / 16u) * 2, size - 1));
+        float l = luma(c.rgb);
+        sCurF[i] = enc(l);
+        sVarF[i] = encVar(lumaVar(c), l);
+    }
     for (uint i = li; i < 1156u; i += 128u)
         sHistF[i] = enc(luma(imageLoad(history, clamp(qBase + center - 2 + ivec2(i % 34u, i / 34u), ivec2(0), size - 1)).rgb));
     barrier();
@@ -115,7 +152,13 @@ void main() {
     if (li == 0u) {
         uint best = 12u;
         for (uint i = 0u; i < 25u; ++i) if (sSadF[i] < sSadF[best]) best = i;
-        if (center == ivec2(0) && sSadF[12] <= sSadF[best] * 1.03) best = 12u;
+        // A static tile stays static unless the refinement is clearly better
+        // than noise; a motion the coarse level found is refined freely.
+        if (center == ivec2(0)) {
+            float var = 0.0;
+            for (uint i = 0u; i < 256u; ++i) var += sVarF[i];
+            if (sSadF[12] <= sSadF[best] * 1.03 + kSig * sqrt(2.0 * var)) best = 12u;
+        }
         ivec2 d = center + ivec2(int(best % 5u), int(best / 5u)) - 2;
         imageStore(motion, tile, vec4(vec2(d), 0.0, 0.0));
     }

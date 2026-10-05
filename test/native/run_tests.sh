@@ -21,7 +21,9 @@ fi
 
 # Runs the real Vulkan engine + shaders on a host Vulkan driver
 # (`apt install mesa-vulkan-drivers libvulkan-dev` provides lavapipe).
-if [ -f /usr/include/vulkan/vulkan.h ] && ldconfig -p | grep -q libvulkan.so; then
+# (grep without -q: with pipefail, grep -q exiting early made ldconfig fail on
+# SIGPIPE now and then, which silently skipped this whole test.)
+if [ -f /usr/include/vulkan/vulkan.h ] && ldconfig -p | grep libvulkan.so >/dev/null; then
   g++ -std=c++20 -O1 -Wno-missing-field-initializers -I"$ROOT/test/native/android_stubs" -I"$CPP" \
     "$CPP/vulkan_engine.cpp" "$ROOT/test/native/gpu_pipeline_test.cpp" -lvulkan -o "$OUT/gpu_test"
   "$OUT/gpu_test" | grep -v "^\[Vesper_Vulkan\]" || exit 1

@@ -18,6 +18,7 @@ A cinema camera app for Google Pixel phones (developed on a **Pixel 10**). It re
 | Temporal NR (motion-adaptive, tile alignment) and chroma NR, noise model from the sensor profile and lens-shading gain | Working |
 | Recording: HEVC/AV1 Main10 1080p (P010 input) + AAC, MP4 in `Movies/Vesper Cine`; thermal / storage stops | Working |
 | GPU performance guard: alignment at reduced rate → alignment off → HQ → NR when frames would drop, restores them when they fit; always on while recording | Working |
+| Heat safeguard: Android's thermal forecast steps processing down gently before the phone gets too hot; at "severe" the take continues with minimal processing, it stops only at "critical" | Working |
 | Native viewfinder (Android `SurfaceView` under a transparent Flutter UI), submit/present on its own thread | Working |
 | Screen kept on while the app is open; recording power saver (dim screen / pause viewfinder, tap to wake) | Working |
 | PDAF/laser tap AF (track or lock), face detection; clean auto-exposure (native ISO first, shutter to 180°, then gain); native ISO analysis | Working |
@@ -65,6 +66,7 @@ Use **Settings › Developer › App log** (debug/profile builds): it keeps the 
 - `Stream mode WxH … @ fps` and `16-bit shader arithmetic: yes/no` (startup)
 - every 5 s: `Camera: N fps measured, N sensor drops`, `Frame N: … (max wait) … vf hitches`, `GPU per frame: … = X ms (budget Y ms), guard paused: …`
 - guard decisions: `paused stage N`, `paused stage N saved X ms`, `re-enabled stage N costs X ms`, `frame rate changed … all stages back on`
+- heat: `Heat: status S, forecast headroom H -> level L`, `Phone hot (heat level L): paused stage N`
 - **Settings › Developer › GPU Benchmark** measures each option's GPU cost on the phone.
 
 With adb: `adb logcat -s Vesper Vesper_Camera Vesper_Vulkan Vesper_Recorder VesperBench Vesper_UI`.

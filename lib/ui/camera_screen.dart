@@ -208,6 +208,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   String _statusMessage = 'INITIALIZING SENSOR...';
   EngineStatus? _status;
   bool _overloadWarned = false;
+  bool _heatWarned = false; // "very hot, processing reduced" shown for this take
   RecordingFile? _recordingFile;
   bool _stopping = false;
   Timer? _poll;
@@ -374,9 +375,10 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     ('All on, + HQ load', 7),
     ('All on, + HQ load+demos', 8),
   ];
-  // Opt-in experiments: (label, VulkanEngine::kExp* bit). None pending
-  // (0.13.3: HQ smooth vignetting became the default; exact / wide dropped).
-  static const List<(String, int)> _benchExperiments = [];
+  // Opt-in experiments: (label, VulkanEngine::kExp* bit).
+  static const List<(String, int)> _benchExperiments = [
+    ('Exp: HQ wide tiles', 1),
+  ];
   // The guard's first step: motion search every 4th frame instead of every 2nd.
   static const _benchAlignReduced = 'All on, align every 4th';
 
@@ -836,9 +838,18 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
 
   void _onPoll() {
     _saveSettings();
-    if (_settingsOpen) return; // viewfinder hidden: don't rebuild the camera screen
+    if (_settingsOpen) {
+      // Viewfinder hidden: don't rebuild the camera screen. While recording
+      // the status call still runs: it also drives the heat safeguard.
+      if (_recording) _engine.status();
+      return;
+    }
     final s = _engine.status();
     if (s == null || !mounted) return;
+    if (_recording && s.heatLevel >= 3 && !_heatWarned) {
+      _heatWarned = true;
+      _toast('Phone very hot: processing reduced to the minimum so the take can continue');
+    }
     // While recording the GPU guard is always on; if even that can't hold
     // the frame rate, say so once per clip instead of silently dropping.
     if (_recording && s.gpuOverloaded && !_overloadWarned) {
@@ -891,6 +902,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     setState(() => _recordingFile = file);
     _engine.lockRotation(true); // a clip never flips orientation mid-take
     _overloadWarned = false;
+    _heatWarned = false;
     _armSaver();
   }
 
@@ -919,15 +931,23 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     if (rearm) _armSaver();
   }
 
+  // The black screen's REC text moves to another spot every minute, so a long
+  // take can't leave a ghost of it on the OLED panel.
+  static const _saverSpots = [
+    Alignment(0, 0), Alignment(-0.5, -0.5), Alignment(0.5, 0.4), Alignment(-0.4, 0.5),
+    Alignment(0.5, -0.4), Alignment(0, -0.6), Alignment(-0.6, 0), Alignment(0.6, 0.1),
+  ];
+
   Widget _saverOverlay() {
     final viewfinderOff = _powerSaver == 2;
+    final minute = (_status?.durationMs ?? 0) ~/ 60000;
     return Positioned.fill(
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
         onTap: _wakeSaver,
         child: Container(
           color: viewfinderOff ? Colors.black : Colors.transparent,
-          alignment: Alignment.center,
+          alignment: _saverSpots[minute % _saverSpots.length],
           child: viewfinderOff
               ? Text(
                   '●  REC  ${_timecode(_status?.durationMs ?? 0)}\nViewfinder paused to save power · tap to view',
@@ -961,7 +981,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     _engine.lockRotation(false);
     switch (reason) {
       case 'thermal':
-        _toast('Recording stopped: phone is too hot. Saved ${file?.name}');
+        _toast('Recording stopped: phone critically hot. Saved ${file?.name}');
       case 'storage':
         _toast('Recording stopped: storage almost full. Saved ${file?.name}');
       case final r when r.startsWith('error'):
@@ -1271,7 +1291,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
 
   Widget _buildCamera(BuildContext context) {
     final s = _status;
-    final hot = (s?.thermal ?? 0) >= 2;
+    final heat = s?.heatLevel ?? 0;
     final speedList = _buildSpeedList();
     final angleList = _buildAngleList();
     final isoList = _buildIsoList();
@@ -1570,8 +1590,9 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                         const SizedBox(width: 8),
 
                         // Hardware / thermal warning
-                        if (hot) ...[
-                          _badge(s!.thermal >= 3 ? 'HOT' : 'WARM', Colors.orangeAccent),
+                        if (heat >= 1) ...[
+                          _badge(const ['', 'WARM', 'HOT', 'VERY HOT'][heat.clamp(0, 3)],
+                              heat >= 3 ? Colors.redAccent : Colors.orangeAccent),
                           const SizedBox(width: 6),
                         ],
 
