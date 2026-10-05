@@ -123,6 +123,7 @@ bool Recorder::start(const RecorderConfig& config, VulkanEngine* gpu, std::strin
     thermal_ = AThermal_acquireManager();
     videoTrack_ = audioTrack_ = -1;
     muxerStarted_ = false;
+    videoFailed_ = writeFailed_ = false;
     pending_.clear();
     firstVideoNs_ = -1;
     lastVideoPtsUs_ = -1;
@@ -243,8 +244,8 @@ RecorderStatus Recorder::status() {
 
 void Recorder::threadMain() {
     bool videoEos = false, audioEos = audioCodec_ == nullptr;
-    bool eosQueued = false, audioEosQueued = false;
-    int64_t eosDeadlineNs = 0;
+    bool eosQueued = false, audioEosQueued = audioEos;
+    int64_t eosDeadlineNs = 0, stopDeadlineNs = 0;
     while (true) {
         VideoJob job{-1, 0};
         {
@@ -258,30 +259,58 @@ void Recorder::threadMain() {
         if (stopping) {
             std::lock_guard<std::mutex> lk(jobMutex_);
             accepting_ = false;
+            // However the encoders behave, the file is finalised within a few
+            // seconds of a stop: a stuck or failed encoder must not hang the
+            // app (stop() joins this thread) and leave the MP4 unfinished.
+            if (stopDeadlineNs == 0) stopDeadlineNs = clockNs(CLOCK_MONOTONIC) + 5'000'000'000LL;
         }
         bool jobsLeft;
         { std::lock_guard<std::mutex> lk(jobMutex_); jobsLeft = !jobs_.empty(); }
 
         if (stopping && !jobsLeft && !eosQueued) {
-            ssize_t idx = AMediaCodec_dequeueInputBuffer(video_, 50'000);
+            ssize_t idx = videoFailed_ ? static_cast<ssize_t>(AMEDIACODEC_INFO_TRY_AGAIN_LATER) : AMediaCodec_dequeueInputBuffer(video_, 50'000);
             if (idx >= 0) {
                 AMediaCodec_queueInputBuffer(video_, static_cast<size_t>(idx), 0, 0,
                                              static_cast<uint64_t>(std::max<int64_t>(lastVideoPtsUs_ + 1, 0)),
                                              AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM);
                 eosQueued = true;
                 eosDeadlineNs = clockNs(CLOCK_MONOTONIC) + 3'000'000'000LL;
+            } else if (videoFailed_ || idx != AMEDIACODEC_INFO_TRY_AGAIN_LATER) {
+                // A failed encoder takes no end-of-stream: finish with what was written.
+                videoFailed_ = true;
+                videoEos = eosQueued = true;
+                eosDeadlineNs = clockNs(CLOCK_MONOTONIC) + 3'000'000'000LL;
             }
-        } else if (audioCodec_ && !eosQueued) {
+        } else if (!audioEos && !eosQueued) {
             feedAudio(false);
         }
         // Audio EOS is retried every pass until the codec accepts it.
-        if (eosQueued && audioCodec_ && !audioEosQueued) audioEosQueued = feedAudio(true);
+        if (eosQueued && !audioEos && !audioEosQueued) audioEosQueued = feedAudio(true);
 
-        if (!videoEos) drain(video_, videoTrack_, videoEos, eosQueued ? 10'000 : 0);
-        if (!audioEos) drain(audioCodec_, audioTrack_, audioEos, 0);
+        if (!videoEos && !drain(video_, videoTrack_, videoEos, eosQueued ? 10'000 : 0)) {
+            RLOGE("Video encoder failed — finalising the recording");
+            videoFailed_ = true;
+            videoEos = true;
+            stop("error: video encoder failed");
+        }
+        if (!audioEos && !drain(audioCodec_, audioTrack_, audioEos, 0)) {
+            RLOGW("Audio encoder failed — continuing without audio");
+            audioEos = audioEosQueued = true;
+        }
+        // No audio format yet (microphone silent or failed) while the video
+        // waits in memory: record without audio rather than hold the take in RAM.
+        if (!muxerStarted_ && videoTrack_ >= 0 && audioTrack_ < 0 && audioCodec_ && !pending_.empty() &&
+            lastVideoPtsUs_ > 2'000'000) {
+            dropAudio();
+            audioEos = audioEosQueued = true;
+        }
         if (eosQueued && videoEos && audioEos) break;
         if (eosQueued && clockNs(CLOCK_MONOTONIC) > eosDeadlineNs) {
             RLOGW("Encoder did not signal end of stream within 3s — finalising anyway");
+            break;
+        }
+        if (stopDeadlineNs != 0 && clockNs(CLOCK_MONOTONIC) > stopDeadlineNs) {
+            RLOGW("Recording did not finish within 5 s of the stop — finalising anyway");
             break;
         }
         if (!stopping) checkGuards();
@@ -303,10 +332,18 @@ void Recorder::encodeVideo(const VideoJob& job) {
     };
     if (firstVideoNs_ < 0) firstVideoNs_ = job.timestampNs;
     int64_t ptsUs = (job.timestampNs - firstVideoNs_) / 1000;
-    if (ptsUs <= lastVideoPtsUs_) { drop(); return; }
+    if (ptsUs <= lastVideoPtsUs_ || videoFailed_) { drop(); return; }
 
     ssize_t idx = AMediaCodec_dequeueInputBuffer(video_, 30'000);
-    if (idx < 0) { drop(); return; }
+    if (idx < 0) {
+        drop();
+        if (idx != AMEDIACODEC_INFO_TRY_AGAIN_LATER) {
+            RLOGE("Video encoder failed (%zd) — finalising the recording", idx);
+            videoFailed_ = true;
+            stop("error: video encoder failed");
+        }
+        return;
+    }
     size_t cap = 0;
     uint8_t* dst = AMediaCodec_getInputBuffer(video_, static_cast<size_t>(idx), &cap);
     size_t srcSize = 0;
@@ -401,18 +438,11 @@ bool Recorder::drain(AMediaCodec* codec, int& track, bool& eos, int64_t timeoutU
             track = static_cast<int>(AMediaMuxer_addTrack(muxer_, fmt));
             AMediaFormat_delete(fmt);
             bool audioReady = audioCodec_ == nullptr || audioTrack_ >= 0;
-            if (videoTrack_ >= 0 && audioReady && !muxerStarted_) {
-                if (AMediaMuxer_start(muxer_) == AMEDIA_OK) {
-                    muxerStarted_ = true;
-                    for (auto& p : pending_) AMediaMuxer_writeSampleData(muxer_, static_cast<size_t>(p.track), p.data.data(), &p.info);
-                    pending_.clear();
-                } else {
-                    stop("error: muxer start failed");
-                }
-            }
+            if (videoTrack_ >= 0 && audioReady && !muxerStarted_) startMuxer();
             continue;
         }
-        if (idx < 0) return true; // OUTPUT_BUFFERS_CHANGED etc.
+        if (idx == AMEDIACODEC_INFO_OUTPUT_BUFFERS_CHANGED) return true;
+        if (idx < 0) return false; // codec error
         size_t size = 0;
         uint8_t* data = AMediaCodec_getOutputBuffer(codec, static_cast<size_t>(idx), &size);
         bool config = (info.flags & AMEDIACODEC_BUFFER_FLAG_CODEC_CONFIG) != 0;
@@ -431,7 +461,42 @@ void Recorder::writeSample(int track, const uint8_t* data, const AMediaCodecBuff
         pending_.push_back({track, std::vector<uint8_t>(data, data + info.size), i});
         return;
     }
-    AMediaMuxer_writeSampleData(muxer_, static_cast<size_t>(track), data, &i);
+    if (AMediaMuxer_writeSampleData(muxer_, static_cast<size_t>(track), data, &i) != AMEDIA_OK) writeFailed();
+}
+
+void Recorder::startMuxer() {
+    if (AMediaMuxer_start(muxer_) != AMEDIA_OK) {
+        stop("error: muxer start failed");
+        return;
+    }
+    muxerStarted_ = true;
+    for (auto& p : pending_) {
+        if (AMediaMuxer_writeSampleData(muxer_, static_cast<size_t>(p.track), p.data.data(), &p.info) != AMEDIA_OK) {
+            writeFailed();
+            break;
+        }
+    }
+    pending_.clear();
+}
+
+// The microphone delivered nothing (no AAC format) while the video is ready.
+void Recorder::dropAudio() {
+    RLOGW("No audio from the microphone after 2 s — recording without audio");
+    if (audioStream_) { AAudioStream_requestStop(audioStream_); AAudioStream_close(audioStream_); audioStream_ = nullptr; }
+    if (audioCodec_) { AMediaCodec_stop(audioCodec_); AMediaCodec_delete(audioCodec_); audioCodec_ = nullptr; }
+    {
+        std::lock_guard<std::mutex> lk(statusMutex_);
+        status_.audio = false;
+    }
+    startMuxer();
+}
+
+// Storage error: stop and finalise, so what is already written stays playable.
+void Recorder::writeFailed() {
+    if (writeFailed_) return;
+    writeFailed_ = true;
+    RLOGE("Writing the recording failed — stopping");
+    stop("error: file write failed");
 }
 
 // Thermal and storage guards, checked once a second: stop cleanly (like the

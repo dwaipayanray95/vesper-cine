@@ -505,6 +505,18 @@ class VesperNative {
 
   void stopRecording() => _loaded ? _stopRecording() : null;
 
+  /// Takes left hidden by a crash or a killed app (see MainActivity):
+  /// published at launch. Returns (file name, complete) per file.
+  Future<List<(String, bool)>> recoverRecordings() async {
+    if (!Platform.isAndroid) return const [];
+    try {
+      final list = await _channel.invokeListMethod<Map<Object?, Object?>>('recoverRecordings') ?? const [];
+      return [for (final m in list) (m['name'] as String, m['complete'] as bool)];
+    } on PlatformException {
+      return const [];
+    }
+  }
+
   Future<void> finalizeRecording(RecordingFile file, {bool keep = true}) =>
       _channel.invokeMethod('finalizeRecordingFile', {'uri': file.uri, 'keep': keep});
 

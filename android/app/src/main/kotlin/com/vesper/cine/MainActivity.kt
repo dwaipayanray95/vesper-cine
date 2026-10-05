@@ -1,6 +1,8 @@
 package com.vesper.cine
 
 import android.Manifest
+import android.content.ContentResolver
+import android.content.ContentUris
 import android.content.ContentValues
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
@@ -170,6 +172,13 @@ class MainActivity : FlutterActivity() {
                         result.error("file", e.message, null)
                     }
                 }
+                "recoverRecordings" -> {
+                    try {
+                        result.success(recoverPendingRecordings())
+                    } catch (e: Exception) {
+                        result.error("file", e.message, null)
+                    }
+                }
                 "finalizeRecordingFile" -> {
                     val uri = Uri.parse(call.argument<String>("uri"))
                     val keep = call.argument<Boolean>("keep") ?: true
@@ -245,6 +254,76 @@ class MainActivity : FlutterActivity() {
         val uri = contentResolver.insert(collection, values) ?: throw IllegalStateException("MediaStore insert failed")
         val pfd = contentResolver.openFileDescriptor(uri, "rw") ?: throw IllegalStateException("open failed")
         return mapOf("fd" to pfd.detachFd(), "uri" to uri.toString(), "name" to name)
+    }
+
+    // A take whose app was killed or crashed mid-recording stays a hidden
+    // "pending" MediaStore entry (Android deletes those after about a week).
+    // Called at launch, before any recording: finished files (MP4 index
+    // present) are published as they are; cut-off ones as …_INCOMPLETE.mp4,
+    // so they can be repaired (e.g. with untrunc) or deleted; empty ones go.
+    private fun recoverPendingRecordings(): List<Map<String, Any>> {
+        val collection = MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        val args = Bundle().apply {
+            putString(
+                ContentResolver.QUERY_ARG_SQL_SELECTION,
+                "${MediaStore.Video.Media.IS_PENDING} = 1 AND ${MediaStore.Video.Media.RELATIVE_PATH} LIKE ? " +
+                    "AND ${MediaStore.Video.Media.DISPLAY_NAME} LIKE ?"
+            )
+            putStringArray(ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS, arrayOf("Movies/Vesper Cine%", "VESPER_%"))
+            putInt(MediaStore.QUERY_ARG_MATCH_PENDING, MediaStore.MATCH_INCLUDE)
+        }
+        val projection = arrayOf(MediaStore.Video.Media._ID, MediaStore.Video.Media.DISPLAY_NAME)
+        val found = mutableListOf<Map<String, Any>>()
+        contentResolver.query(collection, projection, args, null)?.use { c ->
+            while (c.moveToNext()) {
+                val uri = ContentUris.withAppendedId(collection, c.getLong(0))
+                val name = c.getString(1)
+                val size = contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize } ?: 0L
+                if (size <= 0L) {
+                    contentResolver.delete(uri, null, null)
+                    continue
+                }
+                val complete = hasMp4Index(uri)
+                val newName = if (complete) name else name.removeSuffix(".mp4") + "_INCOMPLETE.mp4"
+                val values = ContentValues().apply {
+                    put(MediaStore.Video.Media.IS_PENDING, 0)
+                    put(MediaStore.Video.Media.DISPLAY_NAME, newName)
+                }
+                contentResolver.update(uri, values, null, null)
+                found.add(mapOf("name" to newName, "complete" to complete))
+            }
+        }
+        return found
+    }
+
+    // True if the MP4 has its index ("moov" box): walks the top-level boxes.
+    private fun hasMp4Index(uri: Uri): Boolean {
+        val pfd = contentResolver.openFileDescriptor(uri, "r") ?: return false
+        try {
+            java.io.FileInputStream(pfd.fileDescriptor).channel.use { ch ->
+                val size = ch.size()
+                val hdr = java.nio.ByteBuffer.allocate(16)
+                var pos = 0L
+                while (pos + 8 <= size) {
+                    hdr.clear()
+                    if (ch.read(hdr, pos) < 8) return false
+                    var boxSize = hdr.getInt(0).toLong() and 0xffffffffL
+                    val type = String(ByteArray(4) { hdr.get(4 + it) }, Charsets.US_ASCII)
+                    if (type == "moov") return true
+                    if (boxSize == 1L) {
+                        if (hdr.position() < 16) return false
+                        boxSize = hdr.getLong(8)
+                    }
+                    if (boxSize < 8) return false // 0 = "to the end" (an unfinished mdat)
+                    pos += boxSize
+                }
+            }
+        } catch (e: Exception) {
+            return false
+        } finally {
+            pfd.close()
+        }
+        return false
     }
 
     // Copies an app-private calibration file to Downloads/Vesper Calibration so it

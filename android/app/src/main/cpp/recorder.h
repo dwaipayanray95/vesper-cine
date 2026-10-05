@@ -68,8 +68,11 @@ private:
     void threadMain();
     void encodeVideo(const VideoJob& job);
     bool feedAudio(bool endOfStream); // with endOfStream: true once EOS is queued
-    bool drain(AMediaCodec* codec, int& track, bool& eos, int64_t timeoutUs);
+    bool drain(AMediaCodec* codec, int& track, bool& eos, int64_t timeoutUs); // false: codec error
     void writeSample(int track, const uint8_t* data, const AMediaCodecBufferInfo& info);
+    void startMuxer();
+    void dropAudio();
+    void writeFailed();
     void checkGuards();
     void closeAll();
 
@@ -87,6 +90,7 @@ private:
 
     int videoTrack_ = -1, audioTrack_ = -1;
     bool muxerStarted_ = false;
+    bool videoFailed_ = false, writeFailed_ = false; // recorder thread only
     std::vector<PendingSample> pending_;
 
     std::thread thread_;

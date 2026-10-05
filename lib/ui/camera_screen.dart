@@ -277,6 +277,15 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       _loadSettings();
     }
     await _loadColorProfile();
+    final recovered = await _engine.recoverRecordings();
+    if (recovered.isNotEmpty && mounted) {
+      final (name, complete) = recovered.first;
+      final more = recovered.length > 1 ? ' (+${recovered.length - 1} more)' : '';
+      _engine.log('Recovered interrupted recordings: ${recovered.map((r) => r.$1).join(', ')}', tag: 'Vesper_UI');
+      _toast(complete
+          ? 'Recovered a take from the last session: $name$more'
+          : 'A take was cut off last session (app closed mid-recording): kept as $name$more, may need repair');
+    }
     if (!await _openAndStream(createTexture: true)) return;
     _poll = Timer.periodic(const Duration(milliseconds: 250), (_) => _onPoll());
   }
@@ -868,7 +877,12 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       return;
     }
     HapticFeedback.mediumImpact();
-    final file = await _engine.startRecording(codec: _codec);
+    RecordingFile? file;
+    try {
+      file = await _engine.startRecording(codec: _codec);
+    } on PlatformException catch (e) {
+      _engine.log('Could not create the recording file: ${e.message}', tag: 'Vesper_UI');
+    }
     if (!mounted) return;
     if (file == null) {
       _toast('Could not start recording (10-bit encoder unavailable?)');
@@ -930,7 +944,15 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     _stopping = true;
     _wakeSaver(rearm: false);
     final file = _recordingFile;
-    if (file != null) await _engine.finalizeRecording(file);
+    var published = true;
+    if (file != null) {
+      try {
+        await _engine.finalizeRecording(file);
+      } on PlatformException catch (e) {
+        published = false; // recovered as a pending file at the next launch
+        _engine.log('Could not publish ${file.name}: ${e.message}', tag: 'Vesper_UI');
+      }
+    }
     if (!mounted) return;
     setState(() {
       _recordingFile = null;
@@ -942,8 +964,10 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
         _toast('Recording stopped: phone is too hot. Saved ${file?.name}');
       case 'storage':
         _toast('Recording stopped: storage almost full. Saved ${file?.name}');
+      case final r when r.startsWith('error'):
+        _toast('Recording stopped (${r.substring(r.indexOf(':') + 1).trim()}). Saved what was recorded: ${file?.name}');
       default:
-        _toast('Saved ${file?.name} to Movies/Vesper Cine');
+        _toast(published ? 'Saved ${file?.name} to Movies/Vesper Cine' : 'Recording saved, but the gallery entry failed: restart the app');
     }
   }
 

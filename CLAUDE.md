@@ -60,6 +60,7 @@ For user-visible changes also add an entry to `lib/ui/changelog.dart` (shown in 
 - Guard costs measured while overloaded are inflated; only restore-time costs are reliable (see ARCHITECTURE).
 - Opening Settings pauses processing (not while recording); drop counters reset on pause.
 - A 1-quad tile border in green.comp cost +5 ms on the phone: measure on device before assuming a "fold" or merge is faster.
+- Recorder (0.13.4 footage-safety review): every stop finalises within ~5 s even with a failed/stuck encoder (stop() joins the recorder thread from the UI thread); codec errors (dequeue < 0 other than the INFO codes) and muxer write errors stop the take with `error: …`; no AAC format 2 s into a take → record without audio (else the video piles up in `pending_` in RAM). Files > 4 GB: AOSP MPEG4Writer (Android 15 source) writes co64 offsets and limits size only by `_PC_FILESIZEBITS`, so long takes should be fine (confirm on the phone). At launch, pending MediaStore entries left by a killed app are published (`recoverRecordings`; no `moov` → `_INCOMPLETE.mp4`).
 - Quad image alpha: 1 = clipped highlight, else 0.1 × lens-shading gain (used by NR/sharpen noise models).
 
 ## UI-only work

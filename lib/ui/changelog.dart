@@ -7,6 +7,11 @@ class ChangelogEntry {
 }
 
 const changelog = <ChangelogEntry>[
+  ChangelogEntry('0.13.4', [
+    'Safer recording: if the encoder or storage fails mid-take, the clip is finished and saved with everything recorded so far (instead of the app freezing)',
+    'If the microphone delivers nothing, the take records without audio instead of filling the phone\'s memory',
+    'A take cut off by a crash or the app being closed is no longer hidden: it shows up in the gallery at the next launch (…_INCOMPLETE.mp4 if it needs repair)',
+  ]),
   ChangelogEntry('0.13.3', ['HQ detail is more accurate towards the frame corners: lens-shading correction now matches the rest of the image per pixel (no extra GPU cost)']),
   ChangelogEntry('0.13.2', ['GPU A/B Test (developer builds): each speed-up experiment against the normal path in alternating blocks, so the phone heating up cancels out']),
   ChangelogEntry('0.13.1', [
