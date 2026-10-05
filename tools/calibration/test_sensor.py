@@ -33,10 +33,11 @@ def build_synthetic(out_dir):
 
 
 def main(argv):
+    build_dir = tempfile.TemporaryDirectory()  # kept until the end: later checks read the phone-side profile
+    d = argv[1] if len(argv) > 1 else build_dir.name
+    if len(argv) <= 1:
+        build_synthetic(d)
     with tempfile.TemporaryDirectory() as tmp:
-        d = argv[1] if len(argv) > 1 else tmp
-        if len(argv) <= 1:
-            build_synthetic(d)
         files = [os.path.join(d, f"VSENSOR_{k}_synthetic.json") for k in ("dark", "white")]
         truth = json.load(open(files[1]))["synthTruth"]
         text = io.StringIO()
@@ -92,7 +93,16 @@ def main(argv):
     assert prof["format"] == "vesper-sensor-profile/1" and prof["device"] == "Synthetic"
     assert not rd["noise"][50]["sMeasured"] and abs(rd["noise"][50]["O"] / truth["O"][0] - 1) < 0.15
     assert prof["defectCount"] == truth["hot"] and len(prof["defects"]) == 2 * truth["hot"], prof["defectCount"]
-    assert prof["darkNoise"] == []  # the synthetic HAL O is negative: no ratio to correct
+    # The synthetic camera reports 0.4x the real dark noise: correction factor 2.5
+    # (ISOs where the dark noise stays clear of 0 DN), from the tool and from the phone.
+    for name, pr in (("sensor.py", prof), ("phone", json.load(open(os.path.join(d, "VSENSOR_dark_synthetic_profile.json"))))):
+        f = {e["iso"]: e["factor"] for e in pr["darkNoise"]}
+        assert pr["format"] == "vesper-sensor-profile/1" and len(f) == 6, (name, f)
+        for iso in (50, 100, 200, 400, 800):
+            assert abs(f[iso] / 2.5 - 1) < 0.1, (name, iso, f[iso])
+    phone = json.load(open(os.path.join(d, "VSENSOR_dark_synthetic_profile.json")))
+    assert {tuple(phone["defects"][i:i + 2]) for i in range(0, len(phone["defects"]), 2)} == \
+        {tuple(prof["defects"][i:i + 2]) for i in range(0, len(prof["defects"]), 2)}, "phone and tool hot-pixel maps differ"
 
     # Helpers.
     assert abs(float(sensor.apple_log(0.18)) - 0.4883) < 2e-4

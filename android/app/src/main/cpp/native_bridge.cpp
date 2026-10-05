@@ -1107,6 +1107,10 @@ void calSweepMain() {
     std::thread worker;
     int done = 0, failed = 0, w = 0, h = 0;
     bool refSaved = false;
+    // Dark sweep: this phone's own profile (noise floor per ISO + hot-pixel map).
+    std::mutex profileMutex;
+    std::vector<ProfileNoisePoint> noisePoints;
+    std::vector<std::pair<int32_t, int32_t>> defectsArray;
     const CaptureState refState = [&] {
         std::lock_guard<std::mutex> lk(gStateMutex);
         return captureState(gSettings, device);
@@ -1155,7 +1159,7 @@ void calSweepMain() {
                       st.iso, static_cast<long long>(st.exposureNs), st.stop, st.ladder ? "true" : "false", mapIndex,
                       ref ? "true" : "false");
         std::string head = std::string(b) + frameMetaJson(m, info) + ",\"stats\":";
-        worker = std::thread([&stepJson, i, head, frames = std::move(fr), cfa = info.cfa] {
+        worker = std::thread([&, i, head, frames = std::move(fr), cfa = info.cfa] {
             SensorStepInput in;
             in.width = frames[0].width;
             in.height = frames[0].height;
@@ -1166,6 +1170,15 @@ void calSweepMain() {
             for (const auto& c : frames) in.frames.push_back(c.data.data());
             SensorStepStats s = analyzeSensorStep(in);
             stepJson[i] = head + sensorStepJson(s) + "}";
+            if (kind == 0 && s.valid) {
+                float map[4];
+                rawToArrayMap(info, in.width, in.height, map);
+                std::lock_guard<std::mutex> lk(profileMutex);
+                noisePoints.push_back({frames[0].meta.iso, darkNoiseO(s, in.black, in.white), frames[0].meta.noiseO});
+                for (const auto& d : s.defects)
+                    defectsArray.push_back({static_cast<int32_t>(std::lround(d.x * map[0] + map[2])),
+                                            static_cast<int32_t>(std::lround(d.y * map[1] + map[3]))});
+            }
             vesperLog(ANDROID_LOG_INFO, "Vesper", "Sensor sweep: ISO %d %.4f ms: mean G %.1f DN, noise G %.2f DN, row %.3f DN, defects %d",
                       frames[0].meta.iso, frames[0].meta.exposureNs * 1e-6, 0.5 * (s.siteMean[1] + s.siteMean[2]),
                       std::sqrt(0.5 * (s.siteTvar[1] + s.siteTvar[2])), std::sqrt(0.5 * (s.rowVar[1] + s.rowVar[2])),
@@ -1213,6 +1226,24 @@ void calSweepMain() {
             std::fclose(fp);
             vesperLog(ANDROID_LOG_INFO, "Vesper", "Sensor %s sweep saved: %s.json (%d steps, %d skipped, %zu KB)",
                       kind == 0 ? "dark" : "white", base.c_str(), done, failed, j.size() / 1024);
+        }
+        if (kind == 0) {
+            // The app merges this into the phone's saved profile and applies it.
+            std::sort(defectsArray.begin(), defectsArray.end());
+            defectsArray.erase(std::unique(defectsArray.begin(), defectsArray.end()), defectsArray.end());
+            std::vector<int32_t> xy;
+            for (const auto& [x, y] : defectsArray) {
+                xy.push_back(x);
+                xy.push_back(y);
+            }
+            std::string pj = sensorProfileJson(device, gCamera->cameraId(), "dark sweep " + localDateTime("%Y-%m-%d %H:%M"),
+                                               noisePoints, xy);
+            if (FILE* pf = std::fopen((base + "_profile.json").c_str(), "w")) {
+                std::fwrite(pj.data(), 1, pj.size(), pf);
+                std::fclose(pf);
+                vesperLog(ANDROID_LOG_INFO, "Vesper", "Sensor profile from this sweep: %zu noise points, %zu hot pixels",
+                          noisePoints.size(), defectsArray.size());
+            }
         }
     }
     if (!error.empty()) vesperLog(ANDROID_LOG_WARN, "Vesper", "Sensor sweep failed: %s", error.c_str());

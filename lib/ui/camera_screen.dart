@@ -722,9 +722,13 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     final base = s.calSweepResult;
     if (base.isEmpty) return;
     final name = base.split('/').last;
+    final hot = _calSweepDark ? _saveSweepProfile(base) : null;
     _engine.publishCalibration(base).then((ok) async {
       await _engine.publishCalibration('${base}_ref');
-      if (mounted) _toast(ok ? 'Saved $name.json to Downloads/Vesper Calibration' : 'Saved $name.json (app files only)');
+      await _engine.publishCalibration('${base}_profile');
+      if (!mounted) return;
+      final saved = ok ? 'Saved $name.json to Downloads/Vesper Calibration' : 'Saved $name.json (app files only)';
+      _toast(hot == null ? saved : 'Phone calibrated: noise per ISO + $hot hot pixels mapped. $saved');
     });
   }
 
@@ -862,28 +866,77 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     }
   }
 
-  // Sensor calibrations (tools/calibration/sensor.py --profile) ship as
-  // assets/sensor_profiles/*.json: dark-noise correction per ISO and the
-  // static hot-pixel map. Applied automatically for the matching phone/camera.
+  // Sensor profile: dark-noise correction per ISO + static hot-pixel map.
+  // Hot pixels differ from phone to phone, so the map only comes from this
+  // phone's own Dark sweep (saved in app files, merged over runs). The noise
+  // table describes the sensor model: a shipped one
+  // (assets/sensor_profiles/*.json, tools/calibration/sensor.py --profile) is
+  // used until this phone has measured its own.
+  String? get _sensorProfilePath => _filesDir == null ? null : '$_filesDir/vesper_sensor_profile_$_cameraId.json';
+
+  Map<String, dynamic>? _readSensorProfile(String text) {
+    final j = jsonDecode(text) as Map<String, dynamic>;
+    if (j['format'] != 'vesper-sensor-profile/1') return null;
+    if (j['device'] != _deviceModel || '${j['cameraId']}' != _cameraId) return null;
+    return j;
+  }
+
   Future<void> _loadSensorProfile() async {
+    Map<String, dynamic>? own, shipped;
+    try {
+      final path = _sensorProfilePath;
+      if (path != null && File(path).existsSync()) own = _readSensorProfile(File(path).readAsStringSync());
+    } catch (_) {}
     try {
       final manifest = await AssetManifest.loadFromAssetBundle(rootBundle);
       for (final path in manifest.listAssets().where(
         (a) => a.startsWith('assets/sensor_profiles/') && a.endsWith('.json'),
       )) {
-        final j = jsonDecode(await rootBundle.loadString(path)) as Map<String, dynamic>;
-        if (j['format'] != 'vesper-sensor-profile/1') continue;
-        if (j['device'] != _deviceModel || '${j['cameraId']}' != _cameraId) continue;
-        final noise = (j['darkNoise'] as List).cast<Map<String, dynamic>>();
-        _engine.setSensorProfile(
-          [for (final n in noise) (n['iso'] as num).toDouble()],
-          [for (final n in noise) (n['factor'] as num).toDouble()],
-          (j['defects'] as List).map((e) => (e as num).toInt()).toList(),
-        );
-        return;
+        shipped = _readSensorProfile(await rootBundle.loadString(path));
+        if (shipped != null) break;
       }
+    } catch (_) {}
+    final ownNoise = (own?['darkNoise'] as List?) ?? const [];
+    _applySensorProfile(ownNoise.isNotEmpty ? ownNoise : ((shipped?['darkNoise'] as List?) ?? const []),
+        (own?['defects'] as List?) ?? const []);
+  }
+
+  void _applySensorProfile(List noise, List defects) {
+    final n = noise.cast<Map<String, dynamic>>();
+    _engine.setSensorProfile(
+      [for (final e in n) (e['iso'] as num).toDouble()],
+      [for (final e in n) (e['factor'] as num).toDouble()],
+      defects.map((e) => (e as num).toInt()).toList(),
+    );
+  }
+
+  // After a Dark sweep: its noise table replaces this phone's, its hot pixels
+  // are added to the map (hot pixels don't heal; more runs catch more).
+  int? _saveSweepProfile(String sweepBase) {
+    try {
+      final path = _sensorProfilePath;
+      final f = File('${sweepBase}_profile.json');
+      if (path == null || !f.existsSync()) return null;
+      final fresh = _readSensorProfile(f.readAsStringSync());
+      if (fresh == null) return null;
+      final pairs = <(int, int)>{};
+      void addPairs(List? xy) {
+        if (xy == null) return;
+        for (var i = 0; i + 1 < xy.length; i += 2) {
+          pairs.add(((xy[i] as num).toInt(), (xy[i + 1] as num).toInt()));
+        }
+      }
+      final old = File(path);
+      if (old.existsSync()) addPairs(_readSensorProfile(old.readAsStringSync())?['defects'] as List?);
+      addPairs(fresh['defects'] as List?);
+      final defects = [for (final p in pairs) ...[p.$1, p.$2]];
+      fresh['defects'] = defects;
+      fresh['defectCount'] = pairs.length;
+      old.writeAsStringSync(jsonEncode(fresh));
+      _applySensorProfile((fresh['darkNoise'] as List?) ?? const [], defects);
+      return pairs.length;
     } catch (_) {
-      // No or malformed profile: the camera's own noise model, no static map.
+      return null;
     }
   }
 

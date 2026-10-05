@@ -88,4 +88,21 @@ std::vector<int32_t> prepareDefects(std::vector<int32_t> xy, int width, int heig
 // (log-log interpolation, held flat beyond the ends). 1 without a table.
 double noiseFactorAt(const std::vector<float>& isos, const std::vector<float>& factors, double iso);
 
+// Per-phone sensor profile from a Dark sweep, computed on the phone.
+// Dark noise floor of one burst, normalised like SENSOR_NOISE_PROFILE's O:
+// median over all blocks and sites of the temporal variance / (white - black)^2.
+double darkNoiseO(const SensorStepStats& s, const float black[4], float white);
+
+struct ProfileNoisePoint {
+    int iso = 0;
+    double o = 0;     // measured (darkNoiseO)
+    double halO = 0;  // the camera's SENSOR_NOISE_PROFILE O at that ISO
+};
+
+// JSON in the format of assets/sensor_profiles (tools/calibration/sensor.py
+// --profile): one darkNoise entry per ISO (median of its points; factor =
+// O / halO, only where halO > 0) and the defect map (x, y pairs, array coords).
+std::string sensorProfileJson(const std::string& device, const std::string& cameraId, const std::string& source,
+                              const std::vector<ProfileNoisePoint>& points, const std::vector<int32_t>& defects);
+
 } // namespace vesper

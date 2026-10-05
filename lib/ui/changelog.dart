@@ -7,6 +7,10 @@ class ChangelogEntry {
 }
 
 const changelog = <ChangelogEntry>[
+  ChangelogEntry('0.16.0', [
+    'Each phone calibrates itself: Sensor Calibration · Dark (Settings › Developer) now saves this phone\'s own hot-pixel map and noise table and uses them straight away (every phone has different hot pixels). Running it again adds any new hot pixels',
+    'Without a Dark run the Pixel 10 still gets the measured noise correction for its sensor model; the hot-pixel map from 0.15.1 (one specific phone) is no longer shipped',
+  ]),
   ChangelogEntry('0.15.1', [
     'Hot pixels: the ~650 known hot pixels of the Pixel 10 main camera (measured with the new dark calibration) are repaired before any processing, and the automatic repair catches far more of the rest. At high ISO about 95-100% are now removed (was ~12%)',
     'Noise reduction and motion alignment use the measured sensor noise: from ISO ~1000 up the camera\'s own figure was 40% too low in the shadows, so NR was too weak there',

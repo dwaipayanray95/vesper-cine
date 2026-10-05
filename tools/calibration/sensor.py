@@ -514,14 +514,14 @@ def map_crossval(dark_reports):
     return out
 
 
-def write_profile(path, reports, noise, device=None, camera=None):
+def write_profile(path, reports, noise, device=None, camera=None, defects=True):
     """assets/sensor_profiles/*.json for the app: per-ISO dark-noise correction
     (measured / HAL O; the app multiplies the camera's O by it) and the static
     hot-pixel map (union of every dark sweep, pre-correction array x, y)."""
     dark_reports = [r for r in reports if r["kind"] == "dark"]
     table = [{"iso": int(iso), "O": float(n["O"]), "halO": float(n["halO"]), "factor": round(float(n["O"] / n["halO"]), 4)}
              for iso, n in sorted(noise.items()) if n["halO"] > 0]
-    defects = sorted(set().union(*defect_maps(dark_reports))) if dark_reports else []
+    defects = sorted(set().union(*defect_maps(dark_reports))) if dark_reports and defects else []
     prof = {"format": "vesper-sensor-profile/1", "device": device or reports[0].get("device"),
             "cameraId": str(camera if camera is not None else reports[0].get("cameraId")),
             "source": [f"{r['kind']} sweep {r.get('date', '')}" for r in reports],
@@ -540,7 +540,7 @@ def verdict(ok, text):
     return f"  [{'OK ' if ok else 'FIX'}] {text}"
 
 
-def report(paths, out_json=None, file=sys.stdout, profile=None, device=None, camera=None):
+def report(paths, out_json=None, file=sys.stdout, profile=None, device=None, camera=None, profile_defects=True):
     dark, white, reports = load(paths)
     p = lambda *a: print(*a, file=file)  # noqa: E731
     r0 = reports[0]
@@ -738,7 +738,7 @@ def report(paths, out_json=None, file=sys.stdout, profile=None, device=None, cam
                                    f"({defects['worst']})"))
 
     if profile:
-        prof = write_profile(profile, reports, noise, device, camera)
+        prof = write_profile(profile, reports, noise, device, camera, profile_defects)
         p(f"\nSensor profile written: {profile} ({len(prof['darkNoise'])} noise points, {prof['defectCount']} hot pixels)")
     p("\nSUMMARY")
     for line in summary:
@@ -764,8 +764,10 @@ def main(argv=None):
     ap.add_argument("--profile", help="write an app sensor profile (assets/sensor_profiles/<phone>_cam<id>.json)")
     ap.add_argument("--device", help="profile: Android Build.MODEL (default: from the sweep)")
     ap.add_argument("--camera", help="profile: camera id (default: from the sweep)")
+    ap.add_argument("--no-defects", action="store_true",
+                    help="profile: noise table only (a shipped asset: hot pixels differ per phone; the app ignores them there)")
     a = ap.parse_args(argv)
-    return report(a.files, a.json, profile=a.profile, device=a.device, camera=a.camera)
+    return report(a.files, a.json, profile=a.profile, device=a.device, camera=a.camera, profile_defects=not a.no_defects)
 
 
 if __name__ == "__main__":

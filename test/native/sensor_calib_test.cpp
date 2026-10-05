@@ -337,18 +337,29 @@ static void writeSweep(const std::string& dir, bool white) {
     Sensor s;
     const double range = 1023 - s.blackReported;
     std::string steps;
+    std::vector<ProfileNoisePoint> noisePoints; // the phone-side profile (Dark sweep)
+    std::vector<int32_t> defects;
     auto addStep = [&](int iso, double expNs, int stop, bool ladder, double flux) {
         auto fr = s.burst(iso, expNs, flux, 4, rng);
         SensorStepStats st = analyze(s, fr);
-        // The HAL's profile: S right, O slightly negative (as the Pixel reports).
-        double S = s.K(iso) / range, O = -1e-7;
+        // The HAL's profile: S right, O 2.5x too low (as the Pixel 10 at high ISO).
+        double S = s.K(iso) / range, O = 0.4 * std::pow(s.read(iso) / range, 2);
+        if (!white) {
+            float bl[4];
+            for (float& v : bl) v = static_cast<float>(s.blackReported);
+            noisePoints.push_back({iso, darkNoiseO(st, bl, 1023), O});
+            for (const auto& d : st.defects) {
+                defects.push_back(d.x);
+                defects.push_back(d.y);
+            }
+        }
         double np[8] = {S, O, S, O, S, O, S, O};
         double bl[4] = {s.blackReported, s.blackReported, s.blackReported, s.blackReported};
         char b[512];
         std::snprintf(b, sizeof(b), "%s{\"requestedIso\":%d,\"requestedExposureNs\":%.0f,\"stop\":%d,\"ladder\":%s,\"shading\":0,\"ref\":false,"
                       "\"iso\":%d,\"exposureNs\":%.0f,\"frameDurationNs\":33333333,\"analogIso\":%d,\"digitalGain\":1,"
-                      "\"whiteLevel\":1023,\"noiseS\":%.9g,\"noiseO\":%.9g,\"engineNoiseS\":%.9g,\"engineNoiseO\":2e-06,\"noiseChannels\":4,",
-                      steps.empty() ? "" : ",", iso, expNs, stop, ladder ? "true" : "false", iso, expNs, iso, S, O, S);
+                      "\"whiteLevel\":1023,\"noiseS\":%.9g,\"noiseO\":%.9g,\"engineNoiseS\":%.9g,\"engineNoiseO\":%.9g,\"noiseChannels\":4,",
+                      steps.empty() ? "" : ",", iso, expNs, stop, ladder ? "true" : "false", iso, expNs, iso, S, O, S, O);
         steps += b;
         steps += "\"blackLevel\":" + arr(bl, 4) + ",\"noiseProfile\":" + arr(np, 8) + ",\"noiseProfileSites\":" + arr(np, 8) +
                  ",\"halNeutral\":[0.55,1,0.7],\"stats\":" + sensorStepJson(st) + "}";
@@ -403,6 +414,13 @@ static void writeSweep(const std::string& dir, bool white) {
     if (!f) { check(false, "write synthetic sweep", 0, 1); return; }
     std::fwrite(j.data(), 1, j.size(), f);
     std::fclose(f);
+    if (!white) { // what the phone writes next to a Dark sweep (<base>_profile.json)
+        std::string pj = sensorProfileJson("Synthetic", "0", "dark sweep test", noisePoints, defects);
+        if (FILE* pf = std::fopen((dir + "/VSENSOR_dark_synthetic_profile.json").c_str(), "w")) {
+            std::fwrite(pj.data(), 1, pj.size(), pf);
+            std::fclose(pf);
+        }
+    }
 }
 
 int main(int argc, char** argv) {

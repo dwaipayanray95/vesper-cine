@@ -380,4 +380,59 @@ double noiseFactorAt(const std::vector<float>& isos, const std::vector<float>& f
     return factors[n - 1];
 }
 
+double darkNoiseO(const SensorStepStats& s, const float black[4], float white) {
+    std::vector<double> v;
+    for (int k = 0; k < 4; ++k) {
+        const double range = white - black[k];
+        if (range <= 0) continue;
+        for (float t : s.tvar[k]) v.push_back(t / (range * range));
+    }
+    if (v.empty()) return 0;
+    std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
+    return v[v.size() / 2];
+}
+
+std::string sensorProfileJson(const std::string& device, const std::string& cameraId, const std::string& source,
+                              const std::vector<ProfileNoisePoint>& points, const std::vector<int32_t>& defects) {
+    auto esc = [](const std::string& in) {
+        std::string out;
+        for (char c : in) {
+            if (c == '"' || c == '\\') out += '\\';
+            out += c;
+        }
+        return out;
+    };
+    std::vector<int> isos;
+    for (const auto& p : points)
+        if (std::find(isos.begin(), isos.end(), p.iso) == isos.end()) isos.push_back(p.iso);
+    std::sort(isos.begin(), isos.end());
+    std::string j = "{\"format\":\"vesper-sensor-profile/1\",\"device\":\"" + esc(device) + "\",\"cameraId\":\"" +
+                    esc(cameraId) + "\",\"source\":[\"" + esc(source) + "\"],\"darkNoise\":[";
+    bool first = true;
+    char b[160];
+    for (int iso : isos) {
+        std::vector<double> o, hal;
+        for (const auto& p : points)
+            if (p.iso == iso) {
+                o.push_back(p.o);
+                hal.push_back(p.halO);
+            }
+        std::sort(o.begin(), o.end());
+        std::sort(hal.begin(), hal.end());
+        double om = o[o.size() / 2], hm = hal[hal.size() / 2];
+        if (!(om > 0) || !(hm > 0)) continue;
+        std::snprintf(b, sizeof(b), "%s{\"iso\":%d,\"O\":%.6g,\"halO\":%.6g,\"factor\":%.4f}", first ? "" : ",", iso, om, hm,
+                      om / hm);
+        j += b;
+        first = false;
+    }
+    std::snprintf(b, sizeof(b), "],\"defectCount\":%zu,\"defects\":[", defects.size() / 2);
+    j += b;
+    for (size_t i = 0; i < defects.size(); ++i) {
+        if (i) j += ',';
+        j += std::to_string(defects[i]);
+    }
+    return j + "]}";
+}
+
 } // namespace vesper
