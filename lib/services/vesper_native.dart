@@ -61,6 +61,10 @@ class EngineStatus {
   final String isoSweepError;
   final bool focusLocked; // focus held (AF-L)
   final bool gpuOverloaded; // GPU over budget with nothing left to pause: this frame rate drops frames
+  final double calSweep; // sensor calibration sweep progress 0..1, -1 when idle
+  final String calSweepResult; // base path of the last sweep written (<base>.json, <base>_ref.*)
+  final String calSweepError;
+  final String calSweepStage; // e.g. "ISO 400 · 1/1000 s"
 
   EngineStatus.fromJson(Map<String, dynamic> j)
     : streaming = j['streaming'] as bool,
@@ -98,7 +102,11 @@ class EngineStatus {
       isoSweepResult = (j['isoSweepResult'] as String?) ?? '',
       isoSweepError = (j['isoSweepError'] as String?) ?? '',
       focusLocked = (j['focusLocked'] as bool?) ?? false,
-      gpuOverloaded = (j['gpuOverloaded'] as bool?) ?? false;
+      gpuOverloaded = (j['gpuOverloaded'] as bool?) ?? false,
+      calSweep = (j['calSweep'] as num?)?.toDouble() ?? -1,
+      calSweepResult = (j['calSweepResult'] as String?) ?? '',
+      calSweepError = (j['calSweepError'] as String?) ?? '',
+      calSweepStage = (j['calSweepStage'] as String?) ?? '';
 }
 
 /// Luma scopes of the recorded Apple Log signal (see vesper_get_scopes).
@@ -239,6 +247,8 @@ class VesperNative {
   late final void Function(int) _setRepeatPass;
   late final int Function(Pointer<Utf8>, Pointer<Utf8>) _isoSweepStart;
   late final void Function() _isoSweepCancel;
+  late final int Function(int, Pointer<Utf8>, Pointer<Utf8>) _sensorSweepStart;
+  late final void Function() _sensorSweepCancel;
   late final int Function(Pointer<Float>, Pointer<Float>) _getScopes;
   late final void Function(double, double, int) _focusAt;
   late final void Function(double) _setFocusSpeed;
@@ -322,6 +332,11 @@ class VesperNative {
             'vesper_iso_sweep_start',
           );
       _isoSweepCancel = _lib.lookupFunction<Void Function(), void Function()>('vesper_iso_sweep_cancel');
+      _sensorSweepStart = _lib.lookupFunction<
+        Int32 Function(Int32, Pointer<Utf8>, Pointer<Utf8>),
+        int Function(int, Pointer<Utf8>, Pointer<Utf8>)
+      >('vesper_sensor_sweep_start');
+      _sensorSweepCancel = _lib.lookupFunction<Void Function(), void Function()>('vesper_sensor_sweep_cancel');
       _setNativeIsos = _lib.lookupFunction<Void Function(Int32, Int32), void Function(int, int)>('vesper_set_native_isos');
       _setBudgetGuard = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_budget_guard');
       _setExperiments = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_set_experiments');
@@ -563,6 +578,23 @@ class VesperNative {
 
   void cancelIsoSweep() => _loaded ? _isoSweepCancel() : null;
 
+  /// Sensor calibration sweep (tools/calibration/sensor.py): dark = lens
+  /// covered, otherwise white (flat field). Writes `<basePath>.json` and a
+  /// reference frame `<basePath>_ref.*`. Progress / result via [status].
+  bool startSensorSweep({required bool dark, required String basePath, required String deviceModel}) {
+    if (!_loaded) return false;
+    final p = basePath.toNativeUtf8();
+    final d = deviceModel.toNativeUtf8();
+    try {
+      return _sensorSweepStart(dark ? 0 : 1, p, d) == 0;
+    } finally {
+      calloc.free(p);
+      calloc.free(d);
+    }
+  }
+
+  void cancelSensorSweep() => _loaded ? _sensorSweepCancel() : null;
+
   /// Measured native ISOs for the clean auto-exposure (0 = unknown).
   void setNativeIsos(int baseIso, int hcgIso) => _loaded ? _setNativeIsos(baseIso, hcgIso) : null;
 
@@ -715,7 +747,7 @@ class VesperNative {
   /// 0 = centre-weighted with face priority, 1 = spot at (x, y).
   void setMetering(int mode, [double x = 0.5, double y = 0.5]) => _loaded ? _setMetering(mode, x, y) : null;
 
-  /// Saves the next raw frame (+ metadata JSON) to `<basePath>.raw10/.json`.
+  /// Saves the next raw frame to `<basePath>.raw10/.json/.dng` (metadata incl. noise profile, gain split, AWB).
   void captureCalibrationFrame(String basePath, String deviceModel) {
     if (!_loaded) return;
     final b = basePath.toNativeUtf8();

@@ -13,7 +13,7 @@ Mention the new version in the commit message and in the reply to the user.
 For user-visible changes also add an entry to `lib/ui/changelog.dart` (shown in Settings › Info › What's new).
 
 ## Checks before committing
-- `test/native/run_tests.sh` (colour science, native type-check, GPU pipeline on lavapipe, calibration, focus, ISO analysis)
+- `test/native/run_tests.sh` (colour science, native type-check, GPU pipeline on lavapipe, calibration, focus, ISO analysis, sensor calibration statistics + DNG + `sensor.py`)
 - `flutter analyze` and `flutter test`; then `git checkout analysis_options.yaml pubspec.lock` (the Flutter tool rewrites them). If `flutter` isn't on PATH, look for an SDK (e.g. `/tmp/flutter/bin`) before concluding Dart can't be checked.
 - After editing any `.comp`/`.glsl`: `android/app/src/main/cpp/shaders/compile_shaders.sh` to regenerate the `*_spv.h` headers (green.comp has 4 variants: R16F/RGBA16F × fp32/fp16, plus probe and test-reference variants; 32x16-quad tiles, dispatch width /32).
 - New NDK functions used in native code need a declaration in `test/native/android_stubs/`.
@@ -33,7 +33,7 @@ For user-visible changes also add an entry to `lib/ui/changelog.dart` (shown in 
 - `android/app/src/main/cpp/` — native engine: `camera_engine` (Camera2 NDK), `vulkan_engine` (GPU pipeline, submit thread, guard), `shaders/` (unpack, green, align, clean, render), `color_science`, `recorder`, `focus_controller`, `iso_analysis`, `app_log.h`. `native_bridge.cpp` holds the `vesper_*` C exports, `onFrame` and the status JSON.
 - `lib/services/vesper_native.dart` — FFI bindings + method channel; `lib/ui/` — Flutter UI (`camera_screen.dart`, `settings_sheet.dart` side-rail settings, `app_log_screen.dart`, `changelog.dart`).
 - `android/app/src/main/kotlin/.../MainActivity.kt` — permissions, rotation, viewfinder `SurfaceView` (behind the transparent Flutter surface), `deviceInfo` (version), MediaStore files.
-- `tools/calibration/` — per-device colour calibration (ColorChecker).
+- `tools/calibration/` — per-device calibration: `sensor.py` (no chart: noise, black, clip, linearity, shading, hot pixels from the Dark/White sweeps; phone-side statistics in `sensor_calib.cpp`, DNG writer `dng_writer.cpp`) and ColorChecker colour (`calibrate.py`).
 
 ## Current performance facts (Pixel 10, 1080p, 16:9 4000x2256 readout)
 - **The GPU clocks down when it has slack**: the same settings measured 33.2–33.9 ms at 24 fps but ~29.6–30 ms at 30 fps (log of 2 Oct 2026, v0.11.3 shaders). Compare costs only at the same frame rate (benchmark at 30 fps); the A/B line in the benchmark is the reliable number. Before 0.12 the guard (85 % = 28.4 ms) paused alignment at 30 fps; since 0.12.0 everything fits (see below).
@@ -71,7 +71,7 @@ For user-visible changes also add an entry to `lib/ui/changelog.dart` (shown in 
 Agents doing design/UI work must not edit `android/**`, `lib/services/vesper_native.dart`, `tools/**`, `color_science/**` or `test/native/**`. Keep the engine calls in `camera_screen.dart` (`_start`, `_openAndStream`, lifecycle, `_onPoll`, recording) and their order intact. Tap coordinates are normalised to the viewfinder box (`_vfKey`), whose rect is sent to the native SurfaceView (`_syncViewfinder`); keep that box transparent.
 
 ## Build flavours
-- `kDevTools` (`lib/build_flags.dart`): developer features (Settings › Developer: GPU guard switch, App log, GPU benchmark, chart calibration capture) in debug/profile builds, hidden in release; force with `--dart-define=VESPER_DEV_TOOLS=true` (workflow input `dev_tools`). Gate new internal/diagnostic tools behind it. Release builds always run the GPU guard on AUTO.
+- `kDevTools` (`lib/build_flags.dart`): developer features (Settings › Developer: GPU guard switch, App log, GPU benchmark, calibration frame / sensor calibration sweeps) in debug/profile builds, hidden in release; force with `--dart-define=VESPER_DEV_TOOLS=true` (workflow input `dev_tools`). Gate new internal/diagnostic tools behind it. Release builds always run the GPU guard on AUTO.
 - All builds are signed with the shared tester key `android/app/vesper-dev.jks` so APKs install over each other.
 
 ## Next up

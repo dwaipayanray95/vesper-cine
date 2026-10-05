@@ -3,9 +3,11 @@
 #include "camera_engine.h"
 #include "app_log.h"
 #include "color_science.h"
+#include "dng_writer.h"
 #include "focus_controller.h"
 #include "iso_analysis.h"
 #include "recorder.h"
+#include "sensor_calib.h"
 #include "vulkan_engine.h"
 
 #include <android/native_window_jni.h>
@@ -23,6 +25,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <memory>
 #include <mutex>
 #include <cstdio>
@@ -122,41 +125,240 @@ std::string jsonArray(const float* v, size_t n) {
     return s + "]";
 }
 
-// Writes the raw RAW10 plane + everything the calibration tool needs to
-// linearise it exactly like the GPU does. Runs on the camera thread, once.
-void dumpCalibrationFrame(const RawFrame& f, const std::string& base, const std::string& device,
-                          const Settings& s) {
-    const CaptureMetadata& m = *f.meta;
-    const SensorInfo& info = gCamera->sensorInfo();
-    FILE* rf = std::fopen((base + ".raw10").c_str(), "wb");
-    if (!rf) { vesperLog(ANDROID_LOG_ERROR, "Vesper", "calibration dump: cannot write %s", base.c_str()); return; }
-    std::fwrite(f.data, 1, std::min(static_cast<size_t>(f.rowStride) * f.height, f.size), rf);
-    std::fclose(rf);
-    Mat3 fmNow = gColor.forwardMatrixFor(s.color.kelvin);
-    const DngCalibration& cal = info.calibration;
-    std::string j = "{";
+// Noise model the GPU passes use (clean / align / render): SENSOR_NOISE_PROFILE
+// averaged over channels, with fallbacks where the HAL omits it or reports a
+// non-positive value (Pixel reports a slightly negative O).
+void engineNoise(const CaptureMetadata& m, float& s, float& o) {
+    s = m.noiseS > 0 ? m.noiseS : 2e-4f; // typical phone sensor at base ISO if the HAL omits it
+    o = m.noiseO > 0 ? m.noiseO : 2e-6f;
+}
+
+// A RAW frame copied off the camera thread (calibration captures and sweeps).
+struct CapturedFrame {
+    std::vector<uint8_t> data;
+    CaptureMetadata meta;
+    int width = 0, height = 0, rowStride = 0;
+};
+
+CapturedFrame copyFrame(const RawFrame& f) {
+    CapturedFrame c;
+    c.data.assign(f.data, f.data + std::min(static_cast<size_t>(f.rowStride) * f.height, f.size));
+    c.meta = *f.meta;
+    c.width = f.width;
+    c.height = f.height;
+    c.rowStride = f.rowStride;
+    return c;
+}
+
+int rotationDegrees();
+
+// What the app had applied when a frame was captured.
+struct CaptureState {
+    std::string device;
+    float kelvin = 5600, tint = 0;
+    Vec3 cameraNeutral{1, 1, 1};
+    Mat3 forwardMatrix = mat3Identity();
+    int rotation = 0;
+};
+
+CaptureState captureState(const Settings& s, const std::string& device) {
+    CaptureState st;
+    st.device = device;
+    st.kelvin = s.color.kelvin;
+    st.tint = s.color.tint;
+    st.cameraNeutral = s.color.cameraNeutral;
+    st.forwardMatrix = gColor.forwardMatrixFor(s.color.kelvin);
+    st.rotation = rotationDegrees();
+    return st;
+}
+
+// Raw px -> pre-correction array px (as onFrame): binned readouts scale
+// uniformly, the 16:9 readout is also a centred vertical crop.
+void rawToArrayMap(const SensorInfo& info, int width, int height, float out[4]) {
+    const float aw = info.preWidth > 0 ? static_cast<float>(info.preWidth) : static_cast<float>(width);
+    const float ah = info.preHeight > 0 ? static_cast<float>(info.preHeight) : static_cast<float>(height);
+    const float sx = aw / width;
+    out[0] = sx;
+    out[1] = sx;
+    out[2] = 0.0f;
+    out[3] = std::max(0.0f, (ah - height * sx) * 0.5f);
+}
+
+// Analog / digital split of an ISO as the HAL reports it (SENSOR_MAX_ANALOG_SENSITIVITY).
+void isoSplit(const SensorInfo& info, int iso, double& analogIso, double& digitalGain) {
+    analogIso = info.maxAnalogIso > 0 ? std::min(iso, info.maxAnalogIso) : iso;
+    digitalGain = analogIso > 0 ? iso / analogIso : 1.0;
+}
+
+// SENSOR_NOISE_PROFILE per logical site [R, Gr, Gb, B] x (S, O); the HAL
+// lists CFA channels in 2x2 row-major order (as BLACK_LEVEL_PATTERN).
+std::string noiseSitesJson(const CaptureMetadata& m, int cfa) {
+    double v[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    for (int i = 0; i < 4 && m.noiseChannels > 0; ++i) {
+        int ch = m.noiseChannels >= 4 ? i : 0;
+        int site = cfaSite(cfa, i & 1, i >> 1);
+        v[site * 2] = m.noiseProfile[ch * 2];
+        v[site * 2 + 1] = m.noiseProfile[ch * 2 + 1];
+    }
+    std::string s = "[";
+    char b[64];
+    for (int i = 0; i < 8; ++i) {
+        std::snprintf(b, sizeof(b), "%s%.9g", i ? "," : "", v[i]);
+        s += b;
+    }
+    return s + "]";
+}
+
+std::string doublesJson(const double* v, int n) {
+    std::string s = "[";
+    char b[64];
+    for (int i = 0; i < n; ++i) {
+        std::snprintf(b, sizeof(b), "%s%.9g", i ? "," : "", v[i]);
+        s += b;
+    }
+    return s + "]";
+}
+
+// Per-frame facts that change with the settings (also one per sweep step).
+std::string frameMetaJson(const CaptureMetadata& m, const SensorInfo& info) {
+    double analogIso, digital;
+    isoSplit(info, m.iso, analogIso, digital);
+    float es, eo;
+    engineNoise(m, es, eo);
+    std::string j;
     char b[512];
-    std::snprintf(b, sizeof(b), "\"format\":\"vesper-calibration-capture/1\",\"device\":\"%s\",\"cameraId\":\"0\","
-                  "\"width\":%d,\"height\":%d,\"rowStride\":%d,\"cfa\":%d,\"whiteLevel\":%.1f,"
-                  "\"arrayWidth\":%d,\"arrayHeight\":%d,\"kelvin\":%.0f,\"tint\":%.1f,\"iso\":%d,\"exposureNs\":%lld,",
-                  jsonEscape(device).c_str(), f.width, f.height, f.rowStride, info.cfa, m.whiteLevel,
-                  info.preWidth, info.preHeight, s.color.kelvin, s.color.tint, m.iso, static_cast<long long>(m.exposureNs));
+    std::snprintf(b, sizeof(b), "\"iso\":%d,\"exposureNs\":%lld,\"frameDurationNs\":%lld,\"timestampNs\":%lld,"
+                  "\"analogIso\":%.1f,\"digitalGain\":%.4f,\"whiteLevel\":%.1f,\"focusDiopters\":%.4f,"
+                  "\"noiseS\":%.9g,\"noiseO\":%.9g,\"engineNoiseS\":%.9g,\"engineNoiseO\":%.9g,\"noiseChannels\":%d,",
+                  m.iso, static_cast<long long>(m.exposureNs), static_cast<long long>(m.frameDurationNs),
+                  static_cast<long long>(m.timestampNs), analogIso, digital, m.whiteLevel, m.focusDiopters, m.noiseS, m.noiseO,
+                  es, eo, m.noiseChannels);
     j += b;
     j += "\"blackLevel\":" + jsonArray(m.blackLevel, 4) + ",";
-    j += "\"cameraNeutral\":" + jsonArray(s.color.cameraNeutral.data(), 3) + ",";
-    j += "\"forwardMatrix\":" + jsonArray(fmNow.data(), 9) + ",";
+    j += "\"noiseProfile\":" + doublesJson(m.noiseProfile, 2 * m.noiseChannels) + ",";
+    j += "\"noiseProfileSites\":" + noiseSitesJson(m, info.cfa) + ",";
+    j += "\"halNeutral\":" + jsonArray(m.neutral.data(), 3);
+    return j;
+}
+
+// Static sensor facts: geometry, ranges, factory calibration.
+std::string sensorInfoJson(const SensorInfo& info, int width, int height) {
+    const DngCalibration& cal = info.calibration;
+    float map[4];
+    rawToArrayMap(info, width, height, map);
+    std::string j;
+    char b[512];
+    std::snprintf(b, sizeof(b), "\"cfa\":%d,\"arrayWidth\":%d,\"arrayHeight\":%d,\"minIso\":%d,\"maxIso\":%d,\"maxAnalogIso\":%d,"
+                  "\"minExposureNs\":%lld,\"maxExposureNs\":%lld,\"staticWhiteLevel\":%d,\"sensorOrientation\":%d,"
+                  "\"aperture\":%.3f,\"focalLength\":%.3f,\"illuminantCodes\":[%d,%d],\"factoryIlluminantKelvin\":[%.0f,%.0f],",
+                  info.cfa, info.preWidth, info.preHeight, info.minIso, info.maxIso, info.maxAnalogIso,
+                  static_cast<long long>(info.minExposureNs), static_cast<long long>(info.maxExposureNs), info.whiteLevel,
+                  info.orientation, info.aperture, info.focalLength, info.illuminant1Code, info.illuminant2Code,
+                  cal.illuminant1Kelvin, cal.illuminant2Kelvin);
+    j += b;
+    j += "\"staticBlackLevel\":" + jsonArray(info.blackLevel, 4) + ",";
+    j += "\"sensorMap\":" + jsonArray(map, 4) + ",";
+    j += "\"colorMatrix1\":" + jsonArray(cal.colorMatrix1.data(), 9) + ",";
+    j += "\"colorMatrix2\":" + jsonArray(cal.colorMatrix2.data(), 9) + ",";
+    j += "\"calibration1\":" + jsonArray(cal.calibration1.data(), 9) + ",";
+    j += "\"calibration2\":" + jsonArray(cal.calibration2.data(), 9) + ",";
     j += "\"factoryForwardMatrix1\":" + jsonArray(cal.forwardMatrix1.data(), 9) + ",";
     j += "\"factoryForwardMatrix2\":" + jsonArray(cal.forwardMatrix2.data(), 9) + ",";
-    std::snprintf(b, sizeof(b), "\"factoryIlluminantKelvin\":[%.0f,%.0f],\"shadingCols\":%d,\"shadingRows\":%d,",
-                  cal.illuminant1Kelvin, cal.illuminant2Kelvin, m.shadingCols, m.shadingRows);
+    j += "\"lensDistortion\":" + jsonArray(info.distortion, 5) + ",";
+    j += "\"lensIntrinsics\":" + jsonArray(info.intrinsics, 5);
+    return j;
+}
+
+std::string localDateTime(const char* fmt) {
+    std::time_t t = std::time(nullptr);
+    std::tm tm{};
+    localtime_r(&t, &tm);
+    char b[32];
+    std::strftime(b, sizeof(b), fmt, &tm);
+    return b;
+}
+
+// Writes <base>.raw10 (the RAW10 plane as delivered), <base>.json (everything
+// tools/calibration needs to linearise it exactly like the GPU, plus the HAL's
+// noise profile, gain split and AWB) and <base>.dng (any raw developer).
+bool writeCaptureFiles(const std::string& base, const CapturedFrame& c, const CaptureState& st) {
+    const CaptureMetadata& m = c.meta;
+    const SensorInfo& info = gCamera->sensorInfo();
+    FILE* rf = std::fopen((base + ".raw10").c_str(), "wb");
+    if (!rf) {
+        vesperLog(ANDROID_LOG_ERROR, "Vesper", "calibration capture: cannot write %s", base.c_str());
+        return false;
+    }
+    std::fwrite(c.data.data(), 1, c.data.size(), rf);
+    std::fclose(rf);
+
+    std::string j = "{";
+    char b[512];
+    std::snprintf(b, sizeof(b), "\"format\":\"vesper-calibration-capture/2\",\"device\":\"%s\",\"cameraId\":\"%s\","
+                  "\"width\":%d,\"height\":%d,\"rowStride\":%d,\"kelvin\":%.0f,\"tint\":%.1f,\"rotation\":%d,",
+                  jsonEscape(st.device).c_str(), jsonEscape(gCamera->cameraId()).c_str(), c.width, c.height, c.rowStride,
+                  st.kelvin, st.tint, st.rotation);
+    j += b;
+    j += sensorInfoJson(info, c.width, c.height) + ",";
+    j += frameMetaJson(m, info) + ",";
+    j += "\"cameraNeutral\":" + jsonArray(st.cameraNeutral.data(), 3) + ",";
+    j += "\"forwardMatrix\":" + jsonArray(st.forwardMatrix.data(), 9) + ",";
+    std::snprintf(b, sizeof(b), "\"shadingCols\":%d,\"shadingRows\":%d,", m.shadingCols, m.shadingRows);
     j += b;
     j += "\"shadingMap\":" + jsonArray(m.shadingMap.data(), m.shadingMap.size()) + "}";
     FILE* jf = std::fopen((base + ".json").c_str(), "w");
-    if (!jf) return;
+    if (!jf) return false;
     std::fwrite(j.data(), 1, j.size(), jf);
     std::fclose(jf);
-    vesperLog(ANDROID_LOG_INFO, "Vesper", "Calibration frame saved: %s (.raw10/.json)", base.c_str());
+
+    DngImageInfo d;
+    d.width = c.width;
+    d.height = c.height;
+    d.rowStride = c.rowStride;
+    d.cfa = info.cfa;
+    std::copy(m.blackLevel, m.blackLevel + 4, d.black);
+    d.white = m.whiteLevel;
+    const DngCalibration& cal = info.calibration;
+    d.colorMatrix1 = cal.colorMatrix1;
+    d.colorMatrix2 = cal.colorMatrix2;
+    d.calibration1 = cal.calibration1;
+    d.calibration2 = cal.calibration2;
+    d.forwardMatrix1 = cal.forwardMatrix1;
+    d.forwardMatrix2 = cal.forwardMatrix2;
+    d.haveColorMatrix2 = cal.haveColorMatrix2;
+    d.haveForwardMatrix1 = cal.haveForwardMatrix1;
+    d.haveForwardMatrix2 = cal.haveForwardMatrix2;
+    d.illuminant1 = info.illuminant1Code;
+    d.illuminant2 = info.illuminant2Code;
+    // AsShotNeutral: the HAL's (Google) AWB neutral when it reports one, else the app's white balance.
+    const bool halWb = m.neutral[0] > 0 && m.neutral[1] > 0 && m.neutral[2] > 0;
+    for (int i = 0; i < 3; ++i) d.asShotNeutral[i] = halWb ? m.neutral[i] : st.cameraNeutral[i];
+    std::copy(m.noiseProfile, m.noiseProfile + 8, d.noiseProfile);
+    d.noiseChannels = m.noiseChannels;
+    d.exposureNs = m.exposureNs;
+    d.iso = m.iso;
+    d.fNumber = info.aperture;
+    d.focalLength = info.focalLength;
+    d.orientation = st.rotation == 90 ? 6 : st.rotation == 180 ? 3 : st.rotation == 270 ? 8 : 1;
+    d.model = st.device;
+    d.uniqueModel = "Google " + st.device + " camera " + gCamera->cameraId();
+    d.dateTime = localDateTime("%Y:%m:%d %H:%M:%S");
+    if (!m.shadingMap.empty()) {
+        d.shading = m.shadingMap.data();
+        d.shadingCols = m.shadingCols;
+        d.shadingRows = m.shadingRows;
+    }
+    rawToArrayMap(info, c.width, c.height, d.sensorMap);
+    d.arrayWidth = info.preWidth > 0 ? static_cast<float>(info.preWidth) : static_cast<float>(c.width);
+    d.arrayHeight = info.preHeight > 0 ? static_cast<float>(info.preHeight) : static_cast<float>(c.height);
+    std::string err;
+    if (!writeDng(base + ".dng", c.data.data(), d, &err))
+        vesperLog(ANDROID_LOG_ERROR, "Vesper", "calibration capture: DNG failed (%s)", err.c_str());
+    vesperLog(ANDROID_LOG_INFO, "Vesper", "Calibration frame saved: %s (.raw10/.json/.dng), ISO %d, %.3f ms", base.c_str(),
+              m.iso, m.exposureNs * 1e-6);
+    return true;
 }
+
 Vec3 gAwbNeutral{0, 0, 0};
 
 // Output-normalised (upright) <-> crop-normalised (unrotated raw), mirroring rawPosFor() in render.comp.
@@ -717,12 +919,316 @@ void isoSweepMain() {
     gSweepProgress = -1.0f;
 }
 
+// --- Sensor calibration sweeps (tools/calibration/sensor.py) ------------------
+// Dark (lens covered) and White (flat field: white paper over the lens, aimed
+// at daylight). The camera steps through ISOs and shutter speeds; at each step
+// a burst of kCalBurst frames is copied off the camera thread and reduced by
+// analyzeSensorStep() (sensor_calib.cpp) on a worker while the camera already
+// settles on the next step. Result: one JSON of a few MB, plus one reference
+// frame (<base>_ref.raw10/.json/.dng).
+constexpr int kCalBurst = 4;
+
+struct CalSweepState {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool collecting = false;
+    int skip = 0, want = 0;
+    int64_t exposureNs = 0;
+    int32_t iso = 0;
+    std::vector<CapturedFrame> frames;
+    bool cancel = false;
+    int kind = 0;                        // 0 dark, 1 white
+    std::string base, device, error, result, stage;
+};
+CalSweepState gCal;
+std::atomic<float> gCalProgress{-1.0f}; // -1 idle, 0..1 running
+std::thread gCalThread;
+
+void feedCalSweep(const RawFrame& f) {
+    std::lock_guard<std::mutex> lk(gCal.mutex);
+    if (!gCal.collecting) return;
+    if (gCal.skip > 0) { --gCal.skip; return; }
+    const CaptureMetadata& m = *f.meta;
+    // Steps are >= 1 stop apart, so +-25% tells them apart even where the HAL
+    // rounds very short exposures to its line time.
+    if (std::llabs(m.exposureNs - gCal.exposureNs) > gCal.exposureNs / 4 + 1000) return;
+    if (std::abs(m.iso - gCal.iso) > std::max(1, gCal.iso / 33)) return;
+    if (!gCal.frames.empty() && (gCal.frames[0].meta.exposureNs != m.exposureNs || gCal.frames[0].meta.iso != m.iso))
+        gCal.frames.clear();
+    gCal.frames.push_back(copyFrame(f));
+    if (static_cast<int>(gCal.frames.size()) >= gCal.want) {
+        gCal.collecting = false;
+        gCal.cv.notify_all();
+    }
+}
+
+// Sets the exposure and waits for `n` frames that carry it (false: timeout / cancel).
+bool calCollect(int64_t exposureNs, int iso, int n, std::vector<CapturedFrame>& out) {
+    {
+        std::lock_guard<std::mutex> lk(gCal.mutex);
+        if (gCal.cancel) return false;
+        gCal.frames.clear();
+        gCal.exposureNs = exposureNs;
+        gCal.iso = iso;
+        gCal.want = n;
+        gCal.skip = 1;
+        gCal.collecting = true;
+    }
+    gCamera->setExposure(exposureNs, iso);
+    std::unique_lock<std::mutex> lk(gCal.mutex);
+    gCal.cv.wait_for(lk, std::chrono::seconds(4), [] { return !gCal.collecting || gCal.cancel; });
+    gCal.collecting = false;
+    out = std::move(gCal.frames);
+    gCal.frames.clear();
+    return static_cast<int>(out.size()) >= n && !gCal.cancel;
+}
+
+struct CalStep {
+    int iso = 0;
+    int64_t exposureNs = 0;
+    int stop = 0;         // White: stops relative to the metered "half of clip" exposure at this ISO
+    bool ladder = false;  // White: part of the 1-stop linearity ladder
+};
+
+std::string fmtShutter(int64_t ns) {
+    char b[32];
+    double d = 1e9 / static_cast<double>(ns);
+    if (d >= 1) std::snprintf(b, sizeof(b), "1/%.0f s", d);
+    else std::snprintf(b, sizeof(b), "%.1f s", ns * 1e-9);
+    return b;
+}
+
+void calSweepMain() {
+    const SensorInfo info = gCamera->sensorInfo();
+    int kind;
+    std::string base, device;
+    {
+        std::lock_guard<std::mutex> lk(gCal.mutex);
+        kind = gCal.kind;
+        base = gCal.base;
+        device = gCal.device;
+    }
+    const double frameNs = 1e9 / gCamera->frameRate();
+    const int64_t maxExp = std::min<int64_t>(info.maxExposureNs, static_cast<int64_t>(frameNs * 0.95));
+    const int64_t minExp = std::max<int64_t>(info.minExposureNs, 1000);
+    std::vector<int> isos;
+    for (double iso = info.minIso; iso < info.maxIso * 0.98; iso *= 2.0) isos.push_back(static_cast<int>(std::lround(iso)));
+    isos.push_back(info.maxIso);
+    std::string error;
+    std::vector<std::string> warnings;
+    auto setStage = [](const std::string& t) {
+        std::lock_guard<std::mutex> lk(gCal.mutex);
+        gCal.stage = t;
+    };
+    auto valid = [&](int64_t t) { return t >= minExp && t <= maxExp; };
+
+    // Plan the steps.
+    std::vector<CalStep> steps;
+    int ladderIso = 0;
+    int64_t halfNs = 0;
+    if (kind == 0) {
+        for (int iso : isos) {
+            steps.push_back({iso, maxExp, 0, false});
+            if (valid(1000000) && maxExp > 2000000) steps.push_back({iso, 1000000, 0, false});
+        }
+    } else {
+        // Meter: green in the centre at ~half of the raw range, at the base ISO.
+        {
+            std::lock_guard<std::mutex> lk(gStateMutex);
+            ladderIso = gNativeBaseIso >= info.minIso && gNativeBaseIso <= info.maxIso ? gNativeBaseIso : info.minIso;
+        }
+        setStage("Metering");
+        int64_t t = std::clamp<int64_t>(2000000, minExp, maxExp);
+        double level = 0;
+        for (int i = 0; i < 10 && error.empty(); ++i) {
+            std::vector<CapturedFrame> fr;
+            if (!calCollect(t, ladderIso, 1, fr)) {
+                error = gCal.cancel ? "cancelled" : "camera did not apply the exposure";
+                break;
+            }
+            const CapturedFrame& c = fr[0];
+            level = rawPatchMean(c.data.data(), c.width, c.height, c.rowStride, info.cfa, c.meta.blackLevel,
+                                 c.meta.whiteLevel, 0.2, 0b0110);
+            t = c.meta.exposureNs;
+            if (level > 0.85) {
+                if (t <= minExp) { error = "Too bright even at the fastest shutter: aim at a less bright area"; break; }
+                t = std::max(minExp, t / 8);
+            } else if (level < 0.25 && t < maxExp) {
+                double want = t * 0.5 / std::max(level, 0.004);
+                t = std::min<int64_t>(maxExp, static_cast<int64_t>(std::min(want, t * 64.0)));
+            } else {
+                break;
+            }
+        }
+        if (error.empty() && level < 0.03)
+            error = "Too dark for the white sweep: use daylight (a window or outdoors), not a lamp";
+        halfNs = static_cast<int64_t>(t * 0.5 / std::max(level, 1e-3));
+        if (error.empty()) {
+            if (halfNs > maxExp) warnings.push_back("light too dim for the brightest ladder steps");
+            for (int k = 3; k >= -8; --k) {
+                int64_t e = static_cast<int64_t>(std::ldexp(static_cast<double>(halfNs), k));
+                if (valid(e)) steps.push_back({ladderIso, e, k, true});
+            }
+            for (int iso : isos) {
+                if (iso == ladderIso) continue;
+                for (int k : {2, 0, -2, -4, -6}) {
+                    int64_t e = static_cast<int64_t>(std::ldexp(static_cast<double>(halfNs) * ladderIso / iso, k));
+                    if (valid(e)) steps.push_back({iso, e, k, false});
+                }
+            }
+        }
+    }
+    if (error.empty() && steps.empty()) error = "no valid steps for this frame rate";
+
+    // Run them: collect step i while step i-1 is analysed.
+    std::vector<std::string> stepJson(steps.size());
+    std::vector<std::vector<float>> shadingMaps;
+    std::vector<int> mapCols, mapRows;
+    std::thread worker;
+    int done = 0, failed = 0, w = 0, h = 0;
+    bool refSaved = false;
+    const CaptureState refState = [&] {
+        std::lock_guard<std::mutex> lk(gStateMutex);
+        return captureState(gSettings, device);
+    }();
+    for (size_t i = 0; i < steps.size() && error.empty(); ++i) {
+        const CalStep& st = steps[i];
+        setStage("ISO " + std::to_string(st.iso) + " · " + fmtShutter(st.exposureNs));
+        std::vector<CapturedFrame> fr;
+        if (!calCollect(st.exposureNs, st.iso, kCalBurst, fr)) {
+            if (gCal.cancel) { error = "cancelled"; break; }
+            ++failed;
+            warnings.push_back("ISO " + std::to_string(st.iso) + " " + fmtShutter(st.exposureNs) + ": no frames");
+            continue;
+        }
+        const CaptureMetadata& m = fr[0].meta;
+        w = fr[0].width;
+        h = fr[0].height;
+        if (kind == 0 && i == 0) {
+            // Light leak check on the first (lowest ISO, longest) dark step.
+            double lvl = rawPatchMean(fr[0].data.data(), fr[0].width, fr[0].height, fr[0].rowStride, info.cfa,
+                                      m.blackLevel, m.whiteLevel, 0.5, 0b1111);
+            if (lvl > 0.02) {
+                error = "Light reaches the sensor: cover the lens completely (phone face down on a dark cloth)";
+                break;
+            }
+        }
+        int mapIndex = -1;
+        if (!m.shadingMap.empty()) {
+            for (size_t k = 0; k < shadingMaps.size() && mapIndex < 0; ++k)
+                if (shadingMaps[k] == m.shadingMap) mapIndex = static_cast<int>(k);
+            if (mapIndex < 0) {
+                shadingMaps.push_back(m.shadingMap);
+                mapCols.push_back(m.shadingCols);
+                mapRows.push_back(m.shadingRows);
+                mapIndex = static_cast<int>(shadingMaps.size()) - 1;
+            }
+        }
+        // One full reference frame: White at the ladder's metered level, Dark at the highest ISO, longest shutter.
+        bool ref = !refSaved && (kind == 1 ? (st.ladder && st.stop == 0) : (st.iso == isos.back() && st.exposureNs == maxExp));
+        if (ref) {
+            refSaved = writeCaptureFiles(base + "_ref", fr[0], refState);
+        }
+        if (worker.joinable()) worker.join();
+        char b[256];
+        std::snprintf(b, sizeof(b), "{\"requestedIso\":%d,\"requestedExposureNs\":%lld,\"stop\":%d,\"ladder\":%s,\"shading\":%d,\"ref\":%s,",
+                      st.iso, static_cast<long long>(st.exposureNs), st.stop, st.ladder ? "true" : "false", mapIndex,
+                      ref ? "true" : "false");
+        std::string head = std::string(b) + frameMetaJson(m, info) + ",\"stats\":";
+        worker = std::thread([&stepJson, i, head, frames = std::move(fr), cfa = info.cfa] {
+            SensorStepInput in;
+            in.width = frames[0].width;
+            in.height = frames[0].height;
+            in.rowStride = frames[0].rowStride;
+            in.cfa = cfa;
+            std::copy(frames[0].meta.blackLevel, frames[0].meta.blackLevel + 4, in.black);
+            in.white = frames[0].meta.whiteLevel;
+            for (const auto& c : frames) in.frames.push_back(c.data.data());
+            SensorStepStats s = analyzeSensorStep(in);
+            stepJson[i] = head + sensorStepJson(s) + "}";
+            vesperLog(ANDROID_LOG_INFO, "Vesper", "Sensor sweep: ISO %d %.4f ms: mean G %.1f DN, noise G %.2f DN, row %.3f DN, defects %d",
+                      frames[0].meta.iso, frames[0].meta.exposureNs * 1e-6, 0.5 * (s.siteMean[1] + s.siteMean[2]),
+                      std::sqrt(0.5 * (s.siteTvar[1] + s.siteTvar[2])), std::sqrt(0.5 * (s.rowVar[1] + s.rowVar[2])),
+                      s.defectCount);
+        });
+        ++done;
+        gCalProgress = static_cast<float>(i + 1) / steps.size();
+    }
+    if (worker.joinable()) worker.join();
+    applyShutter(); // back to the user's exposure
+    if (error.empty() && done < static_cast<int>(steps.size() + 1) / 2) error = "the camera skipped too many steps";
+
+    if (error.empty()) {
+        std::string j = "{\"format\":\"vesper-sensor-calibration/1\",\"kind\":\"";
+        j += kind == 0 ? "dark" : "white";
+        char b[512];
+        std::snprintf(b, sizeof(b), "\",\"device\":\"%s\",\"cameraId\":\"%s\",\"date\":\"%s\",\"width\":%d,\"height\":%d,"
+                      "\"fps\":%.3f,\"burst\":%d,\"rotation\":%d,\"ladderIso\":%d,\"meteredHalfNs\":%lld,",
+                      jsonEscape(device).c_str(), jsonEscape(gCamera->cameraId()).c_str(),
+                      localDateTime("%Y-%m-%d %H:%M:%S").c_str(), w, h, gCamera->frameRate(), kCalBurst, refState.rotation,
+                      ladderIso, static_cast<long long>(halfNs));
+        j += b;
+        j += sensorInfoJson(info, w, h) + ",\"warnings\":[";
+        for (size_t k = 0; k < warnings.size(); ++k) j += (k ? ",\"" : "\"") + jsonEscape(warnings[k]) + "\"";
+        j += "],\"shadingMaps\":[";
+        for (size_t k = 0; k < shadingMaps.size(); ++k) {
+            std::snprintf(b, sizeof(b), "%s{\"cols\":%d,\"rows\":%d,\"map\":", k ? "," : "", mapCols[k], mapRows[k]);
+            j += b;
+            j += jsonArray(shadingMaps[k].data(), shadingMaps[k].size()) + "}";
+        }
+        j += "],\"steps\":[";
+        bool first = true;
+        for (const auto& sj : stepJson) {
+            if (sj.empty()) continue;
+            if (!first) j += ',';
+            j += sj;
+            first = false;
+        }
+        j += "]}";
+        FILE* fp = std::fopen((base + ".json").c_str(), "w");
+        if (!fp) {
+            error = "could not write the result";
+        } else {
+            std::fwrite(j.data(), 1, j.size(), fp);
+            std::fclose(fp);
+            vesperLog(ANDROID_LOG_INFO, "Vesper", "Sensor %s sweep saved: %s.json (%d steps, %d skipped, %zu KB)",
+                      kind == 0 ? "dark" : "white", base.c_str(), done, failed, j.size() / 1024);
+        }
+    }
+    if (!error.empty()) vesperLog(ANDROID_LOG_WARN, "Vesper", "Sensor sweep failed: %s", error.c_str());
+    std::lock_guard<std::mutex> lk(gCal.mutex);
+    gCal.error = error;
+    gCal.result = error.empty() ? base : "";
+    gCal.stage.clear();
+    gCalProgress = -1.0f;
+}
+
 // Settings page open (not recording): skip all per-frame work but keep the
 // camera streaming, so returning is instant and the UI gets the GPU/CPU.
 std::atomic<bool> gProcessingPaused{false};
 
 void onFrame(const RawFrame& f) {
     if (!gGpu) return;
+    // Calibration captures work with Settings open (processing paused) too.
+    if (gCalProgress >= 0) feedCalSweep(f);
+    {
+        std::string calBase, calDevice;
+        Settings cs;
+        {
+            std::lock_guard<std::mutex> lk(gStateMutex);
+            calBase.swap(gCalibrationRequest);
+            calDevice = gCalibrationDevice;
+            cs = gSettings;
+        }
+        if (!calBase.empty()) {
+            // Copy now (~3 ms), write the ~30 MB of files off the camera thread.
+            std::thread([base = calBase, frame = copyFrame(f), st = captureState(cs, calDevice)] {
+                writeCaptureFiles(base, frame, st);
+                std::lock_guard<std::mutex> lk(gStateMutex);
+                gCalibrationSaved = base;
+            }).detach();
+        }
+    }
     if (gProcessingPaused && !(gRecorder && gRecorder->isRecording())) {
         // Paused (Settings open): no frames are expected, so restart the drop
         // and viewfinder-pacing measurements instead of counting the pause.
@@ -844,8 +1350,7 @@ void onFrame(const RawFrame& f) {
     p.flags[3] = s.sharpening | (s.oversampling ? 16 : 0);
     p.noise[0] = s.temporalNr;
     p.noise[1] = s.chromaNr;
-    p.noise[2] = meta.noiseS > 0 ? meta.noiseS : 2e-4f; // typical phone sensor at base ISO if the HAL omits it
-    p.noise[3] = meta.noiseO > 0 ? meta.noiseO : 2e-6f;
+    engineNoise(meta, p.noise[2], p.noise[3]);
     p.cleanFlags[0] = s.hotPixelFix ? 1 : 0;
     p.cleanFlags[1] = s.temporalNr > 0 ? 1 : 0;
     p.cleanFlags[3] = s.nrAlignment ? 1 : 0;
@@ -902,19 +1407,6 @@ void onFrame(const RawFrame& f) {
     for (int r = 0; r < 3; ++r) {
         for (int c = 0; c < 3; ++c) p.camToRec2020[r * 4 + c] = s.color.camToRec2020[r * 3 + c];
         p.camToRec2020[r * 4 + 3] = 0.0f;
-    }
-    {
-        std::string calBase, calDevice;
-        {
-            std::lock_guard<std::mutex> lk(gStateMutex);
-            calBase.swap(gCalibrationRequest);
-            calDevice = gCalibrationDevice;
-        }
-        if (!calBase.empty()) {
-            dumpCalibrationFrame(f, calBase, calDevice, s);
-            std::lock_guard<std::mutex> lk(gStateMutex);
-            gCalibrationSaved = calBase;
-        }
     }
     in.raw = f.data;
     in.rawSize = f.size;
@@ -1062,8 +1554,19 @@ void stopIsoSweep() {
     if (gSweepThread.joinable()) gSweepThread.join();
 }
 
+// Same for a sensor calibration sweep.
+void stopCalSweep() {
+    {
+        std::lock_guard<std::mutex> lk(gCal.mutex);
+        gCal.cancel = true;
+        gCal.cv.notify_all();
+    }
+    if (gCalThread.joinable()) gCalThread.join();
+}
+
 EXPORT void vesper_close_camera() {
     stopIsoSweep();
+    stopCalSweep();
     if (gRecorder) gRecorder->stop("user");
     if (gCamera) gCamera->closeCamera();
 }
@@ -1220,7 +1723,7 @@ EXPORT void vesper_set_kelvin_tint(int32_t kelvin, int32_t tint) {
 // Native ISO analysis: dark-frame sweep over the ISO range (lens covered, ~15 s).
 // Writes the result JSON to outPath; progress / result / error via status.
 EXPORT int32_t vesper_iso_sweep_start(const char* outPath, const char* deviceModel) {
-    if (!gCamera || !outPath || gSweepProgress >= 0) return -1;
+    if (!gCamera || !outPath || gSweepProgress >= 0 || gCalProgress >= 0) return -1;
     if (gSweepThread.joinable()) gSweepThread.join();
     cancelExposureRamp();
     {
@@ -1240,6 +1743,35 @@ EXPORT void vesper_iso_sweep_cancel() {
     std::lock_guard<std::mutex> lk(gSweep.mutex);
     gSweep.cancel = true;
     gSweep.cv.notify_all();
+}
+
+// Sensor calibration sweep (tools/calibration/sensor.py): kind 0 = Dark (lens
+// covered), 1 = White (flat field). Writes <basePath>.json and a reference
+// frame <basePath>_ref.raw10/.json/.dng; progress / stage / result / error via status.
+EXPORT int32_t vesper_sensor_sweep_start(int32_t kind, const char* basePath, const char* deviceModel) {
+    if (!gCamera || !basePath || !gCamera->isStreaming() || gCalProgress >= 0 || gSweepProgress >= 0) return -1;
+    if (gRecorder && gRecorder->isRecording()) return -1;
+    if (gCalThread.joinable()) gCalThread.join();
+    cancelExposureRamp();
+    {
+        std::lock_guard<std::mutex> lk(gCal.mutex);
+        gCal.kind = kind == 1 ? 1 : 0;
+        gCal.base = basePath;
+        gCal.device = deviceModel ? deviceModel : "";
+        gCal.error.clear();
+        gCal.result.clear();
+        gCal.stage.clear();
+        gCal.cancel = false;
+    }
+    gCalProgress = 0.0f;
+    gCalThread = std::thread(calSweepMain);
+    return 0;
+}
+
+EXPORT void vesper_sensor_sweep_cancel() {
+    std::lock_guard<std::mutex> lk(gCal.mutex);
+    gCal.cancel = true;
+    gCal.cv.notify_all();
 }
 
 // Pause / resume per-frame processing (viewfinder freezes; recording is never paused).
@@ -1693,14 +2225,22 @@ EXPORT int32_t vesper_get_status(char* out, int32_t maxLen) {
         focusD = gGeom.focusDiopters;
         std::copy(gGeom.faceNorm, gGeom.faceNorm + 4, face);
     }
-    char buf[2048];
+    std::string calResult, calError, calStage;
+    {
+        std::lock_guard<std::mutex> lk(gCal.mutex);
+        calResult = gCal.result;
+        calError = gCal.error;
+        calStage = gCal.stage;
+    }
+    char buf[4096];
     std::snprintf(buf, sizeof(buf),
                   "{\"streaming\":%s,\"fps\":%.2f,\"raw\":[%d,%d],\"output\":[%d,%d],\"cameraDrops\":%lld,"
                   "\"kelvin\":%.0f,\"tint\":%.1f,\"recording\":%s,\"durationMs\":%lld,\"framesEncoded\":%lld,"
                   "\"framesDropped\":%lld,\"thermal\":%d,\"heatLevel\":%d,\"heatHeadroom\":%.2f,\"audio\":%s,\"codec\":\"%s\",\"stopReason\":\"%s\","
                   "\"exposureNs\":%lld,\"iso\":%d,\"awbAuto\":%s,\"afState\":%d,\"focusDiopters\":%.3f,"
                   "\"face\":[%.4f,%.4f,%.4f,%.4f],\"gpuMs\":%.2f,\"alignThrottled\":%s,\"alignReduced\":%s,\"nrThrottled\":%s,\"hqAvailable\":%s,\"hqSupported\":%s,\"calibrationSaved\":\"%s\",\"profileActive\":%s,"
-                  "\"focusPulling\":%s,\"exposureRamping\":%s,\"isoSweep\":%.3f,\"isoSweepResult\":\"%s\",\"isoSweepError\":\"%s\",\"focusLocked\":%s,\"gpuOverloaded\":%s}",
+                  "\"focusPulling\":%s,\"exposureRamping\":%s,\"isoSweep\":%.3f,\"isoSweepResult\":\"%s\",\"isoSweepError\":\"%s\",\"focusLocked\":%s,\"gpuOverloaded\":%s,"
+                  "\"calSweep\":%.3f,\"calSweepResult\":\"%s\",\"calSweepError\":\"%s\",\"calSweepStage\":\"%s\"}",
                   gCamera && gCamera->isStreaming() ? "true" : "false", fps, rw, rh, ow, oh, drops, kelvin, tint,
                   r.recording ? "true" : "false", static_cast<long long>(r.durationUs / 1000),
                   static_cast<long long>(r.framesEncoded), static_cast<long long>(r.framesDropped), gHeat.status, gHeat.level, static_cast<double>(gHeat.headroom),
@@ -1709,7 +2249,9 @@ EXPORT int32_t vesper_get_status(char* out, int32_t maxLen) {
                   gGpu ? gGpu->gpuFrameMs() : 0.0, gGpu && gGpu->alignmentThrottled() ? "true" : "false",
                   gGpu && gGpu->alignmentReduced() ? "true" : "false",
                   gGpu && gGpu->noiseReductionThrottled() ? "true" : "false", gGpu && gGpu->oversamplingAvailable() ? "true" : "false", gGpu && gGpu->oversamplingSupported() ? "true" : "false", jsonEscape(calSaved).c_str(),
-                  profileActive ? "true" : "false", focusSearching ? "true" : "false", gExposureRamping ? "true" : "false", static_cast<double>(gSweepProgress.load()), jsonEscape(sweepResult).c_str(), jsonEscape(sweepError).c_str(), focusLocked ? "true" : "false", gGpu && gGpu->overloaded() ? "true" : "false");
+                  profileActive ? "true" : "false", focusSearching ? "true" : "false", gExposureRamping ? "true" : "false", static_cast<double>(gSweepProgress.load()), jsonEscape(sweepResult).c_str(), jsonEscape(sweepError).c_str(), focusLocked ? "true" : "false", gGpu && gGpu->overloaded() ? "true" : "false",
+                  static_cast<double>(gCalProgress.load()), jsonEscape(calResult).c_str(), jsonEscape(calError).c_str(),
+                  jsonEscape(calStage).c_str());
     return writeString(buf, out, maxLen);
 }
 
@@ -1722,6 +2264,7 @@ EXPORT void vesper_close() {
     gFocusCv.notify_all();
     if (gFocusThread.joinable()) gFocusThread.join();
     stopIsoSweep();
+    stopCalSweep();
     if (gRecorder) gRecorder->stop("user");
     if (gCamera) gCamera->closeCamera();
     if (gGpu) gGpu->release();

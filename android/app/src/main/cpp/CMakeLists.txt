@@ -11,6 +11,8 @@ add_library(vesper_engine SHARED
     color_science.cpp
     focus_controller.cpp
     iso_analysis.cpp
+    sensor_calib.cpp
+    dng_writer.cpp
     vulkan_engine.cpp
     recorder.cpp
 )

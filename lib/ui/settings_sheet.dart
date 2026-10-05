@@ -48,6 +48,7 @@ class SettingsScreen extends StatefulWidget {
   final ValueChanged<bool> onFaceDetectChanged;
   final String isoAnalysisSummary; // '' = not analyzed yet
   final VoidCallback? onAnalyzeIso;
+  final void Function(bool dark)? onSensorSweep; // Developer: sensor calibration sweeps
 
   const SettingsScreen({
     super.key,
@@ -89,6 +90,7 @@ class SettingsScreen extends StatefulWidget {
     required this.onFaceDetectChanged,
     this.isoAnalysisSummary = '',
     this.onAnalyzeIso,
+    this.onSensorSweep,
   });
 
   @override
@@ -539,9 +541,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (onCaptureCalibration != null)
       _settingRow(
         'Calibration Frame',
-        'Capture a raw ColorChecker frame for the calibration tool',
+        'Saves the next raw frame as DNG + raw10 + JSON (noise profile, gain, Google AWB, shading map) '
+            'to Download/Vesper Calibration',
         _button('CAPTURE', onCaptureCalibration, icon: Icons.camera),
       ),
+    _settingRow(
+      'Sensor Calibration · Dark',
+      'Lens covered: black level, dark noise and hot pixels at every ISO (~30-60 s). '
+          'Result in Download/Vesper Calibration (tools/calibration/sensor.py)',
+      _button('RUN', widget.onSensorSweep == null ? null : () => widget.onSensorSweep!(true), icon: Icons.dark_mode),
+    ),
+    _settingRow(
+      'Sensor Calibration · White',
+      'White paper over the lens, aimed at daylight: noise, lens shading, clip point and linearity (~1-2 min)',
+      _button('RUN', widget.onSensorSweep == null ? null : () => widget.onSensorSweep!(false), icon: Icons.light_mode),
+    ),
   ];
 
   List<Widget> _info() {

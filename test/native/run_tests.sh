@@ -13,7 +13,7 @@ g++ -std=c++20 -O1 -Wall -Wextra -I"$CPP" "$CPP/color_science.cpp" "$ROOT/test/n
 # Gradle NDK build.
 if [ -f /usr/include/vulkan/vulkan.h ]; then
   g++ -std=c++20 -Wall -Wextra -Wno-missing-field-initializers -fsyntax-only -I"$ROOT/test/native/android_stubs" -I"$CPP" "$CPP/vulkan_engine.cpp"
-  for f in camera_engine recorder native_bridge focus_controller iso_analysis; do
+  for f in camera_engine recorder native_bridge focus_controller iso_analysis sensor_calib dng_writer; do
     g++ -std=c++20 -Wall -Wextra -Wno-missing-field-initializers -Wno-unused-parameter -fsyntax-only -I"$ROOT/test/native/android_stubs" -I"$CPP" "$CPP/$f.cpp"
   done
   echo "native sources type-check against stub NDK headers"
@@ -39,3 +39,9 @@ g++ -std=c++20 -O1 -Wall -Wextra -I"$CPP" "$CPP/focus_controller.cpp" "$ROOT/tes
 # ISO analysis (native ISO / HCG detection from a dark-frame sweep).
 g++ -std=c++20 -O1 -Wall -Wextra -I"$CPP" "$CPP/iso_analysis.cpp" "$ROOT/test/native/iso_analysis_test.cpp" -o "$OUT/iso_test"
 "$OUT/iso_test"
+
+# Sensor calibration: burst statistics + DNG writer on a simulated sensor, then
+# tools/calibration/sensor.py must find the simulated faults in its sweeps.
+g++ -std=c++20 -O2 -Wall -Wextra -I"$CPP" "$CPP/sensor_calib.cpp" "$CPP/dng_writer.cpp" "$ROOT/test/native/sensor_calib_test.cpp" -o "$OUT/sensor_test"
+"$OUT/sensor_test" "$OUT"
+python3 "$ROOT/tools/calibration/test_sensor.py" "$OUT" | tail -1

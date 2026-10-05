@@ -229,7 +229,11 @@ class MainActivity : FlutterActivity() {
                 "publishCalibration" -> {
                     val base = call.argument<String>("base") ?: ""
                     try {
-                        for (ext in listOf(".raw10", ".json")) publishDownload(java.io.File(base + ext))
+                        // Calibration frames: .raw10/.json/.dng; sensor sweeps: .json only.
+                        for (ext in listOf(".raw10", ".json", ".dng")) {
+                            val f = java.io.File(base + ext)
+                            if (f.exists()) publishDownload(f)
+                        }
                         result.success(true)
                     } catch (e: Exception) {
                         result.error("file", e.message, null)
@@ -331,7 +335,11 @@ class MainActivity : FlutterActivity() {
     private fun publishDownload(src: java.io.File) {
         val values = ContentValues().apply {
             put(MediaStore.Downloads.DISPLAY_NAME, src.name)
-            put(MediaStore.Downloads.MIME_TYPE, if (src.name.endsWith(".json")) "application/json" else "application/octet-stream")
+            put(MediaStore.Downloads.MIME_TYPE, when {
+                src.name.endsWith(".json") -> "application/json"
+                src.name.endsWith(".dng") -> "image/x-adobe-dng"
+                else -> "application/octet-stream"
+            })
             put(MediaStore.Downloads.RELATIVE_PATH, "Download/Vesper Calibration")
         }
         val uri = contentResolver.insert(MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), values)

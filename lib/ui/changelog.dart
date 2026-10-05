@@ -7,6 +7,10 @@ class ChangelogEntry {
 }
 
 const changelog = <ChangelogEntry>[
+  ChangelogEntry('0.15.0', [
+    'Sensor calibration without a colour chart (developer builds, Settings › Developer): DARK (lens covered) and WHITE (paper over the lens, daylight) sweeps measure noise, black level, lens shading, clip point, linearity and hot pixels; results go to Download/Vesper Calibration',
+    'Calibration Frame also saves a DNG with the full camera metadata (Google AWB, noise profile, colour matrices, lens-shading map), and works with Settings open',
+  ]),
   ChangelogEntry('0.14.1', [
     'Faster HQ oversampling (about 1.4 ms less GPU time per frame, same image)',
     'Heat safeguard keeps quality much longer: it steps down at most once a minute and only while the phone keeps heating up; noise reduction stays on until "severe"',

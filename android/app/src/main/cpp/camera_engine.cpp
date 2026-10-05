@@ -180,10 +180,18 @@ void CameraEngine::querySensorInfo(const ACameraMetadata* m) {
     cal.haveForwardMatrix2 = readMatrix(m, ACAMERA_SENSOR_FORWARD_MATRIX2, cal.forwardMatrix2);
     readMatrix(m, ACAMERA_SENSOR_CALIBRATION_TRANSFORM1, cal.calibration1);
     if (!readMatrix(m, ACAMERA_SENSOR_CALIBRATION_TRANSFORM2, cal.calibration2)) cal.calibration2 = cal.calibration1;
-    if (ACameraMetadata_getConstEntry(m, ACAMERA_SENSOR_REFERENCE_ILLUMINANT1, &e) == ACAMERA_OK)
+    if (ACameraMetadata_getConstEntry(m, ACAMERA_SENSOR_REFERENCE_ILLUMINANT1, &e) == ACAMERA_OK) {
+        s.illuminant1Code = e.data.u8[0];
         cal.illuminant1Kelvin = illuminantToKelvin(e.data.u8[0]);
-    if (ACameraMetadata_getConstEntry(m, ACAMERA_SENSOR_REFERENCE_ILLUMINANT2, &e) == ACAMERA_OK)
+    }
+    if (ACameraMetadata_getConstEntry(m, ACAMERA_SENSOR_REFERENCE_ILLUMINANT2, &e) == ACAMERA_OK) {
+        s.illuminant2Code = e.data.u8[0];
         cal.illuminant2Kelvin = illuminantToKelvin(e.data.u8[0]);
+    }
+    if (ACameraMetadata_getConstEntry(m, ACAMERA_LENS_INFO_AVAILABLE_APERTURES, &e) == ACAMERA_OK && e.count >= 1)
+        s.aperture = e.data.f[0];
+    if (ACameraMetadata_getConstEntry(m, ACAMERA_LENS_INFO_AVAILABLE_FOCAL_LENGTHS, &e) == ACAMERA_OK && e.count >= 1)
+        s.focalLength = e.data.f[0];
 
     LOGI("Sensor: white=%d black=[%.1f %.1f %.1f %.1f] CFA=%d orient=%d active=%dx%d shadingMap=%dx%d (applied=%d) "
          "tsRealtime=%d ISO %d-%d (analog to %d) minFocus=%.2fD",
@@ -514,7 +522,10 @@ void CameraEngine::onCaptureCompleted(const ACameraMetadata* r) {
         for (uint32_t i = 0; i < n; ++i) { s += e.data.d[2 * i]; o += e.data.d[2 * i + 1]; }
         m.noiseS = static_cast<float>(s / n);
         m.noiseO = static_cast<float>(o / n);
+        m.noiseChannels = static_cast<int32_t>(std::min<uint32_t>(n, 4));
+        std::copy(e.data.d, e.data.d + 2 * m.noiseChannels, m.noiseProfile);
     }
+    if (ACameraMetadata_getConstEntry(r, ACAMERA_SENSOR_FRAME_DURATION, &e) == ACAMERA_OK) m.frameDurationNs = e.data.i64[0];
     if (faceDetect_ && ACameraMetadata_getConstEntry(r, ACAMERA_STATISTICS_FACE_RECTANGLES, &e) == ACAMERA_OK) {
         int64_t bestArea = 0;
         for (uint32_t i = 0; i + 3 < e.count; i += 4) {

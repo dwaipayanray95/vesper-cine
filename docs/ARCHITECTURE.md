@@ -106,6 +106,7 @@ HCG native ISO, then gain (never into digital gain). Native ISOs come from a dar
 `test/native/run_tests.sh`: colour science; native type-check against NDK stubs
 (`test/native/android_stubs/`); the real `VulkanEngine` + shaders on Mesa lavapipe (grey code
 value, clipping, rotation, shading, sharpening, HQ detail/moiré/overshoot/noise, TNR ghosting,
-hot pixels, ring reuse); calibration tool; focus controller; ISO analysis. lavapipe timings are
+hot pixels, ring reuse); calibration tool; focus controller; ISO analysis; sensor calibration
+statistics, DNG writer and `tools/calibration/sensor.py` on a simulated sensor with planted faults. lavapipe timings are
 CPU-emulated and noisy — never use them as phone performance numbers.
 `flutter analyze` and `flutter test` cover the Dart side.

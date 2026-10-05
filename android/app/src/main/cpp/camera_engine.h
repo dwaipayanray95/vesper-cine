@@ -72,6 +72,8 @@ struct SensorInfo {
     int64_t minExposureNs = 1000, maxExposureNs = 1'000'000'000;
     int32_t minIso = 50, maxIso = 3200;
     int32_t maxAnalogIso = 0;          // above this the HAL applies digital gain (0 = not reported)
+    int32_t illuminant1Code = 21, illuminant2Code = 17; // SENSOR_REFERENCE_ILLUMINANT1/2 (EXIF LightSource)
+    float aperture = 0, focalLength = 0; // LENS_INFO_AVAILABLE_APERTURES / FOCAL_LENGTHS (first)
     float minFocusDiopters = 0.0f;     // 0 = fixed focus
     std::vector<RawMode> rawModes;     // RAW10 output sizes, largest first
 };
@@ -89,6 +91,9 @@ struct CaptureMetadata {
     float focusDiopters = 0;                // LENS_FOCUS_DISTANCE actually used
     uint8_t afState = 0;                    // CONTROL_AF_STATE
     float noiseS = 0, noiseO = 0;           // SENSOR_NOISE_PROFILE, averaged over channels
+    double noiseProfile[8] = {0, 0, 0, 0, 0, 0, 0, 0}; // as reported: (S, O) per CFA channel, 2x2 row-major
+    int32_t noiseChannels = 0;
+    int64_t frameDurationNs = 0;
     int32_t face[4] = {0, 0, 0, 0};         // largest face (l, t, r, b), pre-correction px; r == 0 if none
 };
 

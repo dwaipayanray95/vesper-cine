@@ -1,4 +1,56 @@
-# Per-device colour calibration
+# Per-device calibration
+
+Two parts: **sensor calibration** (no chart: noise, black level, clip point,
+linearity, lens shading, hot pixels; `sensor.py`) and **colour calibration**
+(ColorChecker forward matrix; `calibrate.py`, further below).
+
+# Sensor calibration (no chart needed)
+
+Developer / profile build, Settings › Developer. Run at the frame rate you film at
+(the dark sweep's long exposure is 1/fps). If Native ISO Analysis
+(Settings › Exposure · Color · Focus) hasn't been run, run it first: the white
+sweep's shutter ladder then uses the base native ISO.
+
+| Sweep | Setup | Time | What the phone does |
+|---|---|---|---|
+| **Sensor Calibration · Dark** | Phone face down on a dark cloth (or lens cap + cloth). No light at all. | ~30–60 s | every ISO (doubling from the minimum) at 1/fps and 1 ms, 4 frames each |
+| **Sensor Calibration · White** | Two layers of plain white printer paper flat against the lens, aimed at bright **daylight** (window or sky; lamps flicker). Hold still. | ~1–2 min | meters "half of the raw range" at the base ISO, then a **1-stop shutter ladder** +3 … −8 stops, and 5 levels (+2, 0, −2, −4, −6 stops) at every other ISO, 4 frames each |
+
+Each sweep writes `Download/Vesper Calibration/VSENSOR_<dark|white>_<camera>_<date>.json`
+(2–4 MB: per 128x128-px block and CFA site the mean, the temporal noise from
+frame-pair differences, the clip histogram and a list of defective pixels; see
+`android/app/src/main/cpp/sensor_calib.h`) and one full reference frame
+`…_ref.raw10/.json/.dng` (only needed if the statistics leave a question open).
+
+```
+python3 sensor.py VSENSOR_dark_*.json VSENSOR_white_*.json [--json numbers.json]
+```
+prints, in DN of the 10-bit raw data:
+- **A. Black level** per CFA site and ISO vs the camera's (dynamic) black level, dark noise, row noise,
+  dark current. 18 % grey is only ~21 DN above black with 5.5 stops of headroom, so 1 DN matters.
+- **B. Noise model** `variance = S·x + O` fitted per ISO vs SENSOR_NOISE_PROFILE and vs what the
+  app's GPU passes use (NR, alignment margin, sharpening), plus a per-ISO model (S ∝ ISO,
+  O = a + b·ISO²), electrons/DN, read noise, dynamic range, and whether the raw noise is the same
+  everywhere in the frame.
+- **C. Lens shading**: the flat field times the camera's shading map (should be 1.00 and neutral
+  everywhere), split into a straight gradient (usually uneven light) and a radial residual (map error);
+  map gains vs the 4.5 cap of the noise model; edge-vs-centre noise at equal brightness.
+- **D. Clip point** per site and ISO vs the reported white level (the GPU flags clipping at ≥ white − 1).
+- **E. Linearity / tone**: each 1-stop shutter step should double the raw level; the table shows the
+  error in stops and the resulting Apple Log codes, with the measured and with the camera's black level.
+- **F. Hot / dead pixels** per ISO and exposure, and how many `clean.comp`'s repair would catch at
+  black, grey −3 stops, grey and grey +3 stops.
+- **SUMMARY**: one OK / FIX line per item.
+
+`python3 test_sensor.py` checks the chain end to end: `test/native/sensor_calib_test.cpp`
+simulates a sensor with planted faults and writes sweeps in the phone's format; `sensor.py` must find them.
+
+**Calibration Frame** (Settings › Developer) saves the next frame as `CAL_….raw10/.json/.dng`. The JSON
+(format `vesper-calibration-capture/2`) and the DNG carry the per-channel noise profile, the
+analog/digital ISO split (from SENSOR_MAX_ANALOG_SENSITIVITY), the HAL's (Google) AWB neutral
+(DNG AsShotNeutral), colour matrices, black/white levels and the lens-shading map (DNG GainMap opcodes).
+
+# Colour calibration (ColorChecker)
 
 Fits a ColorChecker-based ForwardMatrix (white-balanced camera RGB → XYZ D50)
 per phone and camera, which replaces the factory DNG matrices. Apple Log

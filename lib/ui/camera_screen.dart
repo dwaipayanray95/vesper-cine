@@ -165,6 +165,8 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   String? _filesDir;
   IsoAnalysis? _isoAnalysis; // measured native ISOs of this camera (Settings -> Native ISO Analysis)
   bool _isoSweepRunning = false;
+  bool _calSweepRunning = false; // sensor calibration sweep (Settings > Developer)
+  bool _calSweepDark = false;
   String _savedSettings = '';
 
   bool _settingsOpen = false; // settings page covers the viewfinder: processing paused
@@ -669,6 +671,62 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     }
   }
 
+  // --- Sensor calibration sweeps (tools/calibration/sensor.py) -------------
+  Future<void> _startSensorSweep(bool dark) async {
+    final dir = _calibrationDir;
+    if (_recording || !_streaming || dir == null || _isoSweepRunning || _calSweepRunning) return;
+    final go = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF14171D),
+        title: Text(dark ? 'Sensor calibration: dark' : 'Sensor calibration: white',
+            style: const TextStyle(color: Colors.white, fontSize: 15)),
+        content: Text(
+          dark
+              ? 'No light may reach the lens: lay the phone face down on a dark cloth (or use a lens cap and '
+                  'cover it with a cloth). Don\'t move it until it finishes (~30-60 s).\n\n'
+                  'The app steps through every ISO and measures black level, dark noise and hot pixels. '
+                  'Your exposure settings are restored afterwards.'
+              : 'Hold two layers of plain white printer paper flat against the lens and point the phone at '
+                  'bright daylight: a window or the sky. Not a lamp (lamps flicker). Keep it still until it '
+                  'finishes (~1-2 min).\n\nThe app picks the exposures itself and measures noise, lens shading, '
+                  'the clip point and linearity. Your exposure settings are restored afterwards.',
+          style: const TextStyle(color: Colors.white70, fontSize: 12),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('CANCEL')),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('START')),
+        ],
+      ),
+    );
+    if (go != true || !mounted) return;
+    final stamp = DateTime.now().toIso8601String().substring(0, 19).replaceAll(RegExp(r'[:T]'), '-');
+    final base = '$dir/VSENSOR_${dark ? 'dark' : 'white'}_${_cameraId}_$stamp';
+    if (_engine.startSensorSweep(dark: dark, basePath: base, deviceModel: _deviceModel ?? 'unknown')) {
+      setState(() {
+        _calSweepRunning = true;
+        _calSweepDark = dark;
+      });
+    } else {
+      _toast('Could not start the sensor calibration');
+    }
+  }
+
+  void _onSensorSweepFinished(EngineStatus s) {
+    _calSweepRunning = false;
+    if (s.calSweepError.isNotEmpty) {
+      if (s.calSweepError != 'cancelled') _toast('Sensor calibration failed: ${s.calSweepError}');
+      return;
+    }
+    final base = s.calSweepResult;
+    if (base.isEmpty) return;
+    final name = base.split('/').last;
+    _engine.publishCalibration(base).then((ok) async {
+      await _engine.publishCalibration('${base}_ref');
+      if (mounted) _toast(ok ? 'Saved $name.json to Downloads/Vesper Calibration' : 'Saved $name.json (app files only)');
+    });
+  }
+
   // Sub-label for the ISO dial: native (star), extended low (L), digital gain (D).
   String? _isoTag(int iso) {
     final a = _isoAnalysis;
@@ -872,6 +930,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       });
     }
     if (_isoSweepRunning && s.isoSweep < 0) setState(() => _onIsoSweepFinished(s));
+    if (_calSweepRunning && s.calSweep < 0) setState(() => _onSensorSweepFinished(s));
     // The engine stops on its own on thermal/storage limits.
     if (_recording && !_stopping && !s.recording && s.stopReason.isNotEmpty) {
       _finishRecording(s.stopReason);
@@ -1153,6 +1212,12 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                   _startIsoAnalysis();
                 }
               : null,
+          onSensorSweep: _streaming && !_recording && _calibrationDir != null
+              ? (dark) {
+                  Navigator.of(context).pop();
+                  _startSensorSweep(dark);
+                }
+              : null,
           faceDetect: _faceDetect,
           onFaceDetectChanged: (val) {
             setState(() => _faceDetect = val);
@@ -1190,7 +1255,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   // Tap: hardware AF (PDAF + laser) on the region, either tracking (AF-C) or one
   // scan that the HAL then holds (AF-L). Optionally also spot-meters exposure there.
   void _tapToFocus(Offset p, {bool lock = false}) {
-    if (!_streaming || _isoSweepRunning || _benchmarking) return; // a measurement owns the camera
+    if (!_streaming || _isoSweepRunning || _calSweepRunning || _benchmarking) return; // a measurement owns the camera
     lock = lock || _tapLocks;
     _engine.focusAt(p.dx, p.dy, lock: lock);
     if (lock) HapticFeedback.mediumImpact();
@@ -1393,6 +1458,42 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                                             fontWeight: FontWeight.bold,
                                           ),
                                         ),
+                                      ),
+                                    ),
+                                  ),
+                                if (_calSweepRunning)
+                                  Positioned.fill(
+                                    child: Container(
+                                      color: const Color(0x99000000),
+                                      alignment: Alignment.center,
+                                      child: Column(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          Text(
+                                            'SENSOR CALIBRATION (${_calSweepDark ? 'DARK' : 'WHITE'})… '
+                                            '${(((s?.calSweep ?? 0).clamp(0.0, 1.0)) * 100).round()}%',
+                                            style: const TextStyle(
+                                              color: Colors.amber,
+                                              fontSize: 12,
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                          ),
+                                          const SizedBox(height: 4),
+                                          Text(
+                                            s?.calSweepStage ?? '',
+                                            style: const TextStyle(color: Colors.white, fontSize: 10),
+                                          ),
+                                          Text(
+                                            _calSweepDark
+                                                ? 'Keep the lens covered and the phone still'
+                                                : 'Keep the paper on the lens, aimed at daylight, phone still',
+                                            style: const TextStyle(color: Colors.white70, fontSize: 10),
+                                          ),
+                                          TextButton(
+                                            onPressed: _engine.cancelSensorSweep,
+                                            child: const Text('CANCEL', style: TextStyle(color: Colors.white)),
+                                          ),
+                                        ],
                                       ),
                                     ),
                                   ),
