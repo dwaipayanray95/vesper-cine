@@ -112,6 +112,7 @@ struct SensorProfile {
     int version = 0;
 };
 SensorProfile gSensorProfile;
+std::atomic<double> gRecordQuality{1.0}; // Recording Quality bitrate multiplier
 
 struct NoiseFactors { float s = 1.0f, o = 1.0f; };
 
@@ -2254,10 +2255,16 @@ EXPORT int32_t vesper_start_recording(int32_t fd, int32_t codec, int32_t audio) 
     }
     cfg.fps = gCamera->frameRate();
     cfg.codec = codec == 1 ? VideoCodec::Av1 : VideoCodec::Hevc;
+    cfg.quality = gRecordQuality.load();
     cfg.audio = audio != 0;
     cfg.timestampRealtime = gCamera->sensorInfo().timestampRealtime;
     std::string error;
     return gRecorder->start(cfg, gGpu.get(), &error) ? 0 : -1;
+}
+
+// Recording Quality: bitrate multiplier for the next take (1 standard, 2 high, 3 max).
+EXPORT void vesper_set_recording_quality(double scale) {
+    gRecordQuality = std::clamp(scale, 1.0, 4.0);
 }
 
 EXPORT void vesper_stop_recording() {

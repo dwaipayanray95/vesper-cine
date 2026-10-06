@@ -143,6 +143,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   bool _nrAlignment = true;
   Offset? _focusMark; // last tap-to-focus point (normalised), shown briefly
   int _codec = 0; // 0 HEVC, 1 AV1
+  int _recordQuality = 0; // 0 standard, 1 high (2x bitrate), 2 max (3x)
   int _aeGen = 0; // bumps per AE request so an older run stops refining
   ScopeMode _scopeMode = ScopeMode.off;
   Scopes? _scopes;
@@ -774,6 +775,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     'oversampling': _oversampling,
     'gpuGuard': _gpuGuard,
     'codec': _codec,
+    'recordQuality': _recordQuality,
     'powerSaver': _powerSaver,
     'tapLocks': _tapLocks,
     'tapSetsExposure': _tapSetsExposure,
@@ -819,6 +821,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       _oversampling = get('oversampling', _oversampling);
       _gpuGuard = kDevTools ? get('gpuGuard', _gpuGuard) : true; // release: the guard is always on
       _codec = get('codec', _codec).clamp(0, 1);
+      _recordQuality = get('recordQuality', _recordQuality).clamp(0, 2);
       _powerSaver = get('powerSaver', _powerSaver).clamp(0, 2);
       _tapLocks = get('tapLocks', _tapLocks);
       _tapSetsExposure = get('tapSetsExposure', _tapSetsExposure);
@@ -1039,6 +1042,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     HapticFeedback.mediumImpact();
     RecordingFile? file;
     try {
+      _engine.setRecordingQuality(1.0 + _recordQuality);
       file = await _engine.startRecording(codec: _codec);
     } on PlatformException catch (e) {
       _engine.log('Could not create the recording file: ${e.message}', tag: 'Vesper_UI');
@@ -1218,6 +1222,9 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
         builder: (_) => SettingsScreen(
           codec: _codec,
           onCodecChanged: (c) => setState(() => _codec = c),
+          recordQuality: _recordQuality,
+          fps: _fps,
+          onRecordQualityChanged: (q) => setState(() => _recordQuality = q),
           cropMode: _cropMode,
           onCropModeChanged: (m) async => await _toggleCrop(),
           isRecording: _recording,

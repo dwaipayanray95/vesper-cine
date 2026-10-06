@@ -12,6 +12,9 @@ import 'value_picker.dart';
 class SettingsScreen extends StatefulWidget {
   final int codec; // 0 = HEVC, 1 = AV1
   final ValueChanged<int> onCodecChanged;
+  final int recordQuality; // 0 standard, 1 high, 2 max
+  final double fps;
+  final ValueChanged<int>? onRecordQualityChanged;
   final int cropMode; // 0 = 16:9, 1 = 4:3
   final ValueChanged<int> onCropModeChanged;
   final bool isRecording;
@@ -56,6 +59,9 @@ class SettingsScreen extends StatefulWidget {
     super.key,
     required this.codec,
     required this.onCodecChanged,
+    this.recordQuality = 0,
+    this.fps = 24,
+    this.onRecordQualityChanged,
     required this.cropMode,
     required this.onCropModeChanged,
     required this.isRecording,
@@ -108,6 +114,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
   static const _chromaLevels = [0.0, 0.5, 1.0];
 
   late int codec = widget.codec;
+  late int recordQuality = widget.recordQuality;
+
+  // Mirrors recorder.cpp: 1080p, 0.9 (HEVC) / 0.63 (AV1) bits per pixel per frame x quality.
+  String get _bitrateLabel {
+    final mbps = 1920 * 1080 * widget.fps * (codec == 1 ? 0.63 : 0.9) * (1 + recordQuality) / 1e6;
+    return '~${mbps.clamp(0, 240).round()} Mb/s at ${widget.fps.round()} fps';
+  }
   late int cropMode = widget.cropMode;
   late int powerSaver = widget.powerSaver;
   late bool lensCorrection = widget.lensCorrection;
@@ -313,6 +326,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
             : (i) {
                 setState(() => codec = i);
                 widget.onCodecChanged(i);
+              },
+      ),
+    ),
+    _settingRow(
+      'Recording Quality',
+      '${['Standard', 'High: 2x bitrate, keeps fine grain and texture between keyframes', 'Max: 3x bitrate'][recordQuality]} · $_bitrateLabel',
+      Segmented(
+        options: const ['STANDARD', 'HIGH', 'MAX'],
+        selected: recordQuality,
+        onSelected: isRecording
+            ? (_) {}
+            : (i) {
+                setState(() => recordQuality = i);
+                widget.onRecordQualityChanged?.call(i);
               },
       ),
     ),

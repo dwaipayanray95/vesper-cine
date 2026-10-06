@@ -7,6 +7,9 @@ class ChangelogEntry {
 }
 
 const changelog = <ChangelogEntry>[
+  ChangelogEntry('0.18.0', [
+    'Recording Quality (Settings › Recording): STANDARD, HIGH (2x bitrate) or MAX (3x). At standard bitrate the encoder kept 35-45% less fine detail in the frames between its once-a-second keyframes (sharpness "breathing" in your 6 Oct clips)',
+  ]),
   ChangelogEntry('0.17.0', [
     'Noise reduction, motion alignment and sharpening now use the Pixel 10\'s measured noise in bright areas too (the camera\'s own figure was about a third too low at every ISO): smoother midtones and skies, less sharpened grain',
     'Developer: Calibrated Noise Model ON/OFF switch to compare footage with the camera\'s own noise figure',

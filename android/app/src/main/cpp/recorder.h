@@ -27,6 +27,7 @@ struct RecorderConfig {
     double fps = 24.0;
     VideoCodec codec = VideoCodec::Hevc;
     int64_t bitrate = 0;        // 0 = pick from resolution/fps
+    double quality = 1.0;       // multiplies the picked bitrate (Recording Quality: 1 standard, 2 high, 3 max)
     bool audio = true;
     bool timestampRealtime = true; // camera timestamps are CLOCK_BOOTTIME (else CLOCK_MONOTONIC)
 };

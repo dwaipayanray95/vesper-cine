@@ -258,6 +258,7 @@ class VesperNative {
   late final void Function(int, Pointer<Float>, Pointer<Float>) _setColorProfile;
   late final void Function(int, Pointer<Float>, Pointer<Float>, int, Pointer<Int32>) _setSensorProfile;
   late final void Function(int, Pointer<Float>, Pointer<Float>) _setShotNoiseProfile;
+  late final void Function(double) _setRecordingQuality;
   late final void Function(int) _useColorProfile;
 
   VesperNative._() {
@@ -386,6 +387,8 @@ class VesperNative {
         Void Function(Int32, Pointer<Float>, Pointer<Float>),
         void Function(int, Pointer<Float>, Pointer<Float>)
       >('vesper_set_shot_noise_profile');
+      _setRecordingQuality =
+          _lib.lookupFunction<Void Function(Double), void Function(double)>('vesper_set_recording_quality');
       _useColorProfile = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_use_color_profile');
       _loaded = true;
     } catch (_) {
@@ -829,6 +832,9 @@ class VesperNative {
       calloc.free(pf);
     }
   }
+
+  /// Bitrate multiplier for the next take: 1 standard, 2 high, 3 max.
+  void setRecordingQuality(double scale) => _loaded ? _setRecordingQuality(scale) : null;
 
   void useColorProfile(bool on) => _loaded ? _useColorProfile(on ? 1 : 0) : null;
 

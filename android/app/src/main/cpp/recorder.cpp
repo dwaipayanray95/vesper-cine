@@ -51,9 +51,15 @@ bool Recorder::start(const RecorderConfig& config, VulkanEngine* gpu, std::strin
     if (cfg_.bitrate <= 0) {
         // ~0.9 bits/pixel/frame for HEVC Log masters (1080p24 ~45 Mb/s, 1080p60 ~112, UHD30 ~224).
         // AV1 needs roughly 30% less for the same quality.
+        // Standard measured too low for grainy Log (owner's AV1 clips of 6 Oct at
+        // 34 Mb/s: in-between frames kept 35-45% less fine detail than the
+        // once-a-second keyframes); Recording Quality scales it.
         double bpp = cfg_.codec == VideoCodec::Av1 ? 0.63 : 0.9;
-        cfg_.bitrate = std::min<int64_t>(static_cast<int64_t>(cfg_.width * cfg_.height * cfg_.fps * bpp), 240'000'000);
+        cfg_.bitrate = std::min<int64_t>(static_cast<int64_t>(cfg_.width * cfg_.height * cfg_.fps * bpp * std::max(cfg_.quality, 1.0)),
+                                         240'000'000);
     }
+    const int64_t standardBitrate = std::min<int64_t>(
+        static_cast<int64_t>(cfg_.width * cfg_.height * cfg_.fps * (cfg_.codec == VideoCodec::Av1 ? 0.63 : 0.9)), 240'000'000);
 
     const char* mime = cfg_.codec == VideoCodec::Av1 ? "video/av01" : "video/hevc";
     video_ = AMediaCodec_createEncoderByType(mime);
@@ -82,6 +88,13 @@ bool Recorder::start(const RecorderConfig& config, VulkanEngine* gpu, std::strin
     AMediaFormat_setInt32(vf, "color-standard", kColorStandardBt2020);
     AMediaFormat_setInt32(vf, "color-range", kColorRangeLimited);
     media_status_t st = AMediaCodec_configure(video_, vf, nullptr, nullptr, AMEDIACODEC_CONFIGURE_FLAG_ENCODE);
+    if (st != AMEDIA_OK && cfg_.bitrate > standardBitrate) {
+        // A higher Recording Quality the encoder won't take: record at standard rather than not at all.
+        RLOGW("Encoder rejected %.0f Mb/s, retrying at %.0f Mb/s", cfg_.bitrate / 1e6, standardBitrate / 1e6);
+        cfg_.bitrate = standardBitrate;
+        AMediaFormat_setInt32(vf, "bitrate", static_cast<int32_t>(cfg_.bitrate));
+        st = AMediaCodec_configure(video_, vf, nullptr, nullptr, AMEDIACODEC_CONFIGURE_FLAG_ENCODE);
+    }
     AMediaFormat_delete(vf);
     if (st != AMEDIA_OK) return fail("10-bit P010 encoder configuration rejected (" + std::string(mime) + ")");
 
