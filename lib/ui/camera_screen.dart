@@ -273,6 +273,9 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     _engine.log('Vesper Cine ${info?['version']} (build ${info?['build']}) on ${info?['model']}, Android ${info?['android']}',
         tag: 'Vesper_UI');
     _deviceModel = info?['model'] as String?;
+    for (final line in await _engine.encoderInfo()) {
+      _engine.log('Encoder: $line', tag: 'Vesper_UI');
+    }
     _calibrationDir = info?['calibrationDir'] as String?;
     final filesDir = info?['filesDir'] as String?;
     _filesDir = filesDir;

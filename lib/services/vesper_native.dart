@@ -838,6 +838,16 @@ class VesperNative {
 
   void useColorProfile(bool on) => _loaded ? _useColorProfile(on ? 1 : 0) : null;
 
+  /// One line per hardware HEVC / AV1 encoder: bitrate modes, ranges, profiles, features.
+  Future<List<String>> encoderInfo() async {
+    if (!Platform.isAndroid) return const [];
+    try {
+      return (await _channel.invokeListMethod<String>('encoderInfo')) ?? const [];
+    } on PlatformException {
+      return const [];
+    }
+  }
+
   Future<Map<String, dynamic>?> deviceInfo() async {
     if (!Platform.isAndroid) return null;
     return _channel.invokeMapMethod<String, dynamic>('deviceInfo');

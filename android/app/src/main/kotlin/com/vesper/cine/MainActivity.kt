@@ -220,6 +220,7 @@ class MainActivity : FlutterActivity() {
                         ActivityInfo.SCREEN_ORIENTATION_LOCKED else ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
                     result.success(true)
                 }
+                "encoderInfo" -> result.success(encoderInfo())
                 "deviceInfo" -> {
                     val dir = java.io.File(getExternalFilesDir(null), "calibration").apply { mkdirs() }
                     val pkg = packageManager.getPackageInfo(packageName, 0)
@@ -328,6 +329,40 @@ class MainActivity : FlutterActivity() {
             pfd.close()
         }
         return false
+    }
+
+    // What the hardware video encoders can do (logged once at start, for tuning
+    // Recording Quality): bitrate modes, bitrate / quality ranges, 10-bit
+    // profiles and optional features. The NDK has no capability queries.
+    private fun encoderInfo(): List<String> {
+        val out = mutableListOf<String>()
+        val list = android.media.MediaCodecList(android.media.MediaCodecList.REGULAR_CODECS)
+        for (info in list.codecInfos) {
+            if (!info.isEncoder) continue
+            for (type in info.supportedTypes) {
+                if (type != "video/hevc" && type != "video/av01") continue
+                try {
+                    val caps = info.getCapabilitiesForType(type)
+                    val enc = caps.encoderCapabilities
+                    val video = caps.videoCapabilities
+                    val modes = listOf(0 to "CQ", 1 to "VBR", 2 to "CBR", 3 to "CBR_FD")
+                        .filter { enc.isBitrateModeSupported(it.first) }.joinToString("/") { it.second }
+                    val hw = if (Build.VERSION.SDK_INT >= 29) (if (info.isHardwareAccelerated) "hw" else "sw") else "?"
+                    val features = mutableListOf<String>()
+                    if (Build.VERSION.SDK_INT >= 31 && caps.isFeatureSupported("qp-bounds")) features.add("qp-bounds")
+                    if (caps.isFeatureSupported("intra-refresh")) features.add("intra-refresh")
+                    if (Build.VERSION.SDK_INT >= 33 && caps.isFeatureSupported("hdr-editing")) features.add("hdr-editing")
+                    val profiles = caps.profileLevels.joinToString(",") { "${it.profile}:${it.level}" }
+                    val fps1080 = try { video.getSupportedFrameRatesFor(1920, 1080).upper.toInt() } catch (e: Exception) { -1 }
+                    out.add("${info.name} [$type, $hw] modes $modes, bitrate ${video.bitrateRange.lower / 1000}..${video.bitrateRange.upper / 1000000} Mb/s, " +
+                        "quality ${enc.qualityRange.lower}..${enc.qualityRange.upper}, complexity ${enc.complexityRange.lower}..${enc.complexityRange.upper}, " +
+                        "1080p up to $fps1080 fps, features [${features.joinToString(",")}], profile:level $profiles")
+                } catch (e: Exception) {
+                    out.add("${info.name} [$type]: ${e.message}")
+                }
+            }
+        }
+        return out
     }
 
     // Copies an app-private calibration file to Downloads/Vesper Calibration so it
