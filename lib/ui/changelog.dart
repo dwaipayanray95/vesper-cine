@@ -7,6 +7,10 @@ class ChangelogEntry {
 }
 
 const changelog = <ChangelogEntry>[
+  ChangelogEntry('0.17.0', [
+    'Noise reduction, motion alignment and sharpening now use the Pixel 10\'s measured noise in bright areas too (the camera\'s own figure was about a third too low at every ISO): smoother midtones and skies, less sharpened grain',
+    'Developer: Calibrated Noise Model ON/OFF switch to compare footage with the camera\'s own noise figure',
+  ]),
   ChangelogEntry('0.16.0', [
     'Each phone calibrates itself: Sensor Calibration · Dark (Settings › Developer) now saves this phone\'s own hot-pixel map and noise table and uses them straight away (every phone has different hot pixels). Running it again adds any new hot pixels',
     'Without a Dark run the Pixel 10 still gets the measured noise correction for its sensor model; the hot-pixel map from 0.15.1 (one specific phone) is no longer shipped',

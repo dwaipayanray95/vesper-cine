@@ -30,6 +30,8 @@ class SettingsScreen extends StatefulWidget {
   final int sharpening;
   final bool oversampling;
   final bool gpuGuard;
+  final bool calibratedNoise;
+  final ValueChanged<bool>? onCalibratedNoiseChanged;
   final ValueChanged<bool> onGpuGuardChanged;
   final ValueChanged<bool> onOversamplingChanged;
   final ValueChanged<int> onSharpeningChanged;
@@ -72,6 +74,8 @@ class SettingsScreen extends StatefulWidget {
     this.sharpening = 1,
     this.oversampling = true,
     this.gpuGuard = true,
+    this.calibratedNoise = true,
+    this.onCalibratedNoiseChanged,
     required this.onGpuGuardChanged,
     required this.onOversamplingChanged,
     required this.onSharpeningChanged,
@@ -114,6 +118,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late int sharpening = widget.sharpening;
   late bool oversampling = widget.oversampling;
   late bool gpuGuard = widget.gpuGuard;
+  late bool calibratedNoise = widget.calibratedNoise;
   late bool useProfile = widget.useProfile;
   late bool tapLocks = widget.tapLocks;
   late bool tapSetsExposure = widget.tapSetsExposure;
@@ -519,6 +524,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
         onSelected: (i) {
           setState(() => gpuGuard = i == 0);
           widget.onGpuGuardChanged(i == 0);
+        },
+      ),
+    ),
+    _settingRow(
+      'Calibrated Noise Model',
+      calibratedNoise
+          ? 'ON: noise reduction, alignment and sharpening use the measured sensor noise (sensor calibration)'
+          : 'OFF: they use the camera\'s own noise figure (lower than measured on Pixel 10). For comparing footage',
+      Segmented(
+        options: const ['ON', 'OFF'],
+        selected: calibratedNoise ? 0 : 1,
+        onSelected: (i) {
+          setState(() => calibratedNoise = i == 0);
+          widget.onCalibratedNoiseChanged?.call(i == 0);
         },
       ),
     ),

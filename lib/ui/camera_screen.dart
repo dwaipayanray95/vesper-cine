@@ -137,6 +137,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   bool _faceDetect = false;
   bool _lensCorrection = true;
   bool _hotPixelFix = true;
+  bool _calibratedNoise = true; // Developer: noise model from the sensor profile (off = the camera's own)
   double _temporalNr = 0; // 0 off, 0.5 low, 0.7 medium, 0.85 high
   double _chromaNr = 0; // 0 off, 0.5 low, 1 high
   bool _nrAlignment = true;
@@ -765,6 +766,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     'faceDetect': _faceDetect,
     'lensCorrection': _lensCorrection,
     'hotPixelFix': _hotPixelFix,
+    'calibratedNoise': _calibratedNoise,
     'temporalNr': _temporalNr,
     'chromaNr': _chromaNr,
     'nrAlignment': _nrAlignment,
@@ -809,6 +811,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       _faceDetect = get('faceDetect', _faceDetect);
       _lensCorrection = get('lensCorrection', _lensCorrection);
       _hotPixelFix = get('hotPixelFix', _hotPixelFix);
+      _calibratedNoise = kDevTools ? get('calibratedNoise', _calibratedNoise) : true;
       _temporalNr = get('temporalNr', _temporalNr);
       _chromaNr = get('chromaNr', _chromaNr);
       _nrAlignment = get('nrAlignment', _nrAlignment);
@@ -896,18 +899,24 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
         if (shipped != null) break;
       }
     } catch (_) {}
-    final ownNoise = (own?['darkNoise'] as List?) ?? const [];
-    _applySensorProfile(ownNoise.isNotEmpty ? ownNoise : ((shipped?['darkNoise'] as List?) ?? const []),
-        (own?['defects'] as List?) ?? const []);
+    List pick(String key) {
+      final mine = (own?[key] as List?) ?? const [];
+      return mine.isNotEmpty ? mine : ((shipped?[key] as List?) ?? const []);
+    }
+    _darkNoise = pick('darkNoise');
+    _shotNoise = pick('shotNoise');
+    _defects = (own?['defects'] as List?) ?? const [];
+    _applySensorProfile();
   }
 
-  void _applySensorProfile(List noise, List defects) {
-    final n = noise.cast<Map<String, dynamic>>();
-    _engine.setSensorProfile(
-      [for (final e in n) (e['iso'] as num).toDouble()],
-      [for (final e in n) (e['factor'] as num).toDouble()],
-      defects.map((e) => (e as num).toInt()).toList(),
-    );
+  // Noise tables (dark O, shot S: measured / camera, per ISO) and this phone's hot-pixel map.
+  List _darkNoise = const [], _shotNoise = const [], _defects = const [];
+
+  void _applySensorProfile() {
+    List<double> col(List t, String k) => [for (final e in t.cast<Map<String, dynamic>>()) (e[k] as num).toDouble()];
+    final dark = _calibratedNoise ? _darkNoise : const [], shot = _calibratedNoise ? _shotNoise : const [];
+    _engine.setSensorProfile(col(dark, 'iso'), col(dark, 'factor'), _defects.map((e) => (e as num).toInt()).toList());
+    _engine.setShotNoiseProfile(col(shot, 'iso'), col(shot, 'factor'));
   }
 
   // After a Dark sweep: its noise table replaces this phone's, its hot pixels
@@ -933,7 +942,10 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       fresh['defects'] = defects;
       fresh['defectCount'] = pairs.length;
       old.writeAsStringSync(jsonEncode(fresh));
-      _applySensorProfile((fresh['darkNoise'] as List?) ?? const [], defects);
+      final dark = (fresh['darkNoise'] as List?) ?? const [];
+      if (dark.isNotEmpty) _darkNoise = dark;
+      _defects = defects;
+      _applySensorProfile();
       return pairs.length;
     } catch (_) {
       return null;
@@ -1235,6 +1247,11 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
           onNrAlignmentChanged: (val) {
             setState(() => _nrAlignment = val);
             _engine.setNrAlignment(val);
+          },
+          calibratedNoise: _calibratedNoise,
+          onCalibratedNoiseChanged: (val) {
+            setState(() => _calibratedNoise = val);
+            _applySensorProfile();
           },
           gpuGuard: _gpuGuard,
           onGpuGuardChanged: (val) {

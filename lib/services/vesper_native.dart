@@ -257,6 +257,7 @@ class VesperNative {
   late final void Function(Pointer<Utf8>, Pointer<Utf8>) _captureCalibration;
   late final void Function(int, Pointer<Float>, Pointer<Float>) _setColorProfile;
   late final void Function(int, Pointer<Float>, Pointer<Float>, int, Pointer<Int32>) _setSensorProfile;
+  late final void Function(int, Pointer<Float>, Pointer<Float>) _setShotNoiseProfile;
   late final void Function(int) _useColorProfile;
 
   VesperNative._() {
@@ -381,6 +382,10 @@ class VesperNative {
         Void Function(Int32, Pointer<Float>, Pointer<Float>, Int32, Pointer<Int32>),
         void Function(int, Pointer<Float>, Pointer<Float>, int, Pointer<Int32>)
       >('vesper_set_sensor_profile');
+      _setShotNoiseProfile = _lib.lookupFunction<
+        Void Function(Int32, Pointer<Float>, Pointer<Float>),
+        void Function(int, Pointer<Float>, Pointer<Float>)
+      >('vesper_set_shot_noise_profile');
       _useColorProfile = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_use_color_profile');
       _loaded = true;
     } catch (_) {
@@ -805,6 +810,23 @@ class VesperNative {
       calloc.free(pi);
       calloc.free(pf);
       calloc.free(pd);
+    }
+  }
+
+  /// Shot-noise (S) correction factors per ISO of the sensor profile; empty clears.
+  void setShotNoiseProfile(List<double> isos, List<double> factors) {
+    if (!_loaded) return;
+    final n = isos.length < factors.length ? isos.length : factors.length;
+    final pi = calloc<Float>(n + 1), pf = calloc<Float>(n + 1);
+    try {
+      for (var i = 0; i < n; i++) {
+        pi[i] = isos[i];
+        pf[i] = factors[i];
+      }
+      _setShotNoiseProfile(n, pi, pf);
+    } finally {
+      calloc.free(pi);
+      calloc.free(pf);
     }
   }
 

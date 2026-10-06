@@ -100,6 +100,13 @@ def main(argv):
         assert pr["format"] == "vesper-sensor-profile/1" and len(f) == 6, (name, f)
         for iso in (50, 100, 200, 400, 800):
             assert abs(f[iso] / 2.5 - 1) < 0.1, (name, iso, f[iso])
+    # Dark + White: the shot-noise slope S is measured too (the synthetic camera reports it right: factor 1).
+    with tempfile.TemporaryDirectory() as tmp:
+        prof_path = os.path.join(tmp, "profile.json")
+        sensor.report(files, file=io.StringIO(), profile=prof_path, profile_defects=False)
+        full = json.load(open(prof_path))
+    assert full["defects"] == [] and len(full["shotNoise"]) == 6, full["shotNoise"]
+    assert all(abs(e["factor"] - 1) < 0.06 for e in full["shotNoise"]), full["shotNoise"]
     phone = json.load(open(os.path.join(d, "VSENSOR_dark_synthetic_profile.json")))
     assert {tuple(phone["defects"][i:i + 2]) for i in range(0, len(phone["defects"]), 2)} == \
         {tuple(prof["defects"][i:i + 2]) for i in range(0, len(prof["defects"]), 2)}, "phone and tool hot-pixel maps differ"

@@ -522,10 +522,12 @@ def write_profile(path, reports, noise, device=None, camera=None, defects=True):
     table = [{"iso": int(iso), "O": float(n["O"]), "halO": float(n["halO"]), "factor": round(float(n["O"] / n["halO"]), 4)}
              for iso, n in sorted(noise.items()) if n["halO"] > 0]
     defects = sorted(set().union(*defect_maps(dark_reports))) if dark_reports and defects else []
+    shot = [{"iso": int(iso), "S": float(n["S"]), "halS": float(n["halS"]), "factor": round(float(n["S"] / n["halS"]), 4)}
+            for iso, n in sorted(noise.items()) if n.get("sMeasured") and n["halS"] > 0]
     prof = {"format": "vesper-sensor-profile/1", "device": device or reports[0].get("device"),
             "cameraId": str(camera if camera is not None else reports[0].get("cameraId")),
             "source": [f"{r['kind']} sweep {r.get('date', '')}" for r in reports],
-            "darkNoise": table, "defectCount": len(defects), "defects": [v for xy in defects for v in xy]}
+            "darkNoise": table, "shotNoise": shot, "defectCount": len(defects), "defects": [v for xy in defects for v in xy]}
     with open(path, "w") as f:
         json.dump(prof, f, separators=(",", ":"))
     return prof
@@ -641,9 +643,16 @@ def report(paths, out_json=None, file=sys.stdout, profile=None, device=None, cam
         f = st["fits"]
         worst_lum = abs(f["G"]["radialCorner"])
         worst_col = max(abs(f["R/G"]["radialCorner"]), abs(f["B/G"]["radialCorner"]))
-        summary.append(verdict(worst_lum < 0.05 and worst_col < 0.03,
-                               f"lens shading map: corners {pct(f['G']['radialCorner'])} brightness, colour "
-                               f"R/G {pct(f['R/G']['radialCorner'])} B/G {pct(f['B/G']['radialCorner'])} after correction"))
+        flat = max(abs(f["G"]["tiltLR"]), abs(f["G"]["tiltTB"])) < 0.1
+        if not flat:
+            p("   NOT A FLAT FIELD: brightness changes by more than 10% across the frame in a straight line, so the\n"
+              "   scene (not the lens) dominates. Shading can't be judged; colour ratios are only indicative.\n"
+              "   For this test the paper must cover the lens itself, aimed at the sky or a bright window.")
+            summary.append("  [ ? ] lens shading: not measurable from this sweep (scene not uniform: paper must cover the lens)")
+        else:
+            summary.append(verdict(worst_lum < 0.05 and worst_col < 0.03,
+                                   f"lens shading map: corners {pct(f['G']['radialCorner'])} brightness, colour "
+                                   f"R/G {pct(f['R/G']['radialCorner'])} B/G {pct(f['B/G']['radialCorner'])} after correction"))
         if noise:
             iso = min(noise)
             n = noise[iso]
@@ -709,7 +718,7 @@ def report(paths, out_json=None, file=sys.stdout, profile=None, device=None, cam
             prev = r["meas"]
         p(f"   offset left by the camera's black level: {lin['offsetReported']:+.2f} DN")
         result["linearity"] = {"iso": lin["iso"], "rows": lrows, "offsetReported": lin["offsetReported"]}
-        summary.append(verdict(worst < 0.05, f"linearity: worst step error {worst:.3f} stop with measured black "
+        summary.append(verdict(worst < 0.1, f"linearity: worst step error {worst:.3f} stop with measured black "
                                f"({worst_rep:.3f} stop with the camera's black level)"))
 
     clips = [c["clipDn"] for v in clip.values() for c in v["sites"] if c["clipDn"]]

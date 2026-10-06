@@ -103,17 +103,22 @@ std::string gCalibrationDevice;
 std::string gCalibrationSaved;    // last written base path (reported in status)
 
 // Per-device sensor profile (assets/sensor_profiles, tools/calibration/sensor.py
-// --profile), gStateMutex: measured / HAL dark noise (O) per ISO, and the
-// static hot-pixel map in pre-correction array coordinates.
+// --profile), gStateMutex: measured / HAL dark noise (O) and shot-noise slope
+// (S) per ISO, and the static hot-pixel map in pre-correction array coordinates.
 struct SensorProfile {
-    std::vector<float> isos, noiseFactors;
+    std::vector<float> isos, noiseFactors;          // O
+    std::vector<float> shotIsos, shotFactors;       // S
     std::vector<int32_t> defects;   // x, y pairs
     int version = 0;
 };
 SensorProfile gSensorProfile;
 
-float sensorNoiseFactorLocked(int iso) {
-    return static_cast<float>(noiseFactorAt(gSensorProfile.isos, gSensorProfile.noiseFactors, iso));
+struct NoiseFactors { float s = 1.0f, o = 1.0f; };
+
+NoiseFactors sensorNoiseFactorLocked(int iso) {
+    const SensorProfile& p = gSensorProfile;
+    return {static_cast<float>(noiseFactorAt(p.shotIsos, p.shotFactors, iso)),
+            static_cast<float>(noiseFactorAt(p.isos, p.noiseFactors, iso))};
 }
 
 std::string jsonEscape(const std::string& in);
@@ -141,14 +146,15 @@ std::string jsonArray(const float* v, size_t n) {
 
 // Noise model the GPU passes use (clean / align / render): SENSOR_NOISE_PROFILE
 // averaged over channels, with fallbacks where the HAL omits it or reports a
-// non-positive value; O (the dark noise) times the sensor profile's measured
-// correction for this ISO (Pixel 10: the HAL's O is 2-2.7x too low from ISO ~960).
-void engineNoise(const CaptureMetadata& m, float oFactor, float& s, float& o) {
-    s = m.noiseS > 0 ? m.noiseS : 2e-4f; // typical phone sensor at base ISO if the HAL omits it
-    o = (m.noiseO > 0 ? m.noiseO : 2e-6f) * oFactor;
+// non-positive value; both terms times the sensor profile's measured correction
+// for this ISO (Pixel 10: the HAL's S is ~2.3x too low at every ISO, its O
+// 2-2.7x too low from ISO ~960; sweeps of 5/6 Oct).
+void engineNoise(const CaptureMetadata& m, NoiseFactors f, float& s, float& o) {
+    s = (m.noiseS > 0 ? m.noiseS : 2e-4f) * f.s; // typical phone sensor at base ISO if the HAL omits it
+    o = (m.noiseO > 0 ? m.noiseO : 2e-6f) * f.o;
 }
 
-float sensorNoiseFactor(int iso) {
+NoiseFactors sensorNoiseFactor(int iso) {
     std::lock_guard<std::mutex> lk(gStateMutex);
     return sensorNoiseFactorLocked(iso);
 }
@@ -1318,7 +1324,7 @@ void onFrame(const RawFrame& f) {
     if ((frameIndex & 3) == 3 && gScopesEnabled) computeScopes(f);
 
     Settings s;
-    float noiseFactor;
+    NoiseFactors noiseFactor;
     // Static hot-pixel map in this readout's raw coordinates (camera thread only).
     static std::vector<int32_t> defectsRaw;
     static int defectsVersion = -1, defectsW = 0, defectsH = 0;
@@ -2159,6 +2165,22 @@ EXPORT void vesper_set_sensor_profile(int32_t nIso, const float* isos, const flo
         hi = *std::max_element(p.noiseFactors.begin(), p.noiseFactors.end());
     }
     LOGI("Sensor profile: dark-noise correction at %d ISOs (x%.2f..x%.2f), %d hot pixels mapped", nIso, lo, hi, nDefects);
+}
+
+// Shot-noise (S) correction of the same profile: measured / HAL S at `n` ISOs
+// (from White sweeps, tools/calibration/sensor.py). n = 0 clears.
+EXPORT void vesper_set_shot_noise_profile(int32_t n, const float* isos, const float* factors) {
+    std::lock_guard<std::mutex> lk(gStateMutex);
+    SensorProfile& p = gSensorProfile;
+    p.shotIsos.assign(isos, isos + std::max(n, 0));
+    p.shotFactors.assign(factors, factors + std::max(n, 0));
+    for (float& f : p.shotFactors) f = std::clamp(f, 0.25f, 8.0f);
+    float lo = 1, hi = 1;
+    if (!p.shotFactors.empty()) {
+        lo = *std::min_element(p.shotFactors.begin(), p.shotFactors.end());
+        hi = *std::max_element(p.shotFactors.begin(), p.shotFactors.end());
+    }
+    LOGI("Sensor profile: shot-noise correction at %d ISOs (x%.2f..x%.2f)", n, lo, hi);
 }
 
 // Switch between the chart profile (if loaded) and the factory calibration.
