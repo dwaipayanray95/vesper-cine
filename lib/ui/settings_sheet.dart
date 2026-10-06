@@ -59,7 +59,7 @@ class SettingsScreen extends StatefulWidget {
     super.key,
     required this.codec,
     required this.onCodecChanged,
-    this.recordQuality = 0,
+    this.recordQuality = 1,
     this.fps = 24,
     this.onRecordQualityChanged,
     required this.cropMode,
@@ -331,7 +331,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     ),
     _settingRow(
       'Recording Quality',
-      '${['Standard', 'High: 2x bitrate, keeps fine grain and texture between keyframes', 'Max: 3x bitrate'][recordQuality]} · $_bitrateLabel',
+      '${['Standard: in-between frames lose ~25% of the fine detail', 'High (recommended): keeps ~90% of the detail between keyframes', 'Max: 3x bitrate (use HEVC: this phone\'s AV1 encoder is rated to 60 Mb/s)'][recordQuality]} · $_bitrateLabel',
       Segmented(
         options: const ['STANDARD', 'HIGH', 'MAX'],
         selected: recordQuality,

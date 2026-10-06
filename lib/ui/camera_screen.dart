@@ -143,7 +143,9 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   bool _nrAlignment = true;
   Offset? _focusMark; // last tap-to-focus point (normalised), shown briefly
   int _codec = 0; // 0 HEVC, 1 AV1
-  int _recordQuality = 0; // 0 standard, 1 high (2x bitrate), 2 max (3x)
+  // 0 standard, 1 high (2x bitrate), 2 max (3x). HIGH by default since 0.19.0:
+  // in-between frames kept 91% of the keyframes' detail vs 73-79% at standard (6 Oct clips).
+  int _recordQuality = 1;
   int _aeGen = 0; // bumps per AE request so an older run stops refining
   ScopeMode _scopeMode = ScopeMode.off;
   Scopes? _scopes;
@@ -921,6 +923,8 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   void _applySensorProfile() {
     List<double> col(List t, String k) => [for (final e in t.cast<Map<String, dynamic>>()) (e[k] as num).toDouble()];
     final dark = _calibratedNoise ? _darkNoise : const [], shot = _calibratedNoise ? _shotNoise : const [];
+    _engine.log('Calibrated noise model: ${_calibratedNoise ? 'ON' : 'OFF'} (tables: dark ${_darkNoise.length}, '
+        'shot ${_shotNoise.length} ISOs; hot pixels ${_defects.length ~/ 2})', tag: 'Vesper_UI');
     _engine.setSensorProfile(col(dark, 'iso'), col(dark, 'factor'), _defects.map((e) => (e as num).toInt()).toList());
     _engine.setShotNoiseProfile(col(shot, 'iso'), col(shot, 'factor'));
   }

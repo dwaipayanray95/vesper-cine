@@ -7,6 +7,10 @@ class ChangelogEntry {
 }
 
 const changelog = <ChangelogEntry>[
+  ChangelogEntry('0.19.0', [
+    'Recording Quality is HIGH by default: measured on your clips, the frames between keyframes now keep about 90% of the fine detail instead of 75%, so sharpness no longer "breathes" once a second',
+    'For MAX quality use HEVC: on the Pixel 10 the HEVC encoder goes up to 240 Mb/s, the AV1 encoder is rated to 60 Mb/s',
+  ]),
   ChangelogEntry('0.18.0', [
     'Recording Quality (Settings › Recording): STANDARD, HIGH (2x bitrate) or MAX (3x). At standard bitrate the encoder kept 35-45% less fine detail in the frames between its once-a-second keyframes (sharpness "breathing" in your 6 Oct clips)',
   ]),
