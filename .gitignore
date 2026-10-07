@@ -43,3 +43,8 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Private Play upload key must never be committed
+upload*.jks
+*.keystore
+key.properties

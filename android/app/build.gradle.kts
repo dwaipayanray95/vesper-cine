@@ -42,9 +42,12 @@ android {
     // One fixed key for every build (local and GitHub Actions), so a new APK
     // installs over the previous one instead of failing with a signature
     // mismatch (each CI machine otherwise generates its own random debug key).
-    // It's a tester key committed to the repo on purpose; a Play Store release
-    // would need a private key kept out of the repository. Redefining the
+    // It's a tester key committed to the repo on purpose. Redefining the
     // standard "debug" config covers debug, profile and release builds.
+    // The Play Store bundle is signed with a separate private "upload" key
+    // that only exists as GitHub Actions secrets (see docs/PLAY_RELEASE.md):
+    // it is used when VESPER_UPLOAD_KEYSTORE is set, otherwise release builds
+    // fall back to the tester key so local builds keep working.
     signingConfigs {
         getByName("debug") {
             storeFile = file("vesper-dev.jks")
@@ -52,11 +55,21 @@ android {
             keyAlias = "vesper"
             keyPassword = "vesperdev"
         }
+        val uploadStore = System.getenv("VESPER_UPLOAD_KEYSTORE")
+        if (!uploadStore.isNullOrEmpty()) {
+            create("upload") {
+                storeFile = file(uploadStore)
+                storePassword = System.getenv("VESPER_UPLOAD_STORE_PASSWORD")
+                keyAlias = System.getenv("VESPER_UPLOAD_KEY_ALIAS")
+                keyPassword = System.getenv("VESPER_UPLOAD_KEY_PASSWORD")
+            }
+        }
     }
 
     buildTypes {
         release {
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.findByName("upload")
+                ?: signingConfigs.getByName("debug")
         }
     }
 }

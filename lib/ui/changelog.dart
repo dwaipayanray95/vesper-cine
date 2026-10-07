@@ -7,6 +7,9 @@ class ChangelogEntry {
 }
 
 const changelog = <ChangelogEntry>[
+  ChangelogEntry('0.22.1', [
+    'Behind the scenes: Play Store release bundle with a private signing key (no change in the app)',
+  ]),
   ChangelogEntry('0.22.0', [
     'New app identity for the Play Store (com.theawesomeray.vespercine): this installs as a separate app next to the old one. Uninstall the old Vesper Cine after copying any clips you want; run Hot Pixel Calibration again in the new app',
   ]),
