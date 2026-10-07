@@ -80,7 +80,7 @@ class SettingsScreen extends StatefulWidget {
     this.sharpening = 1,
     this.oversampling = true,
     this.gpuGuard = true,
-    this.calibratedNoise = true,
+    this.calibratedNoise = false,
     this.onCalibratedNoiseChanged,
     required this.onGpuGuardChanged,
     required this.onOversamplingChanged,
@@ -557,8 +557,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _settingRow(
       'Calibrated Noise Model',
       calibratedNoise
-          ? 'ON: noise reduction, alignment and sharpening use the measured sensor noise (sensor calibration)'
-          : 'OFF: they use the camera\'s own noise figure (lower than measured on Pixel 10). For comparing footage',
+          ? 'ON: NR and sharpening also use the measured midtone noise: a little smoother, slightly less fine texture'
+          : 'OFF (default): the camera\'s own midtone noise figure, more texture. Shadows / high ISO always use the measured noise',
       Segmented(
         options: const ['ON', 'OFF'],
         selected: calibratedNoise ? 0 : 1,

@@ -137,7 +137,10 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   bool _faceDetect = false;
   bool _lensCorrection = true;
   bool _hotPixelFix = true;
-  bool _calibratedNoise = true; // Developer: noise model from the sensor profile (off = the camera's own)
+  // Developer: also use the measured midtone/highlight (shot) noise. OFF by default since 0.20.0:
+  // static A/B of 7 Oct (daylight, ISO 30) showed no grain gain and 2-6% less fine texture.
+  // The measured shadow / high-ISO (dark) noise is always used.
+  bool _calibratedNoise = false;
   double _temporalNr = 0; // 0 off, 0.5 low, 0.7 medium, 0.85 high
   double _chromaNr = 0; // 0 off, 0.5 low, 1 high
   bool _nrAlignment = true;
@@ -922,8 +925,8 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
 
   void _applySensorProfile() {
     List<double> col(List t, String k) => [for (final e in t.cast<Map<String, dynamic>>()) (e[k] as num).toDouble()];
-    final dark = _calibratedNoise ? _darkNoise : const [], shot = _calibratedNoise ? _shotNoise : const [];
-    _engine.log('Calibrated noise model: ${_calibratedNoise ? 'ON' : 'OFF'} (tables: dark ${_darkNoise.length}, '
+    final dark = _darkNoise, shot = _calibratedNoise ? _shotNoise : const [];
+    _engine.log('Calibrated noise model (midtones): ${_calibratedNoise ? 'ON' : 'OFF'} (tables: dark ${_darkNoise.length}, '
         'shot ${_shotNoise.length} ISOs; hot pixels ${_defects.length ~/ 2})', tag: 'Vesper_UI');
     _engine.setSensorProfile(col(dark, 'iso'), col(dark, 'factor'), _defects.map((e) => (e as num).toInt()).toList());
     _engine.setShotNoiseProfile(col(shot, 'iso'), col(shot, 'factor'));
@@ -1800,8 +1803,10 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                         const SizedBox(width: 8),
 
                         // Hardware / thermal warning
-                        if (heat >= 1) ...[
-                          _badge(const ['', 'WARM', 'HOT', 'VERY HOT'][heat.clamp(0, 3)],
+                        // Level 1 (forecast >= 0.8) only stops paused stages from coming back,
+                        // so it shows nothing; the badge appears once processing is stepped down.
+                        if (heat >= 2) ...[
+                          _badge(const ['', '', 'HOT', 'VERY HOT'][heat.clamp(0, 3)],
                               heat >= 3 ? Colors.redAccent : Colors.orangeAccent),
                           const SizedBox(width: 6),
                         ],
