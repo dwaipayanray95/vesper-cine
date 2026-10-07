@@ -7,6 +7,9 @@ class ChangelogEntry {
 }
 
 const changelog = <ChangelogEntry>[
+  ChangelogEntry('0.26.3', [
+    'Crash reports now go to the real Vesper Cine Firebase project (when Send crash reports is on)',
+  ]),
   ChangelogEntry('0.26.0', [
     'Settings › Info › Legal: privacy policy link, open-source licences and copyright',
   ]),

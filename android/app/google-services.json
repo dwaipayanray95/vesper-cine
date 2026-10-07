@@ -1,18 +1,28 @@
 {
   "project_info": {
-    "project_number": "000000000000",
-    "project_id": "vesper-placeholder",
-    "storage_bucket": "vesper-placeholder.appspot.com"
+    "project_number": "937019887430",
+    "project_id": "vesper-cine",
+    "storage_bucket": "vesper-cine.firebasestorage.app"
   },
   "client": [
     {
       "client_info": {
-        "mobilesdk_app_id": "1:000000000000:android:0000000000000000000000",
-        "android_client_info": { "package_name": "com.theawesomeray.vespercine" }
+        "mobilesdk_app_id": "1:937019887430:android:268ce75d3e2c1de06bdf47",
+        "android_client_info": {
+          "package_name": "com.theawesomeray.vespercine"
+        }
       },
       "oauth_client": [],
-      "api_key": [ { "current_key": "placeholder" } ],
-      "services": { "appinvite_service": { "other_platform_oauth_client": [] } }
+      "api_key": [
+        {
+          "current_key": "AIzaSyDgWi745h2t6RYVdaFxiiipbir0UzC2txQ"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
     }
   ],
   "configuration_version": "1"
