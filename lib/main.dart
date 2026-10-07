@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 import 'services/crash_reporting.dart';
+import 'services/pro_service.dart';
 import 'ui/camera_screen.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await CrashReporting.init();
+  ProService.instance.init(); // not awaited: the store may be slow
   runApp(const VesperCineApp());
 }
 

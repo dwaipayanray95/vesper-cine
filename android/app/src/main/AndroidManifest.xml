@@ -38,6 +38,11 @@
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <!-- Crash reports are sent only when the user's switch (Settings > Info)
              is on: Dart enables collection at start-up (crash_reporting.dart). -->
+        <!-- AdMob app id: Google's public TEST id. Replace with the real one from
+             admob.google.com before real ads are shown (docs/PLAY_RELEASE.md). -->
+        <meta-data
+            android:name="com.google.android.gms.ads.APPLICATION_ID"
+            android:value="ca-app-pub-3940256099942544~3347511713" />
         <meta-data
             android:name="firebase_crashlytics_collection_enabled"
             android:value="false" />

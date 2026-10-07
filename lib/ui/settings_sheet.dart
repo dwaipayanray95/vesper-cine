@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../build_flags.dart';
 import '../services/crash_reporting.dart';
+import '../services/pro_service.dart';
 import '../services/vesper_native.dart';
 import 'app_log_screen.dart';
 import 'changelog.dart';
@@ -159,6 +160,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
     VesperNative.instance.deviceInfo().then((m) {
       if (mounted) setState(() => _deviceInfo = m);
     });
+    ProService.instance.addListener(_proChanged);
+    ProService.instance.privacyOptionsRequired().then((v) {
+      if (mounted) setState(() => _adChoices = v);
+    }, onError: (_) {});
+  }
+
+  bool _adChoices = false;
+
+  void _proChanged() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    ProService.instance.removeListener(_proChanged);
+    super.dispose();
   }
 
   String get _version {
@@ -179,6 +196,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
         '${tapLocks ? 'AF-L' : 'AF-C'} · ${(profileAvailable && useProfile) ? 'CHART' : 'FACTORY'}'
             '${widget.isoAnalysisSummary.isEmpty ? '' : ' · ISO ★'}',
         _exposure),
+    _Category('Vesper Pro', Icons.workspace_premium_outlined,
+        ProService.instance.isPro ? 'PRO · UNLIMITED CLIPS' : '${ProService.instance.clipsLeft} FREE CLIPS LEFT', _pro),
     if (kDevTools) _Category('Developer', Icons.code, 'GUARD ${gpuGuard ? 'AUTO' : 'OFF'} · LOG', _developer),
     _Category('Info', Icons.info_outline, _version.isEmpty ? 'VERSION · HELP' : 'v$_version', _info),
   ];
@@ -615,6 +634,51 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _button('RUN', widget.onSensorSweep == null ? null : () => widget.onSensorSweep!(false), icon: Icons.light_mode),
     ),
   ];
+
+  List<Widget> _pro() {
+    final pro = ProService.instance;
+    return [
+      _sectionHeader('YOUR PLAN'),
+      _infoLine('Plan', pro.isPro ? 'Pro (unlocked)' : 'Free'),
+      if (!pro.isPro) _infoLine('Free clips', '${pro.clipsLeft} of ${ProService.freeClips} left'),
+      const SizedBox(height: 6),
+      _note('Every camera feature is free. The free plan records ${ProService.freeClips} clips at a time: when they are used up, '
+          'a short ad gives you ${ProService.freeClips} more. Pro removes the limit and all ads. '
+          'A clip that is already recording is never stopped.'),
+      const SizedBox(height: 10),
+      if (!pro.isPro) ...[
+        _settingRow(
+          'Unlock Pro',
+          pro.storeAvailable
+              ? 'One-time purchase, ${pro.price}. Unlimited clips, no ads, on every phone with this Google account'
+              : 'One-time purchase. Available in the Google Play version of the app',
+          _button('UNLOCK', pro.busy ? null : pro.buy, icon: Icons.lock_open),
+        ),
+        _settingRow(
+          'Restore purchase',
+          'Already bought Pro (new phone or reinstall)? Get it back from your Google account',
+          _button('RESTORE', pro.busy ? null : pro.restore, icon: Icons.restore),
+        ),
+      ],
+      if (pro.message.isNotEmpty) _note(pro.message),
+      if (_adChoices)
+        _settingRow(
+          'Ad choices',
+          'Change your consent for personalised ads',
+          _button('OPEN', ProService.instance.showPrivacyOptions, icon: Icons.privacy_tip_outlined),
+        ),
+      if (kDevTools)
+        _settingRow(
+          'Developer: pretend Pro',
+          'Sideloaded test builds cannot buy; this unlocks the clip limit for testing',
+          Segmented(
+            options: const ['OFF', 'ON'],
+            selected: pro.debugPro ? 1 : 0,
+            onSelected: (i) => pro.debugPro = i == 1,
+          ),
+        ),
+    ];
+  }
 
   List<Widget> _info() {
     final model = _deviceInfo?['model'] as String? ?? '';

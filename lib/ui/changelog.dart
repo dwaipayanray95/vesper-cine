@@ -7,6 +7,10 @@ class ChangelogEntry {
 }
 
 const changelog = <ChangelogEntry>[
+  ChangelogEntry('0.24.0', [
+    'Vesper Pro (Settings › Vesper Pro): every camera feature stays free. The free plan records 5 clips, then a short ad gives you 5 more; Pro is a one-time purchase with unlimited clips and no ads, restorable on any phone with your Google account',
+    'A clip that is already recording is never stopped or interrupted by any of this',
+  ]),
   ChangelogEntry('0.23.0', [
     'Crash reports (Settings › Info › Send crash reports, on by default, release builds): if the app crashes, anonymous technical details are sent so it can be fixed without anyone copying logs. Never footage, location or personal data',
   ]),

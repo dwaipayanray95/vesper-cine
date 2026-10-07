@@ -11,15 +11,16 @@ plugins {
 // it with the file downloaded from the real Firebase project. Only then are
 // mapping / native symbol files uploaded (the upload would fail otherwise).
 val firebaseIsReal = !file("google-services.json").readText().contains("vesper-placeholder")
-firebaseCrashlytics {
-    mappingFileUploadEnabled = firebaseIsReal
-    nativeSymbolUploadEnabled = firebaseIsReal
-}
 
 android {
     namespace = "com.theawesomeray.vespercine"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
+
+    firebaseCrashlytics {
+        mappingFileUploadEnabled = firebaseIsReal
+        nativeSymbolUploadEnabled = firebaseIsReal
+    }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../build_flags.dart';
+import '../services/pro_service.dart';
 import '../services/vesper_native.dart';
 import 'cine_control_tile.dart';
 import 'focus_panel.dart';
@@ -1054,6 +1055,10 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       await _finishRecording('user');
       return;
     }
+    // Free clips used up: ad or Pro first. Only ever checked here, before a
+    // take starts; a take in progress is never interrupted.
+    if (!ProService.instance.canRecord && !await _askForMoreClips()) return;
+    if (!mounted) return;
     HapticFeedback.mediumImpact();
     RecordingFile? file;
     try {
@@ -1068,10 +1073,49 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       return;
     }
     setState(() => _recordingFile = file);
+    ProService.instance.noteClipStarted();
     _engine.lockRotation(true); // a clip never flips orientation mid-take
     _overloadWarned = false;
     _heatWarned = false;
     _armSaver();
+  }
+
+  // The free plan's clips are used up: offer an ad (5 more clips) or Pro.
+  // Returns true when recording may start now.
+  Future<bool> _askForMoreClips() async {
+    final pro = ProService.instance;
+    unawaited(pro.preloadAd());
+    final choice = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF14171D),
+        title: const Text('Free clips used up', style: TextStyle(color: Colors.white, fontSize: 18)),
+        content: Text(
+          'You have recorded ${ProService.freeClips} clips on the free plan. Watch a short ad for ${ProService.freeClips} more, '
+          'or unlock Pro for unlimited clips and no ads${pro.price == null ? '' : ' (one-time ${pro.price})'}.',
+          style: const TextStyle(color: Color(0xFFB5BDC7), fontSize: 13.5, height: 1.4),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('NOT NOW')),
+          TextButton(onPressed: () => Navigator.pop(ctx, 'pro'), child: const Text('GET PRO')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, 'ad'), child: const Text('WATCH AD')),
+        ],
+      ),
+    );
+    if (!mounted || choice == null) return false;
+    if (choice == 'pro') {
+      await pro.buy();
+      if (mounted && pro.message.isNotEmpty) _toast(pro.message);
+      return false; // the purchase finishes in Google's sheet; press record again afterwards
+    }
+    final ok = await pro.watchAdForClips();
+    if (!mounted) return false;
+    if (!ok && pro.message.isNotEmpty) _toast(pro.message);
+    // The ad is its own screen: the camera was closed and is reopening.
+    for (var i = 0; i < 50 && ok && !_streaming && mounted; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+    return ok && _streaming;
   }
 
   // --- Recording power saver ---------------------------------------------
