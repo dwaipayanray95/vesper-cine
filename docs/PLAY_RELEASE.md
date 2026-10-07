@@ -33,7 +33,7 @@ You need Java's `keytool`. It comes with Android Studio (`<Android Studio>/jbr/b
 ## 3. Build the Play bundle
 
 GitHub → **Actions** → **Build arm64 APK** → **Run workflow**. The APK (dev key, so test APKs still install over each other) is always built. **Tick `build_aab`** to also build the Play bundle `.aab`, signed with the private upload key. `build_mode` and `dev_tools` only affect the APK; the bundle is always release, no developer tools. If you tick it before the four upload-key secrets exist, the bundle job fails with a message saying which one is missing (the APK is unaffected).
-When it finishes, open the run, scroll to **Artifacts**, download `vesper-cine-v…-build….aab` (it's a zip containing the .aab). The run summary shows the certificate fingerprint of the signing key. The APK is published as a GitHub Release as before; the bundle stays a private artifact.
+When it finishes, go to the repo's **Releases** page and download `vesper-cine-v…-build….aab` from the *(Play bundle)* release. The run summary shows the certificate fingerprint of the signing key. 
 
 ## 4. Create the app in Play Console (one time)
 

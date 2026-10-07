@@ -181,9 +181,8 @@ jobs:
             Build mode: `${{ inputs.build_mode }}` · arm64-v8a only.
 
   # Play Store bundle, built next to the APK when the build_aab box is ticked. Signed with the private upload key from the repository
-  # secrets (never committed). The .aab is kept as a private workflow artifact
-  # (not a public GitHub Release): download it from the run page and upload it
-  # to Play Console. Always release mode, no developer tools.
+  # secrets (never committed). The .aab is published on the Releases page (pre-release):
+  # download it there and upload it to Play Console. Always release mode, no developer tools.
   bundle:
     name: Build Play Store bundle (.aab)
     if: ${{ inputs.build_aab }}
@@ -278,6 +277,7 @@ jobs:
         id: aab
         run: |
           RAW=$(grep '^version:' pubspec.yaml | sed 's/version: *//')
+          echo "ver=${RAW%+*}" >> "$GITHUB_OUTPUT"
           NAME="vesper-cine-v${RAW%+*}-build${RAW#*+}.aab"
           mv build/app/outputs/bundle/release/app-release.aab "build/app/outputs/bundle/release/$NAME"
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
@@ -286,9 +286,15 @@ jobs:
           # lets you check the bundle was signed with the upload key.
           keytool -printcert -jarfile "build/app/outputs/bundle/release/$NAME" | grep -E 'Owner|SHA256' | tee -a "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload bundle (private artifact)
-        uses: actions/upload-artifact@v4
+      # Published on the Releases page (like the APK) so it downloads as a plain
+      # .aab. Marked prerelease so it never looks like the "latest" app download.
+      - name: Publish GitHub Release (bundle)
+        uses: softprops/action-gh-release@v2
         with:
-          name: ${{ steps.aab.outputs.name }}
-          path: ${{ steps.aab.outputs.path }}
-          retention-days: 30
+          tag_name: v${{ steps.aab.outputs.ver }}-bundle-${{ github.run_number }}
+          name: "Vesper Cine v${{ steps.aab.outputs.ver }} (Play bundle)"
+          prerelease: true
+          files: ${{ steps.aab.outputs.path }}
+          body: |
+            Play Store app bundle (.aab) from commit ${{ github.sha }}, signed with the upload key.
+            Upload it in Play Console; it is not installable on a phone directly.
