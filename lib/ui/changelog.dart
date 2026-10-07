@@ -7,6 +7,9 @@ class ChangelogEntry {
 }
 
 const changelog = <ChangelogEntry>[
+  ChangelogEntry('0.24.2', [
+    'Behind the scenes: developer notes for the Play release (no change in the app)',
+  ]),
   ChangelogEntry('0.24.1', [
     'Behind the scenes: privacy policy and Play Store release documents, ad settings now come from the build configuration (no change in the app)',
   ]),

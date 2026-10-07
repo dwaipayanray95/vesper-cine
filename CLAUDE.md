@@ -79,6 +79,9 @@ Agents doing design/UI work must not edit `android/**`, `lib/services/vesper_nat
 - `kDevTools` (`lib/build_flags.dart`): developer features (Settings › Developer: GPU guard switch, App log, GPU benchmark, calibration frame / sensor calibration sweeps) in debug/profile builds, hidden in release; force with `--dart-define=VESPER_DEV_TOOLS=true` (workflow input `dev_tools`). Gate new internal/diagnostic tools behind it. Release builds always run the GPU guard on AUTO.
 - All builds are signed with the shared tester key `android/app/vesper-dev.jks` so APKs install over each other.
 
+## Play release (0.22–0.24)
+Package `com.theawesomeray.vespercine`. Step-by-step owner guide, Data safety, store text: `docs/PLAY_RELEASE.md`; privacy policy `docs/privacy-policy.md`. Play bundle = workflow input `build_aab` (upload key from GitHub secrets `VESPER_UPLOAD_*`; APKs still use the dev key). Crashlytics (`lib/services/crash_reporting.dart`, placeholder `android/app/google-services.json` until the owner uploads the real one). Pro/ads: `lib/services/pro_service.dart` (product `vesper_pro`, 5 free clips then a rewarded ad; only checked at record start); AdMob ids via repo variables `VESPER_ADMOB_APP_ID` / `VESPER_REWARDED_AD_UNIT` (Google test ids otherwise). I can't build Android in the sandbox: verify Gradle changes by dispatching the workflow on the branch.
+
 ## Next up
 Owner's priorities (7 Oct): 1. public release (Play Store); 2. other phones: self-calibration in the app + per-model profiles that load automatically; 3. monetisation; 4. 4K/UHD and Gyroflow.
 - 4K/UHD output (engine `resolution` setting exists but upsamples the quad image; not in the UI). Needs a full-res path and GPU headroom — get a fresh on-device benchmark first.
