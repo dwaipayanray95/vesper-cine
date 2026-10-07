@@ -1,0 +1,49 @@
+name: Checks
+
+# Runs on every push to main, on pull requests, and by hand. No Android build
+# here (that stays the manual "Build arm64 APK"): this is the fast safety net
+# that catches broken Dart, broken native code, broken shaders, failing tests,
+# licence problems and known vulnerabilities in dependencies.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: Native tests (colour science, GPU pipeline, calibration, ...)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install test tools (lavapipe software Vulkan, glslang)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq g++ glslang-tools libvulkan-dev mesa-vulkan-drivers python3-numpy
+      - name: Run test/native/run_tests.sh
+        run: |
+          test/native/run_tests.sh 2>&1 | tee native.log
+      # run_tests.sh skips the GPU test silently when Vulkan is missing: make
+      # that a failure here (see CLAUDE.md).
+      - name: The GPU test really ran
+        run: grep -q "all GPU pipeline tests passed" native.log
+
+  dart:
+    name: Dart analyze, tests, dependencies and licences
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - name: flutter analyze
+        run: flutter analyze
+      - name: flutter test
+        run: flutter test
+      - name: Licence + vulnerability scan of the Dart packages
+        run: python3 tools/ci/dependency_check.py

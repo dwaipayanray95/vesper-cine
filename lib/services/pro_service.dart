@@ -76,6 +76,24 @@ class ProService extends ChangeNotifier {
   /// Last purchase / ad message for the Pro page.
   String get message => _message;
 
+  /// Tests only: grants the ad pass without showing an ad.
+  @visibleForTesting
+  Future<void> debugGrantPass() async {
+    _passLeft = proPassClips;
+    await _prefs?.setInt(_kPass, _passLeft);
+    notifyListeners();
+  }
+
+  /// Tests only: back to a fresh free install.
+  @visibleForTesting
+  void debugReset() {
+    _isPro = false;
+    _clipsUsed = 0;
+    _passLeft = 0;
+    _debugPro = false;
+    _prefs = null;
+  }
+
   /// Developer builds: pretend Pro (sideloaded APKs cannot buy).
   bool get debugPro => _debugPro;
   set debugPro(bool v) {
@@ -225,8 +243,12 @@ class ProService extends ChangeNotifier {
 
   Future<void> showPrivacyOptions() => ConsentForm.showPrivacyOptionsForm((_) {});
 
+  /// Tests switch ads off (no ad plugin in the test environment).
+  @visibleForTesting
+  static bool adsEnabled = true;
+
   Future<void> preloadAd() async {
-    if (_ad != null || _adLoading || isPro) return;
+    if (!adsEnabled || _ad != null || _adLoading || isPro) return;
     _adLoading = true;
     try {
       if (!await _ensureConsent()) return;

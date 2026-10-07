@@ -65,11 +65,10 @@ Until step 4 the bundle shows Google's **test ads** (safe, no revenue). The work
 2. **Monetize with Play → Products → One-time products → Create**: Product ID **`vesper_pro`** (exact), name *Vesper Pro*, description *Unlimited clips, no ads. One-time purchase.* Set the **price** (default country, then *Edit prices* for other countries; Play converts automatically and you can override per country). Activate it.
 3. **Testing purchases:** Play Console → *Settings → License testing* → add your testers' Gmail addresses. They can then buy Pro on the closed-test build without being charged. Purchases only work for builds installed **from Google Play** (internal/closed test link), not for sideloaded APKs.
 
-## 6. Privacy policy on GitHub Pages
-1. Edit `docs/privacy-policy.md`: fill in `[YOUR NAME / STUDIO]` and `[YOUR CONTACT EMAIL]` (a real, monitored address; Play checks).
-2. GitHub → repo **Settings → Pages** → Source: *Deploy from a branch*, Branch `main`, folder **/docs** → Save.
-3. After a minute the policy is at `https://dwaipayanray95.github.io/vesper-cine/privacy-policy` (use exactly the address Pages shows). That URL goes into Play Console *App content → Privacy policy*.
-Note: the Pages site is public, and so is the repo's `docs/` folder.
+## 6. Privacy policy
+The policy is hosted at **http://vesper.theawesomeray.com/privacy.html** (your own site). That address goes into Play Console → *App content → Privacy policy*, and the app links to it from Settings › Info › Legal.
+- Play prefers **https**: if you can serve the page at `https://vesper.theawesomeray.com/privacy.html`, use that address in Play (then tell me and I'll change the in-app link too).
+- The page must say what `docs/privacy-policy.md` says (that file is the draft text to paste; fill in your name and contact email). Whenever the app starts using new data (a new SDK), update the page and the Data safety form.
 
 ## 7. Play Console "Data safety" answers (copy these)
 

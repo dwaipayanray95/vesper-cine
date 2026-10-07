@@ -7,6 +7,9 @@ class ChangelogEntry {
 }
 
 const changelog = <ChangelogEntry>[
+  ChangelogEntry('0.26.0', [
+    'Settings › Info › Legal: privacy policy link, open-source licences and copyright',
+  ]),
   ChangelogEntry('0.25.0', [
     'Free and Pro: 50 / 60 fps, open gate (4:3) recording, HIGH / MAX recording quality, HIGH detail, HQ oversampling, noise reduction above LOW and Native ISO Analysis are now Pro (locked options show a lock). Open gate and 50 / 60 fps still preview for free; recording needs Pro',
     'Not ready to buy? Pick a Pro feature and watch one ad: every Pro feature is unlocked for your next 3 clips',

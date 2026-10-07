@@ -155,30 +155,14 @@ jobs:
           echo "path=$DEST" >> "$GITHUB_OUTPUT"
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
 
-      # Published as a GitHub Release rather than a workflow artifact so the
-      # APK downloads as a plain .apk file with no zip wrapper. release
-      # builds publish as a normal (non-prerelease) release; debug/profile
-      # builds are marked prerelease since they're sideload/test builds, not
-      # something meant to look like a finished build.
-      - name: Determine prerelease flag
-        id: prerelease
-        run: |
-          if [ "${{ inputs.build_mode }}" = "release" ]; then
-            echo "value=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "value=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+      # Handed to the "release" job below, which publishes the APK (and the
+      # bundle, if built) together in ONE release.
+      - name: Hand the APK to the release job
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: v${{ steps.version.outputs.name }}-${{ inputs.build_mode }}-${{ github.run_number }}
-          name: "Vesper Cine v${{ steps.version.outputs.name }} (${{ inputs.build_mode }})"
-          prerelease: ${{ steps.prerelease.outputs.value }}
-          files: ${{ steps.apk.outputs.path }}
-          body: |
-            Manually triggered build from commit ${{ github.sha }}.
-            Build mode: `${{ inputs.build_mode }}` · arm64-v8a only.
+          name: apk
+          path: ${{ steps.apk.outputs.path }}
+          retention-days: 1
 
   # Play Store bundle, built next to the APK when the build_aab box is ticked. Signed with the private upload key from the repository
   # secrets (never committed). The .aab is published on the Releases page (pre-release):
@@ -286,15 +270,50 @@ jobs:
           # lets you check the bundle was signed with the upload key.
           keytool -printcert -jarfile "build/app/outputs/bundle/release/$NAME" | grep -E 'Owner|SHA256' | tee -a "$GITHUB_STEP_SUMMARY"
 
-      # Published on the Releases page (like the APK) so it downloads as a plain
-      # .aab. Marked prerelease so it never looks like the "latest" app download.
-      - name: Publish GitHub Release (bundle)
+      - name: Hand the bundle to the release job
+        uses: actions/upload-artifact@v4
+        with:
+          name: aab
+          path: ${{ steps.aab.outputs.path }}
+          retention-days: 1
+
+  # One release per app version: the tag is the pubspec.yaml version (for
+  # example v0.25.3+93), holding the APK and, when build_aab was ticked, the
+  # Play bundle. Building again at the same version adds / replaces files.
+  release:
+    name: Publish release
+    needs: [build, bundle]
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read app version
+        id: v
+        run: |
+          RAW=$(grep '^version:' pubspec.yaml | sed 's/version: *//')
+          echo "full=$RAW" >> "$GITHUB_OUTPUT"
+          echo "name=${RAW%+*}" >> "$GITHUB_OUTPUT"
+
+      - name: Download the build outputs
+        uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+
+      - name: List files
+        run: ls -lh out
+
+      # release-mode APK builds publish as a normal release; debug/profile
+      # builds are marked prerelease (sideload / test builds).
+      - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.aab.outputs.ver }}-bundle-${{ github.run_number }}
-          name: "Vesper Cine v${{ steps.aab.outputs.ver }} (Play bundle)"
-          prerelease: true
-          files: ${{ steps.aab.outputs.path }}
+          tag_name: v${{ steps.v.outputs.full }}
+          name: "Vesper Cine v${{ steps.v.outputs.name }}"
+          prerelease: ${{ inputs.build_mode != 'release' }}
+          files: out/*
           body: |
-            Play Store app bundle (.aab) from commit ${{ github.sha }}, signed with the upload key.
-            Upload it in Play Console; it is not installable on a phone directly.
+            Version ${{ steps.v.outputs.full }}, built from commit ${{ github.sha }}.
+            APK: `${{ inputs.build_mode }}`, arm64-v8a only. The `.aab` (when present) is the signed Play Store bundle: upload it in Play Console; it can't be installed on a phone directly.

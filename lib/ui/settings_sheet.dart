@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../build_flags.dart';
 import '../services/crash_reporting.dart';
 import '../services/pro_service.dart';
@@ -735,6 +736,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _sectionHeader('FAQ'),
       ..._faq.map((h) => _qa(h.$1, h.$2)),
       const SizedBox(height: 14),
+      _sectionHeader('LEGAL'),
+      _note('© The Awesome Ray. All rights reserved. Apple Log is a trademark of Apple Inc.; Vesper Cine is not affiliated with or endorsed by Apple.'),
+      _settingRow(
+        'Privacy policy',
+        'What the app uses and what leaves your phone',
+        _button('OPEN', () => launchUrl(Uri.parse(_privacyUrl), mode: LaunchMode.externalApplication),
+            icon: Icons.privacy_tip_outlined),
+      ),
+      _settingRow(
+        'Open-source licences',
+        'Notices for the open-source packages inside the app',
+        _button('VIEW', () => showLicensePage(context: context, applicationName: 'Vesper Cine', applicationVersion: _version),
+            icon: Icons.description_outlined),
+      ),
+      const SizedBox(height: 14),
       _sectionHeader('REPORTING A PROBLEM'),
       if (CrashReporting.available)
         _settingRow(
@@ -754,6 +770,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
           : 'Describe what you did and what you saw, with the version number above.'),
     ];
   }
+
+  static const _privacyUrl = 'http://vesper.theawesomeray.com/privacy.html';
 
   static const _howTo = <(String, String)>[
     ('Focus', 'Tap the viewfinder to focus there. Long-press to focus and lock. TRACK or FOCUS & LOCK is set in Exposure · Color · Focus.'),
