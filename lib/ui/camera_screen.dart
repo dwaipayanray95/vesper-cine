@@ -9,6 +9,7 @@ import '../build_flags.dart';
 import '../services/pro_service.dart';
 import '../services/vesper_native.dart';
 import 'cine_control_tile.dart';
+import 'pro_dialog.dart';
 import 'focus_panel.dart';
 import 'scopes_overlay.dart';
 import 'settings_sheet.dart';
@@ -237,12 +238,14 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     // Both landscapes; the native side follows the display rotation (MainActivity).
     SystemChrome.setPreferredOrientations([DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight]);
     WidgetsBinding.instance.addObserver(this);
+    ProService.instance.addListener(_onPlanChanged);
     _pulse = AnimationController(vsync: this, duration: const Duration(milliseconds: 1000))..repeat(reverse: true);
     _start();
   }
 
   @override
   void dispose() {
+    ProService.instance.removeListener(_onPlanChanged);
     WidgetsBinding.instance.removeObserver(this);
     _poll?.cancel();
     _saverTimer?.cancel();
@@ -290,6 +293,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       _settingsFile = File('$filesDir/vesper_settings.json');
       _loadSettings();
     }
+    _clampToPlan(quiet: true);
     await _loadColorProfile();
     await _loadSensorProfile();
     final recovered = await _engine.recoverRecordings();
@@ -1047,6 +1051,43 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     }
   }
 
+  // --- Free / Pro limits ---------------------------------------------------
+  // Pro features that are switched on by a setting are limited back to what the
+  // free plan allows whenever Pro / the ad pass is not active. Never during a
+  // take (the look must not change mid-clip): it is applied after the take.
+  void _onPlanChanged() {
+    if (!mounted || _recording) return;
+    _clampToPlan();
+  }
+
+  void _clampToPlan({bool quiet = false}) {
+    if (ProService.instance.hasProFeatures) return;
+    final changed = <String>[];
+    if (_oversampling) { _oversampling = false; changed.add('HQ'); }
+    if (_temporalNr > ProLimits.maxTemporalNr) { _temporalNr = ProLimits.maxTemporalNr; changed.add('TNR'); }
+    if (_chromaNr > ProLimits.maxChromaNr) { _chromaNr = ProLimits.maxChromaNr; changed.add('chroma NR'); }
+    if (_sharpening > ProLimits.maxSharpening) { _sharpening = ProLimits.maxSharpening; changed.add('detail'); }
+    if (_recordQuality > ProLimits.maxRecordQuality) { _recordQuality = ProLimits.maxRecordQuality; changed.add('quality'); }
+    if (changed.isEmpty) return;
+    if (_streaming) {
+      _engine.setOversampling(_oversampling);
+      _engine.setTemporalNr(_temporalNr);
+      _engine.setChromaNr(_chromaNr);
+      _engine.setSharpening(_sharpening);
+    }
+    _engine.log('Free plan: limited ${changed.join(', ')}', tag: 'Vesper_UI');
+    if (mounted) {
+      setState(() {});
+      if (!quiet) _toast('Free plan: ${changed.join(', ')} set back to the free limit');
+    }
+  }
+
+  // Pro features this take would use, from the current settings.
+  List<String> _proFeaturesInUse() => [
+    if (_cropMode == 1) 'Open gate (4:3) recording',
+    if (_fps > ProLimits.maxFps) '${_fps.round()} fps',
+  ];
+
   Future<void> _toggleRecording() async {
     if (_stopping) return;
     if (_recording) {
@@ -1054,6 +1095,13 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       _engine.stopRecording(); // blocks until the file is finalised
       await _finishRecording('user');
       return;
+    }
+    // Open gate and fps above 48 preview for free but record only with Pro
+    // (or the ad pass).
+    final needed = _proFeaturesInUse();
+    if (needed.isNotEmpty && !ProService.instance.hasProFeatures) {
+      if (!await showProUpsell(context, needed.join(' and '))) return;
+      if (!mounted) return;
     }
     // Free clips used up: ad or Pro first. Only ever checked here, before a
     // take starts; a take in progress is never interrupted.
@@ -1191,6 +1239,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       _stopping = false;
     });
     _engine.lockRotation(false);
+    _clampToPlan(); // e.g. the last clip of an ad pass has just ended
     switch (reason) {
       case 'thermal':
         _toast('Recording stopped: phone critically hot. Saved ${file?.name}');

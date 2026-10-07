@@ -6,6 +6,7 @@ import 'ui/camera_screen.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await CrashReporting.init();
+  await ProService.instance.loadLocal();
   ProService.instance.init(); // not awaited: the store may be slow
   runApp(const VesperCineApp());
 }

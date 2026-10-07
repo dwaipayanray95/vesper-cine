@@ -7,6 +7,11 @@ class ChangelogEntry {
 }
 
 const changelog = <ChangelogEntry>[
+  ChangelogEntry('0.25.0', [
+    'Free and Pro: 50 / 60 fps, open gate (4:3) recording, HIGH / MAX recording quality, HIGH detail, HQ oversampling, noise reduction above LOW and Native ISO Analysis are now Pro (locked options show a lock). Open gate and 50 / 60 fps still preview for free; recording needs Pro',
+    'Not ready to buy? Pick a Pro feature and watch one ad: every Pro feature is unlocked for your next 3 clips',
+    'The free plan limits settings back to the free level when a Pro pass ends; a clip in progress is never changed or stopped',
+  ]),
   ChangelogEntry('0.24.2', [
     'Behind the scenes: developer notes for the Play release (no change in the app)',
   ]),

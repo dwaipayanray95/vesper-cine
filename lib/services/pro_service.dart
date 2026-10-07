@@ -5,11 +5,21 @@ import 'package:google_mobile_ads/google_mobile_ads.dart';
 import 'package:in_app_purchase/in_app_purchase.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// Which parts of the app need Pro. Everything is free except the clip limit
-/// (owner's decision, 7 Oct): free users record [ProService.freeClips] clips,
-/// then watch a short ad for the next batch; Pro records without limit.
-/// A take that is already recording is never touched: the check happens only
-/// when the record button is pressed.
+/// What the free plan allows (owner's decision, 7 Oct). Pro, or a "Pro pass"
+/// earned with a rewarded ad (the next [ProService.proPassClips] clips), lifts
+/// every limit. Gyroflow export will join this list when it exists.
+class ProLimits {
+  static const maxFps = 48.0; // 50 / 60 fps are Pro
+  static const maxTemporalNr = 0.5; // up to LOW
+  static const maxChromaNr = 0.5; // up to LOW
+  static const maxSharpening = 2; // HIGH (3) is Pro
+  static const maxRecordQuality = 0; // STANDARD only; HIGH / MAX are Pro
+  // HQ oversampling, open-gate (4:3) recording and Native ISO Analysis are Pro.
+}
+
+/// The plan: free clips, ad, Pro. A take that is already recording is never
+/// touched: everything is checked when the record button is pressed (or a
+/// setting is chosen), never during a take.
 class ProService extends ChangeNotifier {
   ProService._();
   static final ProService instance = ProService._();
@@ -20,6 +30,9 @@ class ProService extends ChangeNotifier {
   /// Clips a free user can record before an ad is needed.
   static const freeClips = 5;
 
+  /// Clips with every Pro feature after watching one ad.
+  static const proPassClips = 3;
+
   // Google's public TEST rewarded ad unit and TEST app id (manifest). Replace
   // both with the AdMob ones: --dart-define=VESPER_REWARDED_AD_UNIT=ca-app-pub-.../...
   static const _adUnit = String.fromEnvironment('VESPER_REWARDED_AD_UNIT',
@@ -27,6 +40,7 @@ class ProService extends ChangeNotifier {
 
   static const _kPro = 'proUnlocked';
   static const _kClips = 'freeClipsUsed';
+  static const _kPass = 'proPassClipsLeft';
 
   SharedPreferences? _prefs;
   StreamSubscription<List<PurchaseDetails>>? _sub;
@@ -37,6 +51,7 @@ class ProService extends ChangeNotifier {
 
   bool _isPro = false;
   int _clipsUsed = 0;
+  int _passLeft = 0;
   ProductDetails? _product;
   String _message = '';
   bool _busy = false;
@@ -45,7 +60,13 @@ class ProService extends ChangeNotifier {
   bool get isPro => _isPro || _debugPro;
   int get clipsUsed => _clipsUsed;
   int get clipsLeft => isPro ? 999999 : (freeClips - _clipsUsed).clamp(0, freeClips);
-  bool get canRecord => isPro || _clipsUsed < freeClips;
+  bool get canRecord => isPro || _passLeft > 0 || _clipsUsed < freeClips;
+
+  /// Clips left of the ad-earned Pro pass.
+  int get passClipsLeft => isPro ? 0 : _passLeft;
+
+  /// Pro or a Pro pass: no feature limits.
+  bool get hasProFeatures => isPro || _passLeft > 0;
 
   /// Price text from Google Play in the user's currency, e.g. "$14.99".
   String? get price => _product?.price;
@@ -62,11 +83,23 @@ class ProService extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> init() async {
+  /// Reads the saved plan (fast, local). Awaited at start-up so settings are
+  /// never limited by mistake before the plan is known.
+  Future<void> loadLocal() async {
     try {
       _prefs = await SharedPreferences.getInstance();
       _isPro = _prefs!.getBool(_kPro) ?? false;
       _clipsUsed = _prefs!.getInt(_kClips) ?? 0;
+      _passLeft = _prefs!.getInt(_kPass) ?? 0;
+    } catch (e) {
+      debugPrint('Pro plan not readable: $e');
+    }
+  }
+
+  /// Asks Google Play for the price and past purchases (slow, not awaited).
+  Future<void> init() async {
+    try {
+      if (_prefs == null) await loadLocal();
       notifyListeners();
       final iap = InAppPurchase.instance;
       _sub = iap.purchaseStream.listen(_onPurchases, onError: (Object e) => debugPrint('IAP stream: $e'));
@@ -149,8 +182,13 @@ class ProService extends ChangeNotifier {
   /// Count a clip that really started recording.
   Future<void> noteClipStarted() async {
     if (isPro) return;
-    _clipsUsed++;
-    await _prefs?.setInt(_kClips, _clipsUsed);
+    if (_passLeft > 0) {
+      _passLeft--;
+      await _prefs?.setInt(_kPass, _passLeft);
+    } else {
+      _clipsUsed++;
+      await _prefs?.setInt(_kClips, _clipsUsed);
+    }
     notifyListeners();
     if (clipsLeft <= 1) unawaited(preloadAd());
   }
@@ -217,9 +255,8 @@ class ProService extends ChangeNotifier {
     }
   }
 
-  /// Shows a rewarded ad; when the user earns the reward the free-clip counter
-  /// is reset. Returns true if clips were granted.
-  Future<bool> watchAdForClips() async {
+  /// Shows a rewarded ad. True when the user earned the reward.
+  Future<bool> _showRewardedAd() async {
     if (_ad == null) await preloadAd();
     final ad = _ad;
     if (ad == null) {
@@ -241,10 +278,27 @@ class ProService extends ChangeNotifier {
       },
     );
     await ad.show(onUserEarnedReward: (_, _) => earned = true);
-    final ok = await result.future;
+    return result.future;
+  }
+
+  /// Ad -> the free-clip counter is reset (free features only).
+  Future<bool> watchAdForClips() async {
+    final ok = await _showRewardedAd();
     if (ok) {
       _clipsUsed = 0;
       await _prefs?.setInt(_kClips, 0);
+      _message = '';
+    }
+    notifyListeners();
+    return ok;
+  }
+
+  /// Ad -> every Pro feature for the next [proPassClips] clips.
+  Future<bool> watchAdForPass() async {
+    final ok = await _showRewardedAd();
+    if (ok) {
+      _passLeft = proPassClips;
+      await _prefs?.setInt(_kPass, _passLeft);
       _message = '';
     }
     notifyListeners();

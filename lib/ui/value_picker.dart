@@ -158,7 +158,9 @@ class Segmented extends StatelessWidget {
   final List<String> options;
   final int selected;
   final ValueChanged<int> onSelected;
-  const Segmented({super.key, required this.options, required this.selected, required this.onSelected});
+  /// Options only Pro can choose: shown with a lock (the caller handles the tap).
+  final Set<int> locked;
+  const Segmented({super.key, required this.options, required this.selected, required this.onSelected, this.locked = const {}});
 
   @override
   Widget build(BuildContext context) => Row(
@@ -178,7 +180,7 @@ class Segmented extends StatelessWidget {
               ),
               child: Center(
                 child: Text(
-                  options[i],
+                  locked.contains(i) ? '${options[i]} 🔒' : options[i],
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(

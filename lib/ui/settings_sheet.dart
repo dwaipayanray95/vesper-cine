@@ -5,6 +5,7 @@ import '../services/pro_service.dart';
 import '../services/vesper_native.dart';
 import 'app_log_screen.dart';
 import 'changelog.dart';
+import 'pro_dialog.dart';
 import 'value_picker.dart';
 
 /// Full-screen settings, laid out like a camera menu: category tiles on the
@@ -337,6 +338,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   // ---- Categories ---------------------------------------------------------
 
+  // Pro-only choice: true when allowed. Otherwise offers Pro / the ad pass
+  // (nothing changes; the setting is only applied if the pass is earned).
+  bool _gate(bool locked, String feature) {
+    if (!locked || ProService.instance.hasProFeatures) return true;
+    showProUpsell(context, feature);
+    return false;
+  }
+
   List<Widget> _recording() => [
     _settingRow(
       'Recording Codec',
@@ -358,9 +367,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
       Segmented(
         options: const ['STANDARD', 'HIGH', 'MAX'],
         selected: recordQuality,
+        locked: {for (var q = ProLimits.maxRecordQuality + 1; q < 3; q++) q},
         onSelected: isRecording
             ? (_) {}
             : (i) {
+                if (!_gate(i > ProLimits.maxRecordQuality, 'HIGH / MAX recording quality')) return;
                 setState(() => recordQuality = i);
                 widget.onRecordQualityChanged?.call(i);
               },
@@ -368,7 +379,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     ),
     _settingRow(
       'Sensor Aspect / Crop',
-      cropMode == 0 ? '16:9 standard widescreen, 1920x1080' : '4:3 open gate, full sensor height',
+      cropMode == 0 ? '16:9 standard widescreen, 1920x1080' : '4:3 open gate, full sensor height (preview is free; recording needs Pro)',
       Segmented(
         options: const ['16:9', '4:3 OPEN GATE'],
         selected: cropMode,
@@ -413,7 +424,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
       Segmented(
         options: _levels4,
         selected: sharpening.clamp(0, 3),
+        locked: {for (var l = ProLimits.maxSharpening + 1; l < 4; l++) l},
         onSelected: (i) {
+          if (!_gate(i > ProLimits.maxSharpening, 'HIGH detail / sharpening')) return;
           setState(() => sharpening = i);
           widget.onSharpeningChanged(i);
         },
@@ -425,7 +438,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
       Segmented(
         options: const ['OFF', 'ON'],
         selected: oversampling ? 1 : 0,
+        locked: const {1},
         onSelected: (i) {
+          if (!_gate(i == 1, 'HQ oversampling')) return;
           setState(() => oversampling = i == 1);
           widget.onOversamplingChanged(i == 1);
         },
@@ -471,7 +486,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
       Segmented(
         options: _levels4,
         selected: _nrLevels.indexOf(temporalNr).clamp(0, 3),
+        locked: {for (var l = 0; l < 4; l++) if (_nrLevels[l] > ProLimits.maxTemporalNr) l},
         onSelected: (i) {
+          if (!_gate(_nrLevels[i] > ProLimits.maxTemporalNr, 'Temporal noise reduction above LOW')) return;
           setState(() => temporalNr = _nrLevels[i]);
           widget.onTemporalNrChanged(_nrLevels[i]);
         },
@@ -495,7 +512,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
       Segmented(
         options: const ['OFF', 'LOW', 'HIGH'],
         selected: _chromaLevels.indexOf(chromaNr).clamp(0, 2),
+        locked: {for (var l = 0; l < 3; l++) if (_chromaLevels[l] > ProLimits.maxChromaNr) l},
         onSelected: (i) {
+          if (!_gate(_chromaLevels[i] > ProLimits.maxChromaNr, 'Chroma noise reduction above LOW')) return;
           setState(() => chromaNr = _chromaLevels[i]);
           widget.onChromaNrChanged(_chromaLevels[i]);
         },
@@ -560,9 +579,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _settingRow(
       'Native ISO Analysis',
       widget.isoAnalysisSummary.isEmpty
-          ? 'Measures the sensor\'s native ISOs (lens covered, ~15 s); auto-exposure then prefers them'
+          ? 'Pro. Measures the sensor\'s native ISOs (lens covered, ~15 s); auto-exposure then prefers them'
           : widget.isoAnalysisSummary,
-      _button(widget.isoAnalysisSummary.isEmpty ? 'ANALYZE' : 'RE-RUN', widget.onAnalyzeIso, icon: Icons.grain),
+      _button(widget.isoAnalysisSummary.isEmpty ? 'ANALYZE' : 'RE-RUN',
+          widget.onAnalyzeIso == null ? null : () { if (_gate(true, 'Native ISO analysis')) widget.onAnalyzeIso!(); },
+          icon: Icons.grain),
     ),
     if (kDevTools || profileAvailable) ...[
       const SizedBox(height: 10),
@@ -642,8 +663,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _infoLine('Plan', pro.isPro ? 'Pro (unlocked)' : 'Free'),
       if (!pro.isPro) _infoLine('Free clips', '${pro.clipsLeft} of ${ProService.freeClips} left'),
       const SizedBox(height: 6),
-      _note('Every camera feature is free. The free plan records ${ProService.freeClips} clips at a time: when they are used up, '
-          'a short ad gives you ${ProService.freeClips} more. Pro removes the limit and all ads. '
+      if (pro.passClipsLeft > 0) _infoLine('Pro pass', '${pro.passClipsLeft} clip${pro.passClipsLeft == 1 ? '' : 's'} left with every Pro feature'),
+      _note('FREE: manual exposure and focus, Apple Log, 16:9 up to 48 fps, STANDARD recording quality, detail up to MED, '
+          'noise reduction up to LOW, scopes, hot pixel calibration. You can record ${ProService.freeClips} clips, then a short ad gives you ${ProService.freeClips} more.\n'
+          'PRO: 50 / 60 fps, open gate (4:3) recording, HIGH / MAX recording quality, HIGH detail, HQ oversampling, '
+          'noise reduction above LOW, Native ISO Analysis, and Gyroflow export when it arrives. Unlimited clips, no ads.\n'
+          'Not ready to buy? Choose any Pro feature and watch one ad: you get every Pro feature for your next ${ProService.proPassClips} clips. '
           'A clip that is already recording is never stopped.'),
       const SizedBox(height: 10),
       if (!pro.isPro) ...[
