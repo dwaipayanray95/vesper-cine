@@ -121,9 +121,12 @@ jobs:
       # Release mode also gets Flutter/R8's default code shrinking, resource
       # shrinking, and tree-shaken icon fonts for free.
       - name: Build APK (arm64-v8a, ${{ inputs.build_mode }})
+        env:
+          VESPER_ADMOB_APP_ID: ${{ vars.VESPER_ADMOB_APP_ID }}
         run: |
           DEV_FLAG=""
-          if [ "${{ inputs.dev_tools }}" = "true" ]; then DEV_FLAG="--dart-define=VESPER_DEV_TOOLS=true"; fi
+          if [ -n "${{ vars.VESPER_REWARDED_AD_UNIT }}" ]; then DEV_FLAG="--dart-define=VESPER_REWARDED_AD_UNIT=${{ vars.VESPER_REWARDED_AD_UNIT }}"; fi
+          if [ "${{ inputs.dev_tools }}" = "true" ]; then DEV_FLAG="$DEV_FLAG --dart-define=VESPER_DEV_TOOLS=true"; fi
           flutter build apk \
             --${{ inputs.build_mode }} \
             --target-platform android-arm64 \
@@ -260,7 +263,14 @@ jobs:
           VESPER_UPLOAD_STORE_PASSWORD: ${{ secrets.VESPER_UPLOAD_STORE_PASSWORD }}
           VESPER_UPLOAD_KEY_ALIAS: ${{ secrets.VESPER_UPLOAD_KEY_ALIAS }}
           VESPER_UPLOAD_KEY_PASSWORD: ${{ secrets.VESPER_UPLOAD_KEY_PASSWORD }}
-        run: flutter build appbundle --release --target-platform android-arm64
+          VESPER_ADMOB_APP_ID: ${{ vars.VESPER_ADMOB_APP_ID }}
+        run: |
+          AD_FLAG=""
+          if [ -n "${{ vars.VESPER_REWARDED_AD_UNIT }}" ]; then AD_FLAG="--dart-define=VESPER_REWARDED_AD_UNIT=${{ vars.VESPER_REWARDED_AD_UNIT }}"; fi
+          if [ -z "$VESPER_ADMOB_APP_ID" ] || [ -z "${{ vars.VESPER_REWARDED_AD_UNIT }}" ]; then
+            echo "::warning::AdMob IDs not set (repository variables VESPER_ADMOB_APP_ID / VESPER_REWARDED_AD_UNIT): this bundle shows Google TEST ads. Fine for the closed test, not for production."
+          fi
+          flutter build appbundle --release --target-platform android-arm64 $AD_FLAG
 
       - name: Name the bundle and show its signing certificate
         id: aab

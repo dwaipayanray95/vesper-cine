@@ -33,6 +33,11 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        // AdMob app id from the repository variable VESPER_ADMOB_APP_ID; without it
+        // Google's public test id is used (test ads only, no revenue).
+        manifestPlaceholders["admobAppId"] =
+            System.getenv("VESPER_ADMOB_APP_ID")?.takeIf { it.isNotBlank() }
+                ?: "ca-app-pub-3940256099942544~3347511713"
 
         externalNativeBuild {
             cmake {
