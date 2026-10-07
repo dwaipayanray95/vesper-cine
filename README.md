@@ -76,3 +76,5 @@ With adb: `adb logcat -s Vesper Vesper_Camera Vesper_Vulkan Vesper_Recorder Vesp
 1. **4K / UHD output**: needs a full-resolution demosaic path (the quad image is 2000 px wide) and enough GPU budget — at 1080p the GPU already uses ~34 of 41.7 ms at 24 fps, so 4K needs a cheaper pipeline (pass merging, 16-bit everywhere it's safe) and probably reduced NR.
 2. Audio levels / mic selection; Gyroflow IMU logging; external USB-C SSD.
 3. Mark unsustainable frame rates in the FPS picker (needs per-setting cost estimates from the guard).
+4. Public release; self-calibration for other phones with per-model profiles; monetisation.
+5. Pending calibration on the Pixel 10: corner brightness after the lens shading map (needs a White sweep with paper over the lens, outdoors), whether ISO 30 is extended, ColorChecker colour (needs a chart). Details in `CLAUDE.md`.

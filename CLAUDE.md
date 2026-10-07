@@ -80,4 +80,11 @@ Agents doing design/UI work must not edit `android/**`, `lib/services/vesper_nat
 - All builds are signed with the shared tester key `android/app/vesper-dev.jks` so APKs install over each other.
 
 ## Next up
-4K/UHD output (engine `resolution` setting exists but upsamples the quad image; not in the UI). Needs a full-res path and GPU headroom — get a fresh on-device benchmark first.
+Owner's priorities (7 Oct): 1. public release (Play Store); 2. other phones: self-calibration in the app + per-model profiles that load automatically; 3. monetisation; 4. 4K/UHD and Gyroflow.
+- 4K/UHD output (engine `resolution` setting exists but upsamples the quad image; not in the UI). Needs a full-res path and GPU headroom — get a fresh on-device benchmark first.
+- Gyroflow: nothing implemented yet (manifest already has the gyroscope feature + HIGH_SAMPLING_RATE_SENSORS). Needs gyro/accel logged with sensor-timestamp-aligned frame times (SENSOR_TIMESTAMP, rolling-shutter skew) to a `.gcsv` next to the clip, plus a Gyroflow lens profile for each camera.
+
+## Pending calibration (Pixel 10, cam 0)
+- **Lens shading, luminance:** after the HAL map the corners are 20–30 % darker than the centre in all three White sweeps (5 Oct, 6 Oct, 7 Oct 12:40 window + paper; the last one had a 10–13 % lighting tilt → flagged "NOT A FLAT FIELD"). Colour shading is fine (R/G, B/G within ±1.5 % to the corners). Undecided whether the map under-corrects or the light was uneven; needs a White sweep with paper flat over the lens against an overcast sky. Even if confirmed, a corner lift adds corner noise → offer as an option, not a forced change.
+- **ISO 30 extended?** ISO 30/59 never saturated in any sweep (light too dim); an outdoor White sweep answers it.
+- **ColorChecker colour calibration** (`tools/calibration/calibrate.py`) once the owner has a chart.
