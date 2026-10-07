@@ -19,6 +19,11 @@ on:
         type: boolean
         required: false
         default: false
+      build_aab:
+        description: "Also build the signed Play Store bundle (.aab) next to the APK (needs the 4 VESPER_UPLOAD_* secrets, docs/PLAY_RELEASE.md)"
+        type: boolean
+        required: false
+        default: false
       flutter_version:
         description: "Flutter version (blank = latest stable)"
         type: string
@@ -175,20 +180,19 @@ jobs:
             Manually triggered build from commit ${{ github.sha }}.
             Build mode: `${{ inputs.build_mode }}` · arm64-v8a only.
 
-  # Play Store bundle, built in every run next to the APK (skipped with a warning
-  # while the upload-key secrets are missing). Signed with the private upload key from the repository
+  # Play Store bundle, built next to the APK when the build_aab box is ticked. Signed with the private upload key from the repository
   # secrets (never committed). The .aab is kept as a private workflow artifact
   # (not a public GitHub Release): download it from the run page and upload it
   # to Play Console. Always release mode, no developer tools.
   bundle:
     name: Build Play Store bundle (.aab)
+    if: ${{ inputs.build_aab }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Check the upload key secrets exist
-        id: chk
         env:
           KS: ${{ secrets.VESPER_UPLOAD_KEYSTORE_BASE64 }}
           SP: ${{ secrets.VESPER_UPLOAD_STORE_PASSWORD }}
@@ -197,26 +201,21 @@ jobs:
         run: |
           for v in KS SP KA KP; do
             if [ -z "${!v}" ]; then
-              echo "::warning::No Play bundle built: the secret for $v is missing (docs/PLAY_RELEASE.md section 2). The APK is unaffected."
-              echo "have=false" >> "$GITHUB_OUTPUT"
-              exit 0
+              echo "::error::Secret for $v is missing - see docs/PLAY_RELEASE.md section 2. (The APK build is not affected.)"
+              exit 1
             fi
           done
-          echo "have=true" >> "$GITHUB_OUTPUT"
 
       - name: Set up JDK 17
-        if: steps.chk.outputs.have == 'true'
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
       - name: Accept Android SDK licenses
-        if: steps.chk.outputs.have == 'true'
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
 
       - name: Install CMake 3.22.1 (with retries)
-        if: steps.chk.outputs.have == 'true'
         run: |
           for i in 1 2 3 4; do
             "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "cmake;3.22.1" && exit 0
@@ -227,7 +226,6 @@ jobs:
           exit 1
 
       - name: Set up Flutter
-        if: steps.chk.outputs.have == 'true'
         uses: subosito/flutter-action@v2
         with:
           channel: stable
@@ -235,7 +233,6 @@ jobs:
           cache: true
 
       - name: Cache Gradle
-        if: steps.chk.outputs.have == 'true'
         uses: actions/cache@v4
         with:
           path: |
@@ -246,20 +243,17 @@ jobs:
             gradle-${{ runner.os }}-
 
       - name: flutter pub get
-        if: steps.chk.outputs.have == 'true'
         run: flutter pub get
 
       # Optional: the Firebase config as a secret instead of a committed file
       # (android/app/google-services.json holds a placeholder until replaced).
       - name: Firebase config from secret (if set)
-        if: steps.chk.outputs.have == 'true'
         env:
           GS: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
         run: |
           if [ -n "$GS" ]; then echo "$GS" | base64 -d > android/app/google-services.json; fi
 
       - name: Write the upload keystore (runner only, deleted with the runner)
-        if: steps.chk.outputs.have == 'true'
         env:
           KS: ${{ secrets.VESPER_UPLOAD_KEYSTORE_BASE64 }}
         run: |
@@ -267,7 +261,6 @@ jobs:
           echo "VESPER_UPLOAD_KEYSTORE=$RUNNER_TEMP/upload.jks" >> "$GITHUB_ENV"
 
       - name: Build app bundle (arm64-v8a, release)
-        if: steps.chk.outputs.have == 'true'
         env:
           VESPER_UPLOAD_STORE_PASSWORD: ${{ secrets.VESPER_UPLOAD_STORE_PASSWORD }}
           VESPER_UPLOAD_KEY_ALIAS: ${{ secrets.VESPER_UPLOAD_KEY_ALIAS }}
@@ -282,7 +275,6 @@ jobs:
           flutter build appbundle --release --target-platform android-arm64 $AD_FLAG
 
       - name: Name the bundle and show its signing certificate
-        if: steps.chk.outputs.have == 'true'
         id: aab
         run: |
           RAW=$(grep '^version:' pubspec.yaml | sed 's/version: *//')
@@ -295,7 +287,6 @@ jobs:
           keytool -printcert -jarfile "build/app/outputs/bundle/release/$NAME" | grep -E 'Owner|SHA256' | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Upload bundle (private artifact)
-        if: steps.chk.outputs.have == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.aab.outputs.name }}
