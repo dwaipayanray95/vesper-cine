@@ -1,4 +1,5 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS" />
@@ -38,6 +39,20 @@
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <!-- Crash reports are sent only when the user's switch (Settings > Info)
              is on: Dart enables collection at start-up (crash_reporting.dart). -->
+        <!-- Start-up safety: Firebase and the ads SDK used to start themselves in
+             the first milliseconds of the process, where a bad config (placeholder
+             google-services.json, wrong AdMob id) kills the app before any screen
+             exists. They are now started from Dart, inside try/catch
+             (crash_reporting.dart, pro_service.dart), so a problem there can
+             never stop the camera app from opening. -->
+        <provider
+            android:name="com.google.firebase.provider.FirebaseInitProvider"
+            android:authorities="${applicationId}.firebaseinitprovider"
+            tools:node="remove" />
+        <provider
+            android:name="com.google.android.gms.ads.MobileAdsInitProvider"
+            android:authorities="${applicationId}.mobileadsinitprovider"
+            tools:node="remove" />
         <!-- AdMob app id: set by build.gradle.kts from the repository variable
              VESPER_ADMOB_APP_ID (Google's public TEST id when unset; docs/PLAY_RELEASE.md). -->
         <meta-data
