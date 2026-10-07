@@ -147,10 +147,14 @@ static bool runFrame(VulkanEngine& gpu, const std::vector<uint8_t>& raw, const F
     if (shading) { in.shading = shading->data(); in.shadingFloats = shading->size(); }
     if (defects) { in.defects = defects->data(); in.defectCount = defects->size() / 2; }
     int slot = -1;
-    if (!gpu.processFrame(in, &slot) || slot < 0) return false;
+    if (!gpu.processFrame(in, &slot) || slot < 0) { std::puts("runFrame: processFrame failed"); return false; }
     size_t size = 0;
-    const uint8_t* data = gpu.waitEncoderFrame(slot, &size);
-    if (!data) return false;
+    // The engine's own wait gives up after 1 s (right for a phone). A shared CI
+    // runner running a software GPU can need longer for the first frames
+    // (shader compilation): keep waiting, the fence is still valid.
+    const uint8_t* data = nullptr;
+    for (int attempt = 0; attempt < 60 && !data; ++attempt) data = gpu.waitEncoderFrame(slot, &size);
+    if (!data) { std::puts("runFrame: frame not finished after 60 s"); return false; }
     static std::vector<uint8_t> copy;
     copy.assign(data, data + size);
     gpu.releaseEncoderFrame(slot);
