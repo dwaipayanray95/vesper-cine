@@ -2,6 +2,18 @@ plugins {
     id("com.android.application")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
+    id("com.google.gms.google-services")
+    id("com.google.firebase.crashlytics")
+}
+
+// google-services.json is the Firebase project's config. The committed one is
+// a placeholder (project "vesper-placeholder") so every build compiles; replace
+// it with the file downloaded from the real Firebase project. Only then are
+// mapping / native symbol files uploaded (the upload would fail otherwise).
+val firebaseIsReal = !file("google-services.json").readText().contains("vesper-placeholder")
+firebaseCrashlytics {
+    mappingFileUploadEnabled = firebaseIsReal
+    nativeSymbolUploadEnabled = firebaseIsReal
 }
 
 android {
@@ -82,4 +94,11 @@ kotlin {
 
 flutter {
     source = "../.."
+}
+
+dependencies {
+    // Native (C++) crash reports: the Flutter plugin only brings the Java part.
+    // Keep the BoM in step with firebase_core's FirebaseSDKVersion.
+    implementation(platform("com.google.firebase:firebase-bom:34.19.0"))
+    implementation("com.google.firebase:firebase-crashlytics-ndk")
 }

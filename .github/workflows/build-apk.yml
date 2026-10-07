@@ -95,6 +95,14 @@ jobs:
       - name: flutter pub get
         run: flutter pub get
 
+      # Optional: the Firebase config as a secret instead of a committed file
+      # (android/app/google-services.json holds a placeholder until replaced).
+      - name: Firebase config from secret (if set)
+        env:
+          GS: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+        run: |
+          if [ -n "$GS" ]; then echo "$GS" | base64 -d > android/app/google-services.json; fi
+
       - name: flutter doctor
         run: flutter doctor -v
 
@@ -231,6 +239,14 @@ jobs:
 
       - name: flutter pub get
         run: flutter pub get
+
+      # Optional: the Firebase config as a secret instead of a committed file
+      # (android/app/google-services.json holds a placeholder until replaced).
+      - name: Firebase config from secret (if set)
+        env:
+          GS: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+        run: |
+          if [ -n "$GS" ]; then echo "$GS" | base64 -d > android/app/google-services.json; fi
 
       - name: Write the upload keystore (runner only, deleted with the runner)
         env:

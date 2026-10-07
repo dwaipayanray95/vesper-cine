@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../build_flags.dart';
+import '../services/crash_reporting.dart';
 import '../services/vesper_native.dart';
 import 'app_log_screen.dart';
 import 'changelog.dart';
@@ -138,6 +139,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late bool tapLocks = widget.tapLocks;
   late bool tapSetsExposure = widget.tapSetsExposure;
   late bool faceDetect = widget.faceDetect;
+  bool sendCrashReports = CrashReporting.enabled;
 
   bool get isRecording => widget.isRecording;
   bool get profileAvailable => widget.profileAvailable;
@@ -645,6 +647,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ..._faq.map((h) => _qa(h.$1, h.$2)),
       const SizedBox(height: 14),
       _sectionHeader('REPORTING A PROBLEM'),
+      if (CrashReporting.available)
+        _settingRow(
+          'Send crash reports',
+          'If the app crashes, anonymous technical details (crash location, phone model, Android and app version) are sent so it can be fixed. Never footage, location or personal data',
+          Segmented(
+            options: const ['OFF', 'ON'],
+            selected: sendCrashReports ? 1 : 0,
+            onSelected: (i) {
+              setState(() => sendCrashReports = i == 1);
+              CrashReporting.setEnabled(i == 1);
+            },
+          ),
+        ),
       _note(kDevTools
           ? 'Settings › Developer › App Log › Copy, and send the log with what you did and what you saw.'
           : 'Describe what you did and what you saw, with the version number above.'),

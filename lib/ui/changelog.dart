@@ -7,6 +7,9 @@ class ChangelogEntry {
 }
 
 const changelog = <ChangelogEntry>[
+  ChangelogEntry('0.23.0', [
+    'Crash reports (Settings › Info › Send crash reports, on by default, release builds): if the app crashes, anonymous technical details are sent so it can be fixed without anyone copying logs. Never footage, location or personal data',
+  ]),
   ChangelogEntry('0.22.1', [
     'Behind the scenes: Play Store release bundle with a private signing key (no change in the app)',
   ]),
