@@ -1,4 +1,4 @@
-name: Build arm64 APK
+name: BUILD MASTER
 
 # Manual trigger only — this is a sideload build for testing on a Pixel 10
 # (arm64-v8a), not a release pipeline. No push/PR triggers on purpose.
@@ -34,8 +34,15 @@ permissions:
   contents: write # needed to publish the GitHub Release below
 
 jobs:
+  # Every build starts with all the checks (native tests, analyze, Dart tests,
+  # licence + vulnerability scan). If one fails nothing is built or released.
+  checks:
+    name: Checks
+    uses: ./.github/workflows/checks.yml
+
   build:
     name: Build arm64-v8a ${{ inputs.build_mode }} APK
+    needs: checks
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -169,6 +176,7 @@ jobs:
   # download it there and upload it to Play Console. Always release mode, no developer tools.
   bundle:
     name: Build Play Store bundle (.aab)
+    needs: checks
     if: ${{ inputs.build_aab }}
     runs-on: ubuntu-latest
     steps:

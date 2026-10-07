@@ -1,7 +1,7 @@
 name: Checks
 
 # Runs on every push to main, on pull requests, and by hand. No Android build
-# here (that stays the manual "Build arm64 APK"): this is the fast safety net
+# here (that stays the manual "BUILD MASTER"): this is the fast safety net
 # that catches broken Dart, broken native code, broken shaders, failing tests,
 # licence problems and known vulnerabilities in dependencies.
 on:
@@ -9,6 +9,7 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  workflow_call: # BUILD MASTER runs these first
 
 permissions:
   contents: read

@@ -6,7 +6,7 @@ Package name: `com.theawesomeray.vespercine` (cannot be changed once the app exi
 
 | Key | Where it lives | Used for |
 |---|---|---|
-| **Dev key** `android/app/vesper-dev.jks` | In the repo (public on purpose) | Test APKs from "Build arm64 APK" so they install over each other. **Never** use it for Play. |
+| **Dev key** `android/app/vesper-dev.jks` | In the repo (public on purpose) | Test APKs from "BUILD MASTER" so they install over each other. **Never** use it for Play. |
 | **Upload key** (new, private) | Only on your computer (backup!) and as 4 GitHub secrets | Signs the `.aab` you upload to Play. |
 | **App signing key** | Held by Google (Play App Signing) | Google re-signs what users download. If you ever lose the upload key, Play support can reset it; if Google held no key you'd lose the app. |
 
@@ -32,7 +32,7 @@ You need Java's `keytool`. It comes with Android Studio (`<Android Studio>/jbr/b
 
 ## 3. Build the Play bundle
 
-GitHub → **Actions** → **Build arm64 APK** → **Run workflow**. The APK (dev key, so test APKs still install over each other) is always built. **Tick `build_aab`** to also build the Play bundle `.aab`, signed with the private upload key. `build_mode` and `dev_tools` only affect the APK; the bundle is always release, no developer tools. If you tick it before the four upload-key secrets exist, the bundle job fails with a message saying which one is missing (the APK is unaffected).
+GitHub → **Actions** → **BUILD MASTER** → **Run workflow**. The APK (dev key, so test APKs still install over each other) is always built. **Tick `build_aab`** to also build the Play bundle `.aab`, signed with the private upload key. `build_mode` and `dev_tools` only affect the APK; the bundle is always release, no developer tools. If you tick it before the four upload-key secrets exist, the bundle job fails with a message saying which one is missing (the APK is unaffected).
 When it finishes, go to the repo's **Releases** page and download `vesper-cine-v…-build….aab` from the *(Play bundle)* release. The run summary shows the certificate fingerprint of the signing key. 
 
 ## 4. Create the app in Play Console (one time)

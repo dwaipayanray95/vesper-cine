@@ -21,7 +21,7 @@ CI runs the same checks on every push (`.github/workflows/checks.yml`: native te
 - Git: commit and push directly to `main` (owner's choice).
 
 ## Builds and testing
-- APKs come from GitHub Actions (**Build arm64 APK**, manual `workflow_dispatch`: build_mode, dev_tools). Pushing does not build — if a log looks like an old version, check which commit the latest run used.
+- APKs come from GitHub Actions (**BUILD MASTER**, manual `workflow_dispatch`: build_mode, dev_tools, build_aab; it runs the Checks workflow first and builds only if they pass). Pushing does not build — if a log looks like an old version, check which commit the latest run used.
 - Ask for logs from **Settings › Developer › App log › Copy** (in-app ring buffer, all native log lines since launch). Native logging goes through `vesperLog` (`app_log.h`); new log lines should use the existing `LOGI`/`VK_LOGI`/… macros.
 - Profile builds are the test builds (release-speed UI/GPU, dev tools visible).
 - **GPU optimisation A/B (opt-in experiments):** a new optimisation goes in behind a `VulkanEngine::kExp*` bit (`setExperiments(mask)`), off by default: a shader `#ifdef` compiled as an extra variant in `compile_shaders.sh`, or an engine branch. List it in `_benchExperiments` (camera_screen.dart); the benchmark runs everything on with each experiment alone and prints `<name>: saves/costs X ms` against the average of the two "Everything on" runs (start and end, so drift cancels). The GPU test prints each experiment's max P010 difference (0 = identical). Once the phone confirms a saving, make it the default code and delete the old path and the bit; drop experiments that don't help.

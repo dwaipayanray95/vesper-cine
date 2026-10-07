@@ -43,7 +43,7 @@ Apple Log maps scene-linear 0 → 12 onto code values 0.15 → 1.0, 18% grey at 
 
 ## Building
 
-Android APKs are built by GitHub Actions: **Actions → Build arm64 APK → Run workflow** on `main`, choose `release` / `profile` / `debug`, optionally `dev_tools`. Builds do **not** run automatically on push. All builds are signed with the shared tester key (`android/app/vesper-dev.jks`), so new APKs install over old ones.
+Android APKs are built by GitHub Actions: **Actions → BUILD MASTER → Run workflow** on `main`, choose `release` / `profile` / `debug`, optionally `dev_tools`. BUILD MASTER first runs all the checks (native tests, analyze, Dart tests, licence + vulnerability scan) and builds only if they pass. Builds do **not** run automatically on push (the checks alone do). All builds are signed with the shared tester key (`android/app/vesper-dev.jks`), so new APKs install over old ones.
 
 Locally:
 
