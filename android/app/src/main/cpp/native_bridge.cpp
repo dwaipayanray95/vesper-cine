@@ -2399,11 +2399,11 @@ EXPORT void vesper_close() {
 }
 
 // Display rotation in degrees (90 or 270: the two landscape orientations).
-JNIEXPORT void JNICALL Java_com_vesper_cine_MainActivity_nativeSetDisplayRotation(JNIEnv*, jobject, jint degrees) {
+JNIEXPORT void JNICALL Java_com_theawesomeray_vespercine_MainActivity_nativeSetDisplayRotation(JNIEnv*, jobject, jint degrees) {
     if (degrees == 90 || degrees == 270) gDisplayRotation = degrees;
 }
 
-JNIEXPORT jint JNICALL Java_com_vesper_cine_MainActivity_nativeSetViewfinderSurface(JNIEnv* env, jobject, jobject surface) {
+JNIEXPORT jint JNICALL Java_com_theawesomeray_vespercine_MainActivity_nativeSetViewfinderSurface(JNIEnv* env, jobject, jobject surface) {
     ensureInit();
     ANativeWindow* win = surface ? ANativeWindow_fromSurface(env, surface) : nullptr;
     if (gGpu) gGpu->setViewfinderWindow(win); // takes its own reference

@@ -188,7 +188,7 @@ class RecordingFile {
 /// Dart side of the Vesper engine (android/app/src/main/cpp/native_bridge.cpp).
 class VesperNative {
   static final VesperNative instance = VesperNative._();
-  static const MethodChannel _channel = MethodChannel('com.vesper.cine/native');
+  static const MethodChannel _channel = MethodChannel('com.theawesomeray.vespercine/native');
 
   late final DynamicLibrary _lib;
   bool _loaded = false;

@@ -5,7 +5,7 @@ plugins {
 }
 
 android {
-    namespace = "com.vesper.cine"
+    namespace = "com.theawesomeray.vespercine"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
@@ -15,7 +15,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.vesper.cine"
+        applicationId = "com.theawesomeray.vespercine"
         minSdk = 30
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode

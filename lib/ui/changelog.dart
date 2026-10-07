@@ -7,6 +7,9 @@ class ChangelogEntry {
 }
 
 const changelog = <ChangelogEntry>[
+  ChangelogEntry('0.22.0', [
+    'New app identity for the Play Store (com.theawesomeray.vespercine): this installs as a separate app next to the old one. Uninstall the old Vesper Cine after copying any clips you want; run Hot Pixel Calibration again in the new app',
+  ]),
   ChangelogEntry('0.21.0', [
     'Image & NR › Hot Pixel Calibration: cover the lens for about a minute and this phone\'s own hot pixels are always removed (was developer-only)',
     'Image & NR › NR Character: TEXTURE (default, most fine detail) or SMOOTH (cleaner low-light footage, slightly softer texture). Was the developer switch "Calibrated Noise Model"',

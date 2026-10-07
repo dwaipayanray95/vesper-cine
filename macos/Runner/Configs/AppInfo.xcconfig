@@ -8,7 +8,7 @@
 PRODUCT_NAME = vesper_cine
 
 // The application's bundle identifier
-PRODUCT_BUNDLE_IDENTIFIER = com.vesper.cine
+PRODUCT_BUNDLE_IDENTIFIER = com.theawesomeray.vespercine
 
 // The copyright displayed in application information
 PRODUCT_COPYRIGHT = Copyright © 2026 com.vesper. All rights reserved.

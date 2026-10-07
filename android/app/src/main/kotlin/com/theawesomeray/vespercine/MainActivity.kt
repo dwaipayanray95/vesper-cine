@@ -1,4 +1,4 @@
-package com.vesper.cine
+package com.theawesomeray.vespercine
 
 import android.Manifest
 import android.content.ContentResolver
@@ -29,7 +29,7 @@ import java.util.Date
 import java.util.Locale
 
 class MainActivity : FlutterActivity() {
-    private val channelName = "com.vesper.cine/native"
+    private val channelName = "com.theawesomeray.vespercine/native"
 
     // The viewfinder is a plain SurfaceView behind the (transparent) Flutter
     // UI: the GPU engine presents straight to the system compositor, so
