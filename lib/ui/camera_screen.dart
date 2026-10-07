@@ -690,7 +690,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF14171D),
-        title: Text(dark ? 'Sensor calibration: dark' : 'Sensor calibration: white',
+        title: Text(dark ? 'Hot pixel calibration' : 'Sensor calibration: white',
             style: const TextStyle(color: Colors.white, fontSize: 15)),
         content: Text(
           dark
@@ -733,6 +733,11 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     if (base.isEmpty) return;
     final name = base.split('/').last;
     final hot = _calSweepDark ? _saveSweepProfile(base) : null;
+    if (!kDevTools) {
+      // Release: the statistics stay in app files (they're for tools/calibration).
+      _toast(hot == null ? 'Calibration finished' : 'Phone calibrated: $hot hot pixels mapped');
+      return;
+    }
     _engine.publishCalibration(base).then((ok) async {
       await _engine.publishCalibration('${base}_ref');
       await _engine.publishCalibration('${base}_profile');
@@ -821,7 +826,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       _faceDetect = get('faceDetect', _faceDetect);
       _lensCorrection = get('lensCorrection', _lensCorrection);
       _hotPixelFix = get('hotPixelFix', _hotPixelFix);
-      _calibratedNoise = kDevTools ? get('calibratedNoise', _calibratedNoise) : true;
+      _calibratedNoise = get('calibratedNoise', _calibratedNoise);
       _temporalNr = get('temporalNr', _temporalNr);
       _chromaNr = get('chromaNr', _chromaNr);
       _nrAlignment = get('nrAlignment', _nrAlignment);
@@ -1325,6 +1330,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                   _startIsoAnalysis();
                 }
               : null,
+          hotPixelSummary: _defects.isEmpty ? '' : '${_defects.length ~/ 2} hot pixels mapped on this phone',
           onSensorSweep: _streaming && !_recording && _calibrationDir != null
               ? (dark) {
                   Navigator.of(context).pop();

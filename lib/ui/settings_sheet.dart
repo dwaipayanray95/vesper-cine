@@ -53,7 +53,8 @@ class SettingsScreen extends StatefulWidget {
   final ValueChanged<bool> onFaceDetectChanged;
   final String isoAnalysisSummary; // '' = not analyzed yet
   final VoidCallback? onAnalyzeIso;
-  final void Function(bool dark)? onSensorSweep; // Developer: sensor calibration sweeps
+  final void Function(bool dark)? onSensorSweep; // Dark: Hot Pixel Calibration (all builds); White: Developer
+  final String hotPixelSummary; // '' = this phone has no hot-pixel map yet
 
   const SettingsScreen({
     super.key,
@@ -101,6 +102,7 @@ class SettingsScreen extends StatefulWidget {
     this.isoAnalysisSummary = '',
     this.onAnalyzeIso,
     this.onSensorSweep,
+    this.hotPixelSummary = '',
   });
 
   @override
@@ -432,6 +434,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
         },
       ),
     ),
+    _settingRow(
+      'Hot Pixel Calibration',
+      widget.hotPixelSummary.isEmpty
+          ? 'Not done yet: maps this phone\'s own hot pixels so they are always removed (lens covered, ~1 min)'
+          : '${widget.hotPixelSummary}. Run again now and then: new ones are added',
+      _button(widget.hotPixelSummary.isEmpty ? 'CALIBRATE' : 'RE-RUN',
+          widget.onSensorSweep == null ? null : () => widget.onSensorSweep!(true), icon: Icons.dark_mode),
+    ),
     const SizedBox(height: 10),
     _sectionHeader('NOISE REDUCTION'),
     _settingRow(
@@ -467,6 +477,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
         onSelected: (i) {
           setState(() => chromaNr = _chromaLevels[i]);
           widget.onChromaNrChanged(_chromaLevels[i]);
+        },
+      ),
+    ),
+    _settingRow(
+      'NR Character',
+      calibratedNoise
+          ? 'SMOOTH: also treats the measured midtone grain as noise. Cleaner low-light footage, slightly softer fine texture'
+          : 'TEXTURE: keeps the most fine detail. Shadows and high ISO are always cleaned with the measured sensor noise',
+      Segmented(
+        options: const ['TEXTURE', 'SMOOTH'],
+        selected: calibratedNoise ? 1 : 0,
+        onSelected: (i) {
+          setState(() => calibratedNoise = i == 1);
+          widget.onCalibratedNoiseChanged?.call(i == 1);
         },
       ),
     ),
@@ -555,20 +579,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ),
     ),
     _settingRow(
-      'Calibrated Noise Model',
-      calibratedNoise
-          ? 'ON: NR and sharpening also use the measured midtone noise: a little smoother, slightly less fine texture'
-          : 'OFF (default): the camera\'s own midtone noise figure, more texture. Shadows / high ISO always use the measured noise',
-      Segmented(
-        options: const ['ON', 'OFF'],
-        selected: calibratedNoise ? 0 : 1,
-        onSelected: (i) {
-          setState(() => calibratedNoise = i == 0);
-          widget.onCalibratedNoiseChanged?.call(i == 0);
-        },
-      ),
-    ),
-    _settingRow(
       'App Log',
       'Engine log since launch: GPU, guard, camera, recorder. Copy it to share',
       _button('OPEN', () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const AppLogScreen())),
@@ -593,8 +603,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ),
     _settingRow(
       'Sensor Calibration · Dark',
-      'Lens covered: black level, dark noise and hot pixels at every ISO (~30-60 s). '
-          'Result in Download/Vesper Calibration (tools/calibration/sensor.py)',
+      'Same as Image & NR › Hot Pixel Calibration; in developer builds the statistics also go to '
+          'Download/Vesper Calibration (tools/calibration/sensor.py)',
       _button('RUN', widget.onSensorSweep == null ? null : () => widget.onSensorSweep!(true), icon: Icons.dark_mode),
     ),
     _settingRow(
@@ -647,6 +657,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     ('Monitoring', 'MAG magnifies 3x around the focus point, PEAK highlights what is in focus, ZEBRA marks clipping, FC shows false colour. SCOPE shows a histogram or waveform.'),
     ('White balance', 'Open the WB tile. The eyedropper sets white balance from a neutral spot you tap.'),
     ('Look', 'Apple Log is flat on purpose, for grading. The REC.709 LUT button only changes the viewfinder; the recording stays log.'),
+    ('Hot pixels', 'Image & NR › Hot Pixel Calibration: cover the lens, run it once (about a minute). The phone\'s own hot pixels are then always removed.'),
     ('Native ISO', 'Exposure · Color · Focus › Native ISO Analysis: cover the lens, run it once. Auto-exposure then prefers the cleanest ISOs, marked ★ on the ISO dial.'),
   ];
 

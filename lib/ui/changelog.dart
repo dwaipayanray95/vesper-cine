@@ -7,6 +7,10 @@ class ChangelogEntry {
 }
 
 const changelog = <ChangelogEntry>[
+  ChangelogEntry('0.21.0', [
+    'Image & NR › Hot Pixel Calibration: cover the lens for about a minute and this phone\'s own hot pixels are always removed (was developer-only)',
+    'Image & NR › NR Character: TEXTURE (default, most fine detail) or SMOOTH (cleaner low-light footage, slightly softer texture). Was the developer switch "Calibrated Noise Model"',
+  ]),
   ChangelogEntry('0.20.0', [
     'Calibrated Noise Model (Developer) is OFF by default and now only affects midtones and highlights: in a still daylight test it removed no visible grain but softened fine texture slightly. Shadows and high ISO always use the measured sensor noise',
     'The heat badge only appears when the phone is hot enough for the app to step processing down (HOT / VERY HOT); the old WARM stage changed nothing and is no longer shown',
