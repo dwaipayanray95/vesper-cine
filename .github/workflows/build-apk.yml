@@ -162,6 +162,19 @@ jobs:
           echo "path=$DEST" >> "$GITHUB_OUTPUT"
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
 
+      # Guard against the 13 Oct start-up crash: R8 must keep WorkManager's
+      # database class (see android/app/proguard-rules.pro). Looks for its name in
+      # the built app; if shrinking renamed or removed it, stop before release.
+      - name: Check R8 kept WorkManager's database
+        run: |
+          APK="${{ steps.apk.outputs.path }}"
+          if unzip -p "$APK" 'classes*.dex' | strings | grep -q 'Landroidx/work/impl/WorkDatabase_Impl;'; then
+            echo "WorkDatabase_Impl present in the app"
+          else
+            echo "::error::WorkManager's database class is missing or renamed in the built app: the app would crash at start-up. Fix android/app/proguard-rules.pro"
+            exit 1
+          fi
+
       # Handed to the "release" job below, which publishes the APK (and the
       # bundle, if built) together in ONE release.
       - name: Hand the APK to the release job
