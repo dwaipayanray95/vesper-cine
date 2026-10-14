@@ -7,6 +7,9 @@ class ChangelogEntry {
 }
 
 const changelog = <ChangelogEntry>[
+  ChangelogEntry('0.26.6', [
+    'Play Store: the app is no longer hidden from phones that do not declare the RAW-camera flag (the Pixel 10 showed as not compatible); the app still checks the camera itself when it opens',
+  ]),
   ChangelogEntry('0.26.3', [
     'Crash reports now go to the real Vesper Cine Firebase project (when Send crash reports is on)',
   ]),
