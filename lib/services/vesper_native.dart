@@ -8,19 +8,80 @@ import 'package:flutter/services.dart';
 
 class DetectedCamera {
   final String id;
-  final int facing;
+  final int facing; // 0 front, 1 back, 2 external
+  final int hwLevel; // 0 limited, 1 full, 2 legacy, 3 level 3, 4 external
   final bool supportsRaw10;
   final int rawWidth;
   final int rawHeight;
   final double maxFps;
+  // Device check: static facts (no camera has to be opened).
+  final bool manualSensor; // REQUEST_AVAILABLE_CAPABILITIES: MANUAL_SENSOR
+  final bool rawCapability; // ... RAW
+  final bool raw16; // 16-bit RAW_SENSOR output exists (too slow for video)
+  final bool tsRealtime; // sensor timestamps are on the system clock (needed for Gyroflow)
+  final List<RawMode> modes; // every RAW10 size, largest first
+
+  DetectedCamera({
+    required this.id,
+    this.facing = 1,
+    this.hwLevel = 0,
+    this.supportsRaw10 = true,
+    this.rawWidth = 0,
+    this.rawHeight = 0,
+    this.maxFps = 30,
+    this.manualSensor = true,
+    this.rawCapability = true,
+    this.raw16 = false,
+    this.tsRealtime = true,
+    this.modes = const [],
+  });
+
+  bool get isBack => facing == 1;
 
   DetectedCamera.fromJson(Map<String, dynamic> json)
     : id = json['id'] as String,
       facing = json['facing'] as int,
+      hwLevel = (json['hwLevel'] as int?) ?? 0,
       supportsRaw10 = json['supportsRaw10'] as bool,
       rawWidth = json['rawWidth'] as int,
       rawHeight = json['rawHeight'] as int,
-      maxFps = (json['maxFps'] as num).toDouble();
+      maxFps = (json['maxFps'] as num).toDouble(),
+      manualSensor = (json['manualSensor'] as bool?) ?? true,
+      rawCapability = (json['rawCapability'] as bool?) ?? true,
+      raw16 = (json['raw16'] as bool?) ?? false,
+      tsRealtime = (json['tsRealtime'] as bool?) ?? true,
+      modes = ((json['modes'] as List?) ?? const [])
+          .map((m) => RawMode(m['w'] as int, m['h'] as int, (m['maxFps'] as num).toDouble()))
+          .toList();
+}
+
+/// What the GPU side of the engine offers (vesper_get_gpu_info).
+class GpuInfo {
+  final bool cameraOk; // the camera manager started
+  final bool vulkanOk; // Vulkan device + pipelines created
+  final String device;
+  final bool fp16; // 16-bit shader arithmetic
+  final String hqFormat; // R16F, RGBA16F or none
+  const GpuInfo({this.cameraOk = true, this.vulkanOk = true, this.device = '', this.fp16 = true, this.hqFormat = 'R16F'});
+
+  GpuInfo.fromJson(Map<String, dynamic> j)
+    : cameraOk = (j['cameraOk'] as bool?) ?? false,
+      vulkanOk = (j['vulkanOk'] as bool?) ?? false,
+      device = (j['device'] as String?) ?? '',
+      fp16 = (j['fp16'] as bool?) ?? false,
+      hqFormat = (j['hqFormat'] as String?) ?? 'none';
+}
+
+/// One hardware or software HEVC / AV1 encoder, as far as the device check cares.
+class EncoderCaps {
+  final String name;
+  final String mime; // video/hevc or video/av01
+  final bool hardware;
+  final bool main10; // can encode 10-bit
+  final List<int> fpsOk; // of the tested rates, those it reports for 1920x1080
+  const EncoderCaps(this.name, this.mime, this.hardware, this.main10, this.fpsOk);
+
+  String get codec => mime == 'video/hevc' ? 'HEVC' : 'AV1';
 }
 
 /// Snapshot of the native pipeline, polled by the UI.
@@ -165,12 +226,16 @@ class CameraCapabilities {
           .toList();
 
   /// Highest frame rate available for the crop (16:9 may use a faster readout).
+  /// Only modes wide enough for the 1080p quad image count (3840 px, or the
+  /// widest the phone has): a phone whose full-resolution mode is slow but
+  /// which also has a fast binned one must not be limited to the slow one.
   double maxFpsFor(int cropMode) {
     final want = cropMode == 1 ? 4 / 3 : 16 / 9;
-    final fullWidth = modes.isEmpty ? 0 : modes.map((m) => m.width).reduce((a, b) => a > b ? a : b);
+    final widest = modes.isEmpty ? 0 : modes.map((m) => m.width).reduce((a, b) => a > b ? a : b);
+    final minWidth = widest < 3840 ? widest * 0.9 : 3840;
     double best = 0;
     for (final m in modes) {
-      if (m.width < fullWidth * 0.9) continue;
+      if (m.width < minWidth) continue;
       if (cropMode == 1 && (m.aspect - want).abs() > 0.05) continue;
       if (m.maxFps > best) best = m.maxFps;
     }
@@ -240,6 +305,7 @@ class VesperNative {
   late final void Function(int) _setOversampling;
   late final void Function(int) _setProcessingPaused;
   late final void Function(int, int) _setNativeIsos;
+  late final int Function(Pointer<Utf8>, int) _gpuInfo;
   late final void Function(int) _setBudgetGuard;
   late final void Function(int) _setExperiments;
   late final void Function(int) _setViewfinderPaused;
@@ -268,6 +334,9 @@ class VesperNative {
       _init = _lib.lookupFunction<Int32 Function(), int Function()>('vesper_init');
       _enumerate = _lib.lookupFunction<Int32 Function(Pointer<Utf8>, Int32), int Function(Pointer<Utf8>, int)>(
         'vesper_enumerate_cameras',
+      );
+      _gpuInfo = _lib.lookupFunction<Int32 Function(Pointer<Utf8>, Int32), int Function(Pointer<Utf8>, int)>(
+        'vesper_get_gpu_info',
       );
       _open = _lib.lookupFunction<Int32 Function(Pointer<Utf8>), int Function(Pointer<Utf8>)>('vesper_open_camera');
       _startStream = _lib.lookupFunction<Int32 Function(), int Function()>('vesper_start_stream');
@@ -399,7 +468,7 @@ class VesperNative {
   bool initialize() => _loaded && _init() == 0;
 
   String? _readJson(int Function(Pointer<Utf8>, int) fn) {
-    const maxLen = 8192;
+    const maxLen = 32768;
     final buf = calloc<Uint8>(maxLen).cast<Utf8>();
     try {
       return fn(buf, maxLen) > 0 ? buf.toDartString() : null;
@@ -413,6 +482,13 @@ class VesperNative {
     final json = _readJson(_enumerate);
     if (json == null) return [];
     return (jsonDecode(json) as List).map((e) => DetectedCamera.fromJson(e as Map<String, dynamic>)).toList();
+  }
+
+  /// GPU facts for the device check; null if the library isn't loaded.
+  GpuInfo? gpuInfo() {
+    if (!_loaded) return null;
+    final json = _readJson(_gpuInfo);
+    return json == null ? null : GpuInfo.fromJson(jsonDecode(json) as Map<String, dynamic>);
   }
 
   bool openCamera(String id) {
@@ -844,6 +920,28 @@ class VesperNative {
     try {
       return (await _channel.invokeListMethod<String>('encoderInfo')) ?? const [];
     } on PlatformException {
+      return const [];
+    }
+  }
+
+  /// Device check: every HEVC / AV1 encoder with hardware / 10-bit / 1080p-rate facts.
+  Future<List<EncoderCaps>> encoderCheck(List<int> fps) async {
+    if (!Platform.isAndroid) return const [];
+    try {
+      final raw = await _channel.invokeListMethod<Map<Object?, Object?>>('encoderCheck', {'fps': fps}) ?? const [];
+      return [
+        for (final m in raw)
+          EncoderCaps(
+            m['name'] as String,
+            m['mime'] as String,
+            m['hardware'] == true,
+            m['main10'] == true,
+            [for (final f in (m['fpsOk'] as List? ?? const [])) (f as num).toInt()],
+          ),
+      ];
+    } on PlatformException {
+      return const [];
+    } on MissingPluginException {
       return const [];
     }
   }

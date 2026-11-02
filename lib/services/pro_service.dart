@@ -14,7 +14,7 @@ class ProLimits {
   static const maxChromaNr = 0.5; // up to LOW
   static const maxSharpening = 2; // HIGH (3) is Pro
   static const maxRecordQuality = 0; // STANDARD only; HIGH / MAX are Pro
-  // HQ oversampling, open-gate (4:3) recording and Native ISO Analysis are Pro.
+  // HQ oversampling and open-gate (4:3) recording are Pro. (Native ISO Analysis became free in 0.27.0.)
 }
 
 /// The plan: free clips, ad, Pro. A take that is already recording is never

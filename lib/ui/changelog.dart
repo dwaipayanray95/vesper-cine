@@ -7,6 +7,13 @@ class ChangelogEntry {
 }
 
 const changelog = <ChangelogEntry>[
+  ChangelogEntry('0.27.0', [
+    'New: a quick phone check the first time you open the app. It tests that your phone can run Vesper Cine and tries 1080p at 24, 30, 48 and 60 fps with all processing on (about half a minute). You see in plain words what works; frame rates your phone cannot handle are hidden, and ones that only work with reduced processing are marked RQ. Run it again any time: Settings › Info › Re-check this phone',
+    'New: Calibrate this phone. After the check, a short guided setup runs the lens-covered calibrations (hot pixels, then native ISO) one after the other, with one "cover the lens" step. Also under Settings › Image & NR. A dot on the settings gear shows when a calibration is waiting',
+    'The app now remembers which calibrations your phone has done. If an update brings an improved or new calibration, you get one card asking whether to run it now or later',
+    'Native ISO analysis is now free',
+    'Works better on other phones: frame rates are no longer limited by a slow full-resolution raw mode, and a phone whose slowest raw mode is under 24 fps no longer breaks the frame-rate picker',
+  ]),
   ChangelogEntry('0.26.6', [
     'Play Store: the app is no longer hidden from phones that do not declare the RAW-camera flag (the Pixel 10 showed as not compatible); the app still checks the camera itself when it opens',
   ]),

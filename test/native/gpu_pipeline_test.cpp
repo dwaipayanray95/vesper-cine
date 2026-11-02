@@ -177,6 +177,15 @@ int main() {
     // The software GPU is far slower than a phone: disable the budget guard so
     // it never throttles NR/alignment mid-test (that made the pan test flaky).
     gpu.setFrameBudgetMs(1e9);
+    // Device check (0.27.0): the GPU facts the app reports are consistent with what the engine uses.
+    {
+        const std::string hq = gpu.hqFormatName();
+        check(hq == "R16F" || hq == "RGBA16F" || hq == "none", "device check: HQ format name is one of R16F / RGBA16F / none", 0, 0);
+        check((hq != "none") == gpu.oversamplingSupported(), "device check: HQ format agrees with oversamplingSupported()", 0, 0);
+        check(!gpu.deviceName().empty(), "device check: GPU name is reported", 0, 0);
+        std::printf("Device check info: GPU '%s', 16-bit arithmetic %s, HQ format %s\n", gpu.deviceName().c_str(),
+                    gpu.float16Arithmetic() ? "yes" : "no", hq.c_str());
+    }
     std::vector<uint8_t> raw = makeRaw10(TestScene());
     P010 f{};
 

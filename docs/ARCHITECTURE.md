@@ -101,12 +101,24 @@ Swapchain destroy / window change / resource reallocation call `flushSubmits()` 
 HCG native ISO, then gain (never into digital gain). Native ISOs come from a dark-frame ISO sweep
 (`analyzeIsoSweep`). Auto-exposure glides in log space (no jumps).
 
+## Device check and calibration memory
+
+On first launch (and when the check version, Android version, model or camera changes) the app
+runs a device check: static facts from `vesper_enumerate_cameras` / `vesper_get_gpu_info` / the
+Kotlin `encoderCheck`, then a live test per frame rate with the guard off and again with it on.
+Frame rates the phone can't hold are hidden, reduced ones carry an "RQ" tag. The result is
+`vesper_device_check.json`. Which calibrations a phone has done is `vesper_calibration_<cam>.json`
+(`lib/services/calibration_registry.dart`); a new or bumped step asks once per app version.
+Details and the rules: CLAUDE.md.
+
 ## Tests
 
 `test/native/run_tests.sh`: colour science; native type-check against NDK stubs
 (`test/native/android_stubs/`); the real `VulkanEngine` + shaders on Mesa lavapipe (grey code
 value, clipping, rotation, shading, sharpening, HQ detail/moiré/overshoot/noise, TNR ghosting,
 hot pixels, ring reuse); calibration tool; focus controller; ISO analysis; sensor calibration
-statistics, DNG writer and `tools/calibration/sensor.py` on a simulated sensor with planted faults. lavapipe timings are
+statistics, DNG writer and `tools/calibration/sensor.py` on a simulated sensor with planted faults.
+`flutter test` also covers the device-check rules (classification, static checks, live loop against a
+simulated engine) and the calibration registry. lavapipe timings are
 CPU-emulated and noisy — never use them as phone performance numbers.
 `flutter analyze` and `flutter test` cover the Dart side.

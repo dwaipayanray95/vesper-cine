@@ -119,6 +119,12 @@ struct CameraDeviceInfo {
     int32_t hardwareLevel = 0;
     bool supportsRaw10 = false;
     RawMode largestRaw;
+    // Device check (0.27.0): static facts, no camera needs to be opened.
+    bool manualSensor = false;         // REQUEST_AVAILABLE_CAPABILITIES has MANUAL_SENSOR
+    bool rawCapability = false;        // ... has RAW
+    bool supportsRaw16 = false;        // RAW_SENSOR (16-bit) output exists
+    bool timestampRealtime = false;    // SENSOR_INFO_TIMESTAMP_SOURCE == REALTIME
+    std::vector<RawMode> rawModes;     // every RAW10 output size, largest first
 };
 
 class CameraEngine {

@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <deque>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -104,6 +105,12 @@ public:
     void setThermalLevel(int level, float headroom) { thermalHeadroom_ = headroom; thermalLevel_ = level; }
     int thermalLevel() const { return thermalLevel_; }
     bool oversamplingSupported() const { return hqSupported_; }
+    // Device check (0.27.0): what this GPU offers. Valid after initialize().
+    bool float16Arithmetic() const { return fp16_; }
+    const char* hqFormatName() const {
+        return !hqSupported_ ? "none" : (hqFormat_ == VK_FORMAT_R16_SFLOAT ? "R16F" : "RGBA16F");
+    }
+    const std::string& deviceName() const { return deviceName_; }
     bool oversamplingThrottled() const { return hqThrottled_; }
     // Averaged GPU time per frame (ms) from timestamp queries; 0 if unsupported.
     double gpuFrameMs() const { return gpuFrameMs_; }
@@ -233,6 +240,7 @@ private:
     Slot slots_[kRingSize];
     Image quadImage_, cleanImage_, historyImage_, vfImage_; // clean/history: temporal NR ping-pong pair
     int pingParity_ = 0;
+    std::string deviceName_;
     bool fp16_ = false; // shaderFloat16 enabled: HQ pass uses the 16-bit variant
     Image curLowImage_, histLowImage_, motionImage_; // tile alignment (align.comp)
     Image greenImage_;                              // full-res green (green.comp), HQ oversampling
@@ -312,6 +320,7 @@ private:
     double maxWaitMs_ = 0;
     std::mutex frameMutex_; // serialises processFrame against release()
     bool initialized_ = false;
+    bool initFailed_ = false; // initialize() failed once: not retried
     uint64_t frameCount_ = 0;
     uint64_t droppedFrames_ = 0;
     double accCopyMs_ = 0, accWaitMs_ = 0, accSubmitMs_ = 0;

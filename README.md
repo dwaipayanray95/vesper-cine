@@ -7,7 +7,7 @@ A cinema camera app for Google Pixel phones (developed on a **Pixel 10**). It re
 - Per-device colour calibration: [`tools/calibration/README.md`](tools/calibration/README.md)
 - User-facing changelog: [`lib/ui/changelog.dart`](lib/ui/changelog.dart) (shown in the app under Settings › Info)
 
-## Status (v0.11)
+## Status (v0.27)
 
 | Area | State |
 |---|---|
@@ -24,6 +24,8 @@ A cinema camera app for Google Pixel phones (developed on a **Pixel 10**). It re
 | PDAF/laser tap AF (track or lock), face detection; clean auto-exposure (native ISO first, shutter to 180°, then gain); native ISO analysis | Working |
 | Side-rail Settings with Info tab (version, changelog, how-to, FAQ); in-app log (developer builds) | Working |
 | **4K (UHD) output** | Engine has a `resolution` setting that upsamples the 2000-px quad image; not exposed in the UI. A real UHD path is the next big feature (see Roadmap). |
+| **Device check** (first launch, re-run in Settings › Info): static checks (RAW10 back camera, manual + raw capability, Vulkan / 16-bit / HQ format, 10-bit hardware encoder) and a live test at 24 / 30 / 48 / 60 fps with everything on; frame rates the phone can't hold are hidden, "reduced" ones are marked RQ | Working (0.27) |
+| **Calibration memory + "Calibrate this phone"**: remembers which calibrations (hot pixels, native ISO) are done, asks once after an update that adds or improves one | Working (0.27) |
 | Gyroflow IMU log, external SSD, audio levels | Planned |
 
 Performance at 1080p on Pixel 10 (GPU time per frame, everything on): **~29–32 ms** — fits 24/25 fps (41.7/40 ms budgets). At 30 fps the guard first runs alignment at a reduced rate (then pauses it if needed); at 48/60 fps it pauses HQ and NR as well. Details in `CLAUDE.md`.

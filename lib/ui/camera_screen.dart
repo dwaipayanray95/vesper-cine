@@ -6,6 +6,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../build_flags.dart';
+import '../services/calibration_registry.dart';
+import '../services/device_check.dart';
 import '../services/pro_service.dart';
 import '../services/vesper_native.dart';
 import 'cine_control_tile.dart';
@@ -13,6 +15,7 @@ import 'pro_dialog.dart';
 import 'focus_panel.dart';
 import 'scopes_overlay.dart';
 import 'settings_sheet.dart';
+import 'setup_overlays.dart';
 import 'wb_panel.dart';
 import 'wheel_dial.dart';
 
@@ -178,6 +181,25 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   bool _calSweepDark = false;
   String _savedSettings = '';
 
+  // --- Device check and calibration memory (0.27.0) ---
+  DeviceCheckResult? _deviceCheck; // saved result (vesper_device_check.json) of this phone
+  bool _dcFirstRun = false; // no result file at launch: new user (or first start of 0.27)
+  Pretend _pretend = Pretend.off; // developer switch: fake unsupported / slow phone
+  DeviceCheckPhase? _dcPhase; // the device-check screen is up
+  String _dcProgress = '';
+  double _dcFraction = 0;
+  DeviceCheckResult? _dcShown;
+  bool _dcSkipWait = false;
+  bool _deviceChecking = false;
+  Completer<void>? _dcDismiss;
+  Map<String, dynamic>? _deviceInfoMap;
+  String _appVersion = '';
+  CalibrationRecord _calib = const CalibrationRecord();
+  CalibFlowState? _flow; // the guided "Calibrate this phone" screen is up
+  Completer<void>? _flowClosed;
+  Completer<bool>? _stepDone; // a calibration step is running; completes when its sweep ends
+  bool _flowCancelled = false;
+
   bool _settingsOpen = false; // settings page covers the viewfinder: processing paused
   bool _benchmarking = false;
   // Recording power saver (Settings › Recording): 0 off, 1 dim screen, 2 dim +
@@ -261,7 +283,11 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
 
   Future<void> _start() async {
     if (!_engine.initialize()) {
-      setState(() => _statusMessage = 'NATIVE ENGINE UNAVAILABLE (ANDROID ONLY)');
+      if (_engine.isLoaded) {
+        // On a phone: the graphics driver (Vulkan) or the camera service didn't start. That is a device-check result.
+        await _runDeviceCheck(startup: true);
+      }
+      if (mounted) setState(() => _statusMessage = 'NATIVE ENGINE UNAVAILABLE (ANDROID ONLY)');
       return;
     }
     // Wait for the camera permission before touching the camera: on first
@@ -274,11 +300,15 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     _permissionDenied = false;
     final cam = _engine.enumerateCameras().where((c) => c.supportsRaw10).firstOrNull;
     if (cam == null) {
-      setState(() => _statusMessage = 'NO RAW10-CAPABLE CAMERA FOUND');
+      // Say why in plain words (16-bit-only raw, no manual control, ...) and let the owner try anyway.
+      await _runDeviceCheck(startup: true);
+      if (mounted) setState(() => _statusMessage = 'NO RAW10-CAPABLE CAMERA FOUND');
       return;
     }
     _cameraId = cam.id;
     final info = await _engine.deviceInfo();
+    _deviceInfoMap = info;
+    _appVersion = (info?['version'] as String?) ?? '';
     _engine.log('Vesper Cine ${info?['version']} (build ${info?['build']}) on ${info?['model']}, Android ${info?['android']}',
         tag: 'Vesper_UI');
     _deviceModel = info?['model'] as String?;
@@ -291,11 +321,15 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     if (filesDir != null) {
       _loadIsoAnalysis();
       _settingsFile = File('$filesDir/vesper_settings.json');
+      // New install = no settings file yet (decided before anything writes it). Upgraders have one.
+      _dcFirstRun = !_settingsFile!.existsSync();
       _loadSettings();
+      _loadDeviceCheck(); // before the first fps list is built: "unsupported" rates are hidden
     }
     _clampToPlan(quiet: true);
     await _loadColorProfile();
     await _loadSensorProfile();
+    _loadCalibration(); // needs the hot-pixel map and the ISO analysis (migration of older installs)
     final recovered = await _engine.recoverRecordings();
     if (recovered.isNotEmpty && mounted) {
       final (name, complete) = recovered.first;
@@ -307,18 +341,20 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     }
     if (!await _openAndStream(createTexture: true)) return;
     _poll = Timer.periodic(const Duration(milliseconds: 250), (_) => _onPoll());
+    await _startupFlows();
   }
 
   // Opens the camera, pushes every setting and starts streaming. Also used
   // when returning from the background (Android revokes camera access there).
   Future<bool> _openAndStream({bool createTexture = false}) async {
     _streamGeneration++;
+    _abortCalibrationStep();
     if (!_engine.openCamera(_cameraId!)) {
       setState(() => _statusMessage = 'FAILED TO OPEN CAMERA $_cameraId');
       return false;
     }
     _caps = _engine.capabilities();
-    if (!_fpsOptions.contains(_fps)) _fps = _fpsOptions.last;
+    if (!_fpsOptions.contains(_fps)) _fps = _fallbackFps();
     _iso = _iso.clamp(_caps?.minIso ?? 50, _caps?.maxIso ?? 3200);
 
     _engine.setCropMode(_cropMode);
@@ -366,6 +402,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
         _engine.stopRecording();
         _finishRecording('user');
       }
+      _abortCalibrationStep();
       if (_streaming) {
         _engine.closeCamera();
         _streaming = false;
@@ -646,76 +683,89 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     } catch (_) {}
   }
 
-  Future<void> _startIsoAnalysis() async {
-    if (_recording || !_streaming || _isoAnalysisPath == null) return;
-    final go = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF14171D),
-        title: const Text('Native ISO analysis', style: TextStyle(color: Colors.white, fontSize: 15)),
-        content: const Text(
-          'Cover the lens completely: a lens cap, or a finger pressed flat over the lens with a dark cloth on top. '
-          'Keep the phone still.\n\nThe app steps through every ISO and measures the sensor noise (~15 s). '
-          'Your exposure settings are restored afterwards.',
-          style: TextStyle(color: Colors.white70, fontSize: 12),
+  // silent: started from the guided "Calibrate this phone" screen, which has already
+  // asked for the lens to be covered. Returns whether the analysis started.
+  Future<bool> _startIsoAnalysis({bool silent = false}) async {
+    if (_recording || !_streaming || _isoAnalysisPath == null || _isoSweepRunning || _calSweepRunning) return false;
+    if (!silent) {
+      final go = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: const Color(0xFF14171D),
+          title: const Text('Native ISO analysis', style: TextStyle(color: Colors.white, fontSize: 15)),
+          content: const Text(
+            'Cover the lens completely: a lens cap, or a finger pressed flat over the lens with a dark cloth on top. '
+            'Keep the phone still.\n\nThe app steps through every ISO and measures the sensor noise (~15 s). '
+            'Your exposure settings are restored afterwards.',
+            style: TextStyle(color: Colors.white70, fontSize: 12),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('CANCEL')),
+            TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('START')),
+          ],
         ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('CANCEL')),
-          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('START')),
-        ],
-      ),
-    );
-    if (go != true || !mounted) return;
+      );
+      if (go != true || !mounted) return false;
+    }
     if (_engine.startIsoSweep(_isoAnalysisPath!, _deviceModel ?? 'unknown')) {
       setState(() => _isoSweepRunning = true);
-    } else {
-      _toast('Could not start the ISO analysis');
+      return true;
     }
+    _toast('Could not start the ISO analysis');
+    return false;
   }
 
   void _onIsoSweepFinished(EngineStatus s) {
     _isoSweepRunning = false;
+    var ok = false;
     if (s.isoSweepError.isNotEmpty) {
       if (s.isoSweepError != 'cancelled') _toast('ISO analysis failed: ${s.isoSweepError}');
-      return;
+    } else {
+      _loadIsoAnalysis();
+      final a = _isoAnalysis;
+      if (a != null) {
+        _engine.setNativeIsos(a.baseIso, a.hcgIso);
+        _toast(a.summary);
+        ok = true;
+        _markCalibrationDone(kNativeIsoStep);
+      }
     }
-    _loadIsoAnalysis();
-    final a = _isoAnalysis;
-    if (a != null) {
-      _engine.setNativeIsos(a.baseIso, a.hcgIso);
-      _toast(a.summary);
-    }
+    _stepDone?.complete(ok);
+    _stepDone = null;
   }
 
   // --- Sensor calibration sweeps (tools/calibration/sensor.py) -------------
-  Future<void> _startSensorSweep(bool dark) async {
+  // silent: see _startIsoAnalysis. Returns whether the sweep started.
+  Future<bool> _startSensorSweep(bool dark, {bool silent = false}) async {
     final dir = _calibrationDir;
-    if (_recording || !_streaming || dir == null || _isoSweepRunning || _calSweepRunning) return;
-    final go = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF14171D),
-        title: Text(dark ? 'Hot pixel calibration' : 'Sensor calibration: white',
-            style: const TextStyle(color: Colors.white, fontSize: 15)),
-        content: Text(
-          dark
-              ? 'No light may reach the lens: lay the phone face down on a dark cloth (or use a lens cap and '
-                  'cover it with a cloth). Don\'t move it until it finishes (~30-60 s).\n\n'
-                  'The app steps through every ISO and measures black level, dark noise and hot pixels. '
-                  'Your exposure settings are restored afterwards.'
-              : 'Hold two layers of plain white printer paper flat against the lens and point the phone at '
-                  'bright daylight: a window or the sky. Not a lamp (lamps flicker). Keep it still until it '
-                  'finishes (~1-2 min).\n\nThe app picks the exposures itself and measures noise, lens shading, '
-                  'the clip point and linearity. Your exposure settings are restored afterwards.',
-          style: const TextStyle(color: Colors.white70, fontSize: 12),
+    if (_recording || !_streaming || dir == null || _isoSweepRunning || _calSweepRunning) return false;
+    if (!silent) {
+      final go = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: const Color(0xFF14171D),
+          title: Text(dark ? 'Hot pixel calibration' : 'Sensor calibration: white',
+              style: const TextStyle(color: Colors.white, fontSize: 15)),
+          content: Text(
+            dark
+                ? 'No light may reach the lens: lay the phone face down on a dark cloth (or use a lens cap and '
+                    'cover it with a cloth). Don\'t move it until it finishes (~30-60 s).\n\n'
+                    'The app steps through every ISO and measures black level, dark noise and hot pixels. '
+                    'Your exposure settings are restored afterwards.'
+                : 'Hold two layers of plain white printer paper flat against the lens and point the phone at '
+                    'bright daylight: a window or the sky. Not a lamp (lamps flicker). Keep it still until it '
+                    'finishes (~1-2 min).\n\nThe app picks the exposures itself and measures noise, lens shading, '
+                    'the clip point and linearity. Your exposure settings are restored afterwards.',
+            style: const TextStyle(color: Colors.white70, fontSize: 12),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('CANCEL')),
+            TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('START')),
+          ],
         ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('CANCEL')),
-          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('START')),
-        ],
-      ),
-    );
-    if (go != true || !mounted) return;
+      );
+      if (go != true || !mounted) return false;
+    }
     final stamp = DateTime.now().toIso8601String().substring(0, 19).replaceAll(RegExp(r'[:T]'), '-');
     final base = '$dir/VSENSOR_${dark ? 'dark' : 'white'}_${_cameraId}_$stamp';
     if (_engine.startSensorSweep(dark: dark, basePath: base, deviceModel: _deviceModel ?? 'unknown')) {
@@ -723,25 +773,34 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
         _calSweepRunning = true;
         _calSweepDark = dark;
       });
-    } else {
-      _toast('Could not start the sensor calibration');
+      return true;
     }
+    _toast('Could not start the sensor calibration');
+    return false;
   }
 
   void _onSensorSweepFinished(EngineStatus s) {
+    final ok = _finishSensorSweep(s);
+    if (ok && _calSweepDark) _markCalibrationDone(kHotPixelsStep);
+    _stepDone?.complete(ok);
+    _stepDone = null;
+  }
+
+  // Returns whether the sweep finished successfully.
+  bool _finishSensorSweep(EngineStatus s) {
     _calSweepRunning = false;
     if (s.calSweepError.isNotEmpty) {
       if (s.calSweepError != 'cancelled') _toast('Sensor calibration failed: ${s.calSweepError}');
-      return;
+      return false;
     }
     final base = s.calSweepResult;
-    if (base.isEmpty) return;
+    if (base.isEmpty) return false;
     final name = base.split('/').last;
     final hot = _calSweepDark ? _saveSweepProfile(base) : null;
     if (!kDevTools) {
       // Release: the statistics stay in app files (they're for tools/calibration).
       _toast(hot == null ? 'Calibration finished' : 'Phone calibrated: $hot hot pixels mapped');
-      return;
+      return true;
     }
     _engine.publishCalibration(base).then((ok) async {
       await _engine.publishCalibration('${base}_ref');
@@ -750,6 +809,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       final saved = ok ? 'Saved $name.json to Downloads/Vesper Calibration' : 'Saved $name.json (app files only)';
       _toast(hot == null ? saved : 'Phone calibrated: noise per ISO + $hot hot pixels mapped. $saved');
     });
+    return true;
   }
 
   // Sub-label for the ISO dial: native (star), extended low (L), digital gain (D).
@@ -761,6 +821,419 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     if ((digitalFrom > 0 && iso >= digitalFrom) || (maxAnalog > 0 && iso > maxAnalog)) return 'D';
     if (a != null && iso < a.baseIso) return 'L';
     return null;
+  }
+
+  // --- Device check (0.27.0) -----------------------------------------------
+  // Runs on the first launch, when the check itself was improved, or when Android / the
+  // model / the camera changed (deviceCheckDue); and on demand (Settings › Info). Static
+  // checks first, then a live speed test at each frame rate with all processing on.
+  File? get _deviceCheckFile => _filesDir == null ? null : File('$_filesDir/vesper_device_check.json');
+
+  String get _androidVersion {
+    final i = _deviceInfoMap;
+    return '${i?['android'] ?? ''} (SDK ${i?['sdk'] ?? '?'})';
+  }
+
+  DeviceCheckResult? _readDeviceCheckFile() {
+    try {
+      final f = _deviceCheckFile;
+      final text = f != null && f.existsSync() ? f.readAsStringSync() : null;
+      return text == null ? null : DeviceCheckResult.decode(text);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // The current frame rate isn't offered any more (after a check, or after a pretend result went away).
+  void _revalidateFps() {
+    if (_cameraId == null || _caps == null || _fpsOptions.contains(_fps)) return;
+    setState(() => _fps = _fallbackFps());
+    _engine.setFrameRate(_fps);
+    _applyShutter();
+    _saveSettings();
+  }
+
+  void _loadDeviceCheck() {
+    _deviceCheck = _readDeviceCheckFile();
+    if (_deviceCheck != null) {
+      _engine.log('Device check on file: ${summarize(_deviceCheck!)}', tag: 'Vesper_UI');
+    }
+  }
+
+  void _saveDeviceCheck(DeviceCheckResult r) {
+    final f = _deviceCheckFile;
+    if (f == null) return;
+    try {
+      final tmp = File('${f.path}.tmp')..writeAsStringSync(r.encode(), flush: true);
+      tmp.renameSync(f.path);
+    } catch (_) {}
+  }
+
+  // Full quality on, 16:9: what the check measures. Every setting is put back by _restoreAfterDeviceCheck.
+  void _applyCheckQuality() {
+    _engine.setCropMode(0);
+    _engine.setOversampling(true);
+    _engine.setSharpening(1);
+    _engine.setTemporalNr(0.7);
+    _engine.setChromaNr(0.5);
+    _engine.setNrAlignment(true);
+  }
+
+  void _restoreAfterDeviceCheck() {
+    _engine.setCropMode(_cropMode);
+    _engine.setOversampling(_oversampling);
+    _engine.setSharpening(_sharpening);
+    _engine.setTemporalNr(_temporalNr);
+    _engine.setChromaNr(_chromaNr);
+    _engine.setNrAlignment(_nrAlignment);
+    _engine.setBudgetGuard(_gpuGuard);
+    _engine.setFrameRate(_fps);
+    _applyShutter();
+  }
+
+  // startup: called from _start() before the camera is open (no RAW10 camera, or the engine did not start).
+  Future<void> _runDeviceCheck({bool startup = false}) async {
+    if (_deviceChecking || _recording || _isoSweepRunning || _calSweepRunning || _benchmarking) return;
+    _deviceChecking = true;
+    try {
+      final info = _deviceInfoMap ?? await _engine.deviceInfo();
+      _deviceInfoMap = info;
+      _filesDir ??= info?['filesDir'] as String?;
+      final cameras = _engine.enumerateCameras();
+      final gpu = _engine.gpuInfo() ?? const GpuInfo();
+      final encoders = await _engine.encoderCheck(kCheckFps);
+      final items = evaluateStatic(cameras: cameras, gpu: gpu, encoders: encoders, pretend: _pretend);
+      for (final i in items) {
+        _engine.log('Device check: ${i.title}: ${i.level.name.toUpperCase()} - ${i.text}', tag: 'Vesper_UI');
+      }
+      final cam = pickRawCamera(cameras) ?? cameras.where((c) => c.supportsRaw10).firstOrNull;
+      final canLive = !startup && _streaming && !_recording && items.every((i) => i.level != CheckLevel.fail);
+      var fps = <FpsResult>[];
+      var warm = false;
+      var liveRan = false;
+      var aborted = false;
+      if (mounted) {
+        setState(() {
+          _dcPhase = DeviceCheckPhase.running;
+          _dcProgress = 'Checking your phone…';
+          _dcFraction = 0;
+          _dcSkipWait = false;
+        });
+      }
+      if (canLive) {
+        final reach = reachableCheckFps(cam == null ? 30 : (RawSummary.of(cam).maxFps169 > 0 ? RawSummary.of(cam).maxFps169 : (_caps?.maxFpsFor(0) ?? 30)));
+        final fpsList = reach.isEmpty ? [kCheckFps.first] : reach;
+        if (_pretend == Pretend.slow) {
+          for (final f in fpsList) {
+            if (!mounted) break;
+            setState(() {
+              _dcProgress = 'Checking your phone… $f fps';
+              _dcFraction = fpsList.indexOf(f) / fpsList.length;
+            });
+            await Future<void>.delayed(const Duration(milliseconds: 500));
+          }
+          fps = pretendSlowResults(fpsList);
+          liveRan = true;
+          for (final r in fps) {
+            _engine.log('${r.logLine()} (pretend)', tag: 'Vesper_UI');
+          }
+        } else {
+          final generation = _streamGeneration;
+          final env = LiveEnv(
+            status: () => _engine.status(),
+            applyFullQuality: _applyCheckQuality,
+            setFps: (f) {
+              _engine.setFrameRate(f.toDouble());
+              _applyShutter();
+            },
+            setGuard: _engine.setBudgetGuard,
+            interrupted: () => !mounted || _streamGeneration != generation || !_streaming || _recording,
+            log: (line) => _engine.log(line, tag: 'Vesper_UI'),
+            delay: (d) => Future<void>.delayed(d),
+          );
+          _engine.setBudgetGuard(false);
+          // A warm phone gives pessimistic numbers: wait for it to cool (or "test anyway").
+          if (isWarm(_engine.status()) && mounted) setState(() => _dcPhase = DeviceCheckPhase.waitingWarm);
+          warm = await waitUntilCool(env, skip: () => _dcSkipWait);
+          if (mounted && _dcPhase == DeviceCheckPhase.waitingWarm) setState(() => _dcPhase = DeviceCheckPhase.running);
+          LiveOutcome out;
+          try {
+            out = await runLiveTest(
+              env,
+              fpsList,
+              startedWarm: warm,
+              onProgress: (f, fraction) {
+                if (mounted) {
+                  setState(() {
+                    _dcProgress = 'Checking your phone… $f fps';
+                    _dcFraction = fraction;
+                  });
+                }
+              },
+            );
+          } finally {
+            // Whatever happened (done, interrupted, error): the user's own settings back.
+            if (_streaming) _restoreAfterDeviceCheck();
+          }
+          fps = out.fps;
+          warm = out.measuredWarm;
+          aborted = out.aborted;
+          liveRan = !aborted;
+        }
+      }
+      if (aborted) {
+        // The camera restarted (app left the screen): nothing is saved, it runs again next launch.
+        _engine.log('Device check interrupted (camera restarted); nothing saved', tag: 'Vesper_UI');
+        if (mounted) setState(() => _dcPhase = null);
+        if (mounted && !startup) _toast('Device check interrupted. It will run again next time.');
+        return;
+      }
+      var result = DeviceCheckResult(
+        model: _deviceModel ?? (info?['model'] as String? ?? ''),
+        androidVersion: _androidVersion,
+        appVersion: _appVersion,
+        appBuild: (info?['build'] as String?) ?? '',
+        cameraId: cam?.id ?? '',
+        timestamp: DateTime.now().toIso8601String(),
+        items: items,
+        fps: fps,
+        liveRan: liveRan,
+        measuredWarm: liveRan && warm,
+        pretend: _pretend,
+      );
+      if (liveRan && fps.isNotEmpty && !fps.any((f) => f.cls != FpsClass.unsupported)) {
+        // Slower than 24 fps full or reduced: nothing works.
+        result = DeviceCheckResult(
+          model: result.model, androidVersion: result.androidVersion, appVersion: result.appVersion,
+          appBuild: result.appBuild, cameraId: result.cameraId, timestamp: result.timestamp,
+          items: [
+            ...items,
+            const CheckItem('speed', CheckLevel.fail, 'Speed',
+                'The graphics processor cannot keep up with 1080p raw video, even at the lowest frame rate.'),
+          ],
+          fps: fps, liveRan: true, measuredWarm: result.measuredWarm, pretend: _pretend,
+        );
+      }
+      _engine.log('Device check result: ${result.supported ? 'SUPPORTED' : 'NOT SUPPORTED'} - ${summarize(result)}'
+          '${result.measuredWarm ? ' (measured warm)' : ''}${_pretend != Pretend.off ? ' (pretend ${_pretend.name})' : ''}',
+          tag: 'Vesper_UI');
+      if (_pretend == Pretend.off && !startup) _saveDeviceCheck(result); // startup failures are static-only: shown, not kept
+      _deviceCheck = result;
+      if (!mounted) return;
+      // Frame rates the check hid: move off one that is no longer offered.
+      _revalidateFps();
+      _dcDismiss = Completer<void>();
+      setState(() {
+        _dcShown = result;
+        _dcPhase = DeviceCheckPhase.result;
+      });
+      await _dcDismiss!.future;
+      _dcDismiss = null;
+      if (mounted) setState(() => _dcPhase = null);
+    } finally {
+      _deviceChecking = false;
+      if (mounted && _dcPhase != null && _dcDismiss == null) setState(() => _dcPhase = null);
+    }
+  }
+
+  Future<void> _startupFlows() async {
+    if (!mounted || !_streaming) return;
+    final first = _dcFirstRun;
+    final pretending = kDevTools && _pretend != Pretend.off;
+    if (pretending ||
+        deviceCheckDue(_deviceCheck,
+            model: _deviceModel ?? '', androidVersion: _androidVersion, cameraId: _cameraId ?? '')) {
+      await _runDeviceCheck();
+    }
+    if (!mounted || !_streaming || _recording) return;
+    final pending = _pendingCalibration;
+    if (_deviceCheck?.supported == false) {
+      // Unsupported phone (whether or not "Try anyway" was tapped): no pushy setup; Settings still has it.
+      if (first) {
+        _calib = _calib.withPrompted(_appVersion);
+        _saveCalibration();
+      }
+      return;
+    }
+    if (first && pending.isNotEmpty) {
+      // New user: set the phone up right after the check (Skip is always possible).
+      await _openCalibration(firstRun: true);
+      _calib = _calib.withPrompted(_appVersion);
+      _saveCalibration();
+    } else if (shouldPrompt(pending, _calib, _appVersion)) {
+      final run = await showNewCalibrationCard(context, pending);
+      _calib = _calib.withPrompted(_appVersion); // "Later": not again until the app version changes
+      _saveCalibration();
+      if (run && mounted) await _openCalibration(preselect: {for (final s in pending) s.id});
+    }
+  }
+
+  // --- Calibration memory (0.27.0) -------------------------------------------
+  String? get _calibrationRecordPath => _filesDir == null ? null : '$_filesDir/vesper_calibration_$_cameraId.json';
+
+  List<CalibrationStep> get _pendingCalibration => pendingSteps(_calib);
+
+  void _loadCalibration() {
+    final path = _calibrationRecordPath;
+    if (path == null) return;
+    try {
+      final f = File(path);
+      final rec = f.existsSync() ? CalibrationRecord.decode(f.readAsStringSync()) : null;
+      if (rec != null) {
+        _calib = rec;
+        return;
+      }
+    } catch (_) {}
+    // First start with the calibration memory: what this phone already has counts as done.
+    _calib = migrateFromExistingFiles(
+      hasHotPixelProfile: _defects.isNotEmpty,
+      hasIsoAnalysis: _isoAnalysis != null,
+      now: DateTime.now(),
+      appVersion: _appVersion,
+    );
+    _engine.log('Calibration memory created: ${_calib.steps.keys.join(', ')} already done', tag: 'Vesper_UI');
+    _saveCalibration();
+  }
+
+  void _saveCalibration() {
+    final path = _calibrationRecordPath;
+    if (path == null) return;
+    try {
+      final tmp = File('$path.tmp')..writeAsStringSync(_calib.encode(), flush: true);
+      tmp.renameSync(path);
+    } catch (_) {}
+  }
+
+  void _markCalibrationDone(String id) {
+    final step = calibrationSteps.where((s) => s.id == id).firstOrNull;
+    if (step == null) return;
+    _calib = _calib.withDone(id, step.version, DateTime.now(), _appVersion);
+    _saveCalibration();
+    _engine.log('Calibration done: $id v${step.version}', tag: 'Vesper_UI');
+  }
+
+  // Opens the guided screen and returns when it is closed.
+  Future<void> _openCalibration({bool firstRun = false, Set<String>? preselect}) async {
+    if (_recording || !_streaming) {
+      _toast('Open the camera first (not while recording).');
+      return;
+    }
+    final f = CalibFlowState()
+      ..firstRun = firstRun
+      ..selected.addAll(preselect ?? {for (final s in _pendingCalibration) s.id});
+    _flowClosed = Completer<void>();
+    setState(() => _flow = f);
+    await _flowClosed!.future;
+  }
+
+  void _closeCalibration() {
+    setState(() => _flow = null);
+    _flowClosed?.complete();
+    _flowClosed = null;
+  }
+
+  Future<void> _runCalibrationSteps() async {
+    final f = _flow;
+    if (f == null) return;
+    _flowCancelled = false;
+    setState(() => f.phase = CalibPhase.running);
+    for (final step in calibrationSteps) {
+      if (!f.selected.contains(step.id) || !mounted) continue;
+      setState(() => f.currentId = step.id);
+      final ok = await _runCalibrationStep(step.id);
+      f.outcome[step.id] = ok
+          ? (step.id == kHotPixelsStep && _defects.isNotEmpty ? 'done, ${_defects.length ~/ 2} hot pixels mapped' : 'done')
+          : (_flowCancelled ? 'cancelled' : 'did not finish');
+      if (_flowCancelled) break;
+    }
+    if (mounted) setState(() => f.phase = CalibPhase.done);
+  }
+
+  // The camera closed or restarted mid-sweep (app paused, new stream): the step can never finish.
+  void _abortCalibrationStep() {
+    if (_stepDone == null) return;
+    _flowCancelled = true;
+    _isoSweepRunning = false;
+    _calSweepRunning = false;
+    _stepDone?.complete(false);
+    _stepDone = null;
+  }
+
+  Future<bool> _runCalibrationStep(String id) async {
+    _stepDone = Completer<bool>();
+    final started = switch (id) {
+      kHotPixelsStep => await _startSensorSweep(true, silent: true),
+      kNativeIsoStep => await _startIsoAnalysis(silent: true),
+      _ => false,
+    };
+    if (!started) {
+      _stepDone = null;
+      return false;
+    }
+    return _stepDone!.future;
+  }
+
+  Widget _setupOverlays() {
+    final s = _status;
+    final step = _flow?.currentId;
+    final progress = step == kNativeIsoStep ? (s?.isoSweep ?? -1) : (s?.calSweep ?? -1);
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        if (_dcPhase != null)
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () {},
+            child: DeviceCheckOverlay(
+              phase: _dcPhase!,
+              progress: _dcProgress,
+              fraction: _dcFraction,
+              result: _dcShown,
+              onSkipWait: () => setState(() => _dcSkipWait = true),
+              onContinue: () => _dcDismiss?.complete(),
+              onTryAnyway: () {
+                _engine.log('Device check: user chose Try anyway', tag: 'Vesper_UI');
+                _dcDismiss?.complete();
+              },
+            ),
+          ),
+        if (_flow != null && _dcPhase == null)
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () {},
+            child: CalibrateOverlay(
+              flow: _flow!,
+              record: _calib,
+              progress: progress,
+              stage: step == kNativeIsoStep ? '' : (s?.calSweepStage ?? ''),
+              onToggle: (id, run) => setState(() => run ? _flow!.selected.add(id) : _flow!.selected.remove(id)),
+              onStart: () {
+                final needsCover = calibrationSteps.any((c) => _flow!.selected.contains(c.id) && c.needsLensCovered);
+                if (needsCover) {
+                  setState(() => _flow!.phase = CalibPhase.cover);
+                } else {
+                  _runCalibrationSteps();
+                }
+              },
+              onReady: _runCalibrationSteps,
+              onCancel: () {
+                // Always ends the step (even if the engine never reports back); the loop then shows "cancelled".
+                _engine.cancelIsoSweep();
+                _engine.cancelSensorSweep();
+                _abortCalibrationStep();
+                if (_stepDone == null && _flow?.phase == CalibPhase.running) _flowCancelled = true;
+              },
+              onClose: () {
+                if (_flow!.phase == CalibPhase.cover) {
+                  setState(() => _flow!.phase = CalibPhase.list);
+                } else {
+                  _closeCalibration();
+                }
+              },
+            ),
+          ),
+      ],
+    );
   }
 
   // --- Persisted settings -------------------------------------------------
@@ -799,6 +1272,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     'tapSetsExposure': _tapSetsExposure,
     'useProfile': _useProfile,
     'scopeMode': _scopeMode.index,
+    if (kDevTools) 'devPretend': _pretend.index,
   };
 
   void _loadSettings() {
@@ -845,6 +1319,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       _tapSetsExposure = get('tapSetsExposure', _tapSetsExposure);
       _useProfile = get('useProfile', _useProfile);
       _scopeMode = ScopeMode.values[get('scopeMode', _scopeMode.index).clamp(0, ScopeMode.values.length - 1)];
+      if (kDevTools) _pretend = Pretend.values[get('devPretend', _pretend.index).clamp(0, Pretend.values.length - 1)];
       _savedSettings = jsonEncode(_settingsJson());
     } catch (_) {
       // Corrupt or old file: keep defaults; it's rewritten on the next change.
@@ -983,9 +1458,19 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     _toast('Capturing calibration frame…');
   }
 
+  // Frame rates the camera reaches, minus those the device check found too much for this phone.
   List<double> get _fpsOptions {
     final maxFps = _caps?.maxFpsFor(_cropMode) ?? 30;
-    return _allFps.where((f) => f <= maxFps + 0.01).toList();
+    var options = _allFps.where((f) => f <= maxFps + 0.01).toList();
+    if (options.isEmpty) options = [_allFps.first]; // a camera slower than 24 fps: never an empty picker
+    return visibleFps(options, _deviceCheck);
+  }
+
+  // The current frame rate isn't offered any more: the fastest allowed one below it, else the slowest.
+  double _fallbackFps() {
+    final options = _fpsOptions;
+    final below = options.where((f) => f <= _fps + 0.01).toList();
+    return below.isNotEmpty ? below.last : options.first;
   }
 
   int get _frameNs => (1e9 / _fps).round();
@@ -1260,7 +1745,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     if (_recording) return;
     setState(() {
       _cropMode = 1 - _cropMode;
-      if (!_fpsOptions.contains(_fps)) _fps = _fpsOptions.last; // e.g. 60 fps is 16:9-only
+      if (!_fpsOptions.contains(_fps)) _fps = _fallbackFps(); // e.g. 60 fps is 16:9-only
     });
     _engine.setCropMode(_cropMode);
     _engine.setFrameRate(_fps);
@@ -1435,6 +1920,29 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
             setState(() => _faceDetect = val);
             _engine.setFaceDetection(val);
           },
+          pendingCalibrations: _pendingCalibration.length,
+          onCalibrate: _streaming && !_recording
+              ? () {
+                  Navigator.of(context).pop();
+                  _openCalibration();
+                }
+              : null,
+          deviceCheckSummary: _deviceCheck == null ? '' : summarize(_deviceCheck!),
+          onRecheckDevice: _streaming && !_recording
+              ? () {
+                  Navigator.of(context).pop();
+                  _runDeviceCheck();
+                }
+              : null,
+          pretend: _pretend.index,
+          onPretendChanged: (i) {
+            setState(() => _pretend = Pretend.values[i]);
+            if (_pretend == Pretend.off) {
+              // The fake result goes away: the saved real one (or none) applies again.
+              setState(() => _deviceCheck = _readDeviceCheckFile());
+              _revalidateFps();
+            }
+          },
         ),
       ),
     );
@@ -1562,7 +2070,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   @override
   Widget build(BuildContext context) => Stack(
     fit: StackFit.expand,
-    children: [_buildCamera(context), if (_saverActive) _saverOverlay()],
+    children: [_buildCamera(context), if (_saverActive) _saverOverlay(), if (_dcPhase != null || _flow != null) _setupOverlays()],
   );
 
   Widget _buildCamera(BuildContext context) {
@@ -1950,7 +2458,23 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                         IconButton(
                           padding: EdgeInsets.zero,
                           constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-                          icon: const Icon(Icons.settings, color: Colors.white70, size: 20),
+                          icon: Stack(
+                            clipBehavior: Clip.none,
+                            children: [
+                              const Icon(Icons.settings, color: Colors.white70, size: 20),
+                              // A calibration is waiting (Settings › Image & NR › Calibrate this phone).
+                              if (_pendingCalibration.isNotEmpty)
+                                Positioned(
+                                  right: -2,
+                                  top: -2,
+                                  child: Container(
+                                    width: 8,
+                                    height: 8,
+                                    decoration: const BoxDecoration(color: Colors.amber, shape: BoxShape.circle),
+                                  ),
+                                ),
+                            ],
+                          ),
                           tooltip: 'Settings',
                           onPressed: _openSettings,
                         ),
@@ -1974,6 +2498,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                     CineControlTile(
                       label: 'FPS',
                       value: _fpsLabel(_fps),
+                      subtitle: fpsTag(_fps, _deviceCheck),
                       active: _activeWheel == OpenWheelType.fps,
                       enabled: !_recording,
                       onTap: () => _toggleWheel(OpenWheelType.fps),
@@ -2263,6 +2788,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
           title: 'FRAME RATE',
           values: fpsList,
           label: _fpsLabel,
+          subLabel: (f) => fpsTag(f, _deviceCheck), // RQ = only fits with reduced processing
           selectedValue: _fps,
           onChanged: (f) {
             setState(() => _fps = f);

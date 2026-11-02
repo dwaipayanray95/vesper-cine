@@ -55,6 +55,35 @@ bool CameraEngine::initialize() {
     return manager_ != nullptr;
 }
 
+namespace {
+
+// RAW10 output sizes with their minimum frame durations, largest first.
+std::vector<RawMode> readRawModes(const ACameraMetadata* m) {
+    std::vector<RawMode> modes;
+    ACameraMetadata_const_entry e;
+    if (ACameraMetadata_getConstEntry(m, ACAMERA_SCALER_AVAILABLE_STREAM_CONFIGURATIONS, &e) == ACAMERA_OK) {
+        for (uint32_t c = 0; c + 3 < e.count; c += 4) {
+            if (e.data.i32[c] == AIMAGE_FORMAT_RAW10 && e.data.i32[c + 3] == 0) {
+                modes.push_back({e.data.i32[c + 1], e.data.i32[c + 2], 0});
+            }
+        }
+    }
+    if (ACameraMetadata_getConstEntry(m, ACAMERA_SCALER_AVAILABLE_MIN_FRAME_DURATIONS, &e) == ACAMERA_OK) {
+        for (auto& mode : modes) {
+            for (uint32_t c = 0; c + 3 < e.count; c += 4) {
+                if (e.data.i64[c] == AIMAGE_FORMAT_RAW10 && e.data.i64[c + 1] == mode.width && e.data.i64[c + 2] == mode.height)
+                    mode.minFrameDurationNs = e.data.i64[c + 3];
+            }
+        }
+    }
+    std::sort(modes.begin(), modes.end(), [](const RawMode& a, const RawMode& b) {
+        return static_cast<int64_t>(a.width) * a.height > static_cast<int64_t>(b.width) * b.height;
+    });
+    return modes;
+}
+
+} // namespace
+
 std::vector<CameraDeviceInfo> CameraEngine::enumerateCameras() {
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<CameraDeviceInfo> out;
@@ -89,8 +118,22 @@ std::vector<CameraDeviceInfo> CameraEngine::enumerateCameras() {
                 }
             }
         }
-        LOGI("Camera %s facing=%d hw=%d RAW10=%d %dx%d max %.1f fps", d.id.c_str(), d.facing, d.hardwareLevel,
-             d.supportsRaw10, d.largestRaw.width, d.largestRaw.height, d.largestRaw.maxFps());
+        if (ACameraMetadata_getConstEntry(chars, ACAMERA_REQUEST_AVAILABLE_CAPABILITIES, &e) == ACAMERA_OK) {
+            for (uint32_t c = 0; c < e.count; ++c) {
+                if (e.data.u8[c] == ACAMERA_REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR) d.manualSensor = true;
+                if (e.data.u8[c] == ACAMERA_REQUEST_AVAILABLE_CAPABILITIES_RAW) d.rawCapability = true;
+            }
+        }
+        if (ACameraMetadata_getConstEntry(chars, ACAMERA_SCALER_AVAILABLE_STREAM_CONFIGURATIONS, &e) == ACAMERA_OK) {
+            for (uint32_t c = 0; c + 3 < e.count; c += 4)
+                if (e.data.i32[c] == AIMAGE_FORMAT_RAW16 && e.data.i32[c + 3] == 0) d.supportsRaw16 = true;
+        }
+        if (ACameraMetadata_getConstEntry(chars, ACAMERA_SENSOR_INFO_TIMESTAMP_SOURCE, &e) == ACAMERA_OK)
+            d.timestampRealtime = e.data.u8[0] == ACAMERA_SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME;
+        if (d.supportsRaw10) d.rawModes = readRawModes(chars);
+        LOGI("Camera %s facing=%d hw=%d RAW10=%d %dx%d max %.1f fps, RAW16=%d manual=%d rawCap=%d tsRealtime=%d", d.id.c_str(), d.facing,
+             d.hardwareLevel, d.supportsRaw10, d.largestRaw.width, d.largestRaw.height, d.largestRaw.maxFps(), d.supportsRaw16,
+             d.manualSensor, d.rawCapability, d.timestampRealtime);
         out.push_back(d);
         ACameraMetadata_free(chars);
     }
@@ -154,24 +197,7 @@ void CameraEngine::querySensorInfo(const ACameraMetadata* m) {
     if (ACameraMetadata_getConstEntry(m, ACAMERA_STATISTICS_INFO_MAX_FACE_COUNT, &e) == ACAMERA_OK) s.maxFaces = e.data.i32[0];
 
     // RAW10 sizes + their minimum frame durations (bounds the achievable fps).
-    if (ACameraMetadata_getConstEntry(m, ACAMERA_SCALER_AVAILABLE_STREAM_CONFIGURATIONS, &e) == ACAMERA_OK) {
-        for (uint32_t c = 0; c + 3 < e.count; c += 4) {
-            if (e.data.i32[c] == AIMAGE_FORMAT_RAW10 && e.data.i32[c + 3] == 0) {
-                s.rawModes.push_back({e.data.i32[c + 1], e.data.i32[c + 2], 0});
-            }
-        }
-    }
-    if (ACameraMetadata_getConstEntry(m, ACAMERA_SCALER_AVAILABLE_MIN_FRAME_DURATIONS, &e) == ACAMERA_OK) {
-        for (auto& mode : s.rawModes) {
-            for (uint32_t c = 0; c + 3 < e.count; c += 4) {
-                if (e.data.i64[c] == AIMAGE_FORMAT_RAW10 && e.data.i64[c + 1] == mode.width && e.data.i64[c + 2] == mode.height)
-                    mode.minFrameDurationNs = e.data.i64[c + 3];
-            }
-        }
-    }
-    std::sort(s.rawModes.begin(), s.rawModes.end(), [](const RawMode& a, const RawMode& b) {
-        return a.width * a.height > b.width * b.height;
-    });
+    s.rawModes = readRawModes(m);
 
     DngCalibration& cal = s.calibration;
     readMatrix(m, ACAMERA_SENSOR_COLOR_TRANSFORM1, cal.colorMatrix1);

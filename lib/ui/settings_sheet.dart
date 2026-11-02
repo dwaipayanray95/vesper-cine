@@ -59,6 +59,12 @@ class SettingsScreen extends StatefulWidget {
   final VoidCallback? onAnalyzeIso;
   final void Function(bool dark)? onSensorSweep; // Dark: Hot Pixel Calibration (all builds); White: Developer
   final String hotPixelSummary; // '' = this phone has no hot-pixel map yet
+  final int pendingCalibrations; // calibration steps still to do (badge + row text)
+  final VoidCallback? onCalibrate; // opens the guided "Calibrate this phone" screen
+  final String deviceCheckSummary; // '' = no device check result yet
+  final VoidCallback? onRecheckDevice; // runs the device check again
+  final int pretend; // developer: 0 off, 1 pretend unsupported, 2 pretend slow phone
+  final ValueChanged<int>? onPretendChanged;
 
   const SettingsScreen({
     super.key,
@@ -107,6 +113,12 @@ class SettingsScreen extends StatefulWidget {
     this.onAnalyzeIso,
     this.onSensorSweep,
     this.hotPixelSummary = '',
+    this.pendingCalibrations = 0,
+    this.onCalibrate,
+    this.deviceCheckSummary = '',
+    this.onRecheckDevice,
+    this.pretend = 0,
+    this.onPretendChanged,
   });
 
   @override
@@ -142,6 +154,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late bool tapLocks = widget.tapLocks;
   late bool tapSetsExposure = widget.tapSetsExposure;
   late bool faceDetect = widget.faceDetect;
+  late int pretend = widget.pretend;
   bool sendCrashReports = CrashReporting.enabled;
 
   bool get isRecording => widget.isRecording;
@@ -193,7 +206,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _Category('Audio', Icons.mic_none, 'MIC ON', _audio),
     _Category('Image & NR', Icons.photo_outlined,
         'SHARP ${_levels4[sharpening.clamp(0, 3)]} · ${oversampling ? 'HQ' : 'HQ OFF'} · TNR ${_levels4[_nrLevels.indexOf(temporalNr).clamp(0, 3)]}',
-        _image),
+        _image, badge: widget.pendingCalibrations > 0),
     _Category('Exposure · Color · Focus', Icons.tune,
         '${tapLocks ? 'AF-L' : 'AF-C'} · ${(profileAvailable && useProfile) ? 'CHART' : 'FACTORY'}'
             '${widget.isoAnalysisSummary.isEmpty ? '' : ' · ISO ★'}',
@@ -302,7 +315,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 width: 36,
                 height: 36,
                 decoration: BoxDecoration(color: const Color(0xFF1F242C), borderRadius: BorderRadius.circular(8)),
-                child: Icon(c.icon, size: 19, color: selected ? Colors.amber : const Color(0xFF9AA3AE)),
+                child: Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    Icon(c.icon, size: 19, color: selected ? Colors.amber : const Color(0xFF9AA3AE)),
+                    if (c.badge)
+                      Positioned(
+                        right: 5,
+                        top: 5,
+                        child: Container(width: 8, height: 8, decoration: const BoxDecoration(color: Colors.amber, shape: BoxShape.circle)),
+                      ),
+                  ],
+                ),
               ),
               const SizedBox(width: 12),
               Expanded(
@@ -418,6 +442,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
   ];
 
   List<Widget> _image() => [
+    _settingRow(
+      'Calibrate this phone',
+      widget.pendingCalibrations > 0
+          ? '${widget.pendingCalibrations} calibration${widget.pendingCalibrations == 1 ? '' : 's'} to do: cleaner image on your phone (lens covered, a few minutes)'
+          : 'All calibrations are done. Run any of them again here',
+      _button(widget.pendingCalibrations > 0 ? 'CALIBRATE' : 'OPEN', widget.onCalibrate, icon: Icons.tune),
+    ),
+    const SizedBox(height: 10),
     _sectionHeader('DETAIL'),
     _settingRow(
       'Detail / Sharpening',
@@ -580,10 +612,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _settingRow(
       'Native ISO Analysis',
       widget.isoAnalysisSummary.isEmpty
-          ? 'Pro. Measures the sensor\'s native ISOs (lens covered, ~15 s); auto-exposure then prefers them'
+          ? 'Measures the sensor\'s native ISOs (lens covered, ~15 s); auto-exposure then prefers them'
           : widget.isoAnalysisSummary,
       _button(widget.isoAnalysisSummary.isEmpty ? 'ANALYZE' : 'RE-RUN',
-          widget.onAnalyzeIso == null ? null : () { if (_gate(true, 'Native ISO analysis')) widget.onAnalyzeIso!(); },
+          widget.onAnalyzeIso,
           icon: Icons.grain),
     ),
     if (kDevTools || profileAvailable) ...[
@@ -620,6 +652,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
           widget.onGpuGuardChanged(i == 0);
         },
       ),
+    ),
+    _settingRow(
+      'Pretend Unsupported / Slow Phone',
+      const [
+        'OFF: the device check measures this phone for real',
+        'UNSUPPORTED: the next device check shows a fake "no RAW10" result (not saved)',
+        'SLOW: the next device check shows a fake slow phone: 24 fps full, 30 reduced, 48 / 60 hidden (not saved)',
+      ][pretend.clamp(0, 2)],
+      Segmented(
+        options: const ['OFF', 'UNSUPPORTED', 'SLOW'],
+        selected: pretend.clamp(0, 2),
+        onSelected: (i) {
+          setState(() => pretend = i);
+          widget.onPretendChanged?.call(i);
+        },
+      ),
+    ),
+    _settingRow(
+      'Device Check',
+      'Runs the first-launch phone check now (about half a minute) and shows its result screen',
+      _button('RUN NOW', widget.onRecheckDevice, icon: Icons.fact_check_outlined),
     ),
     _settingRow(
       'App Log',
@@ -666,9 +719,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
       const SizedBox(height: 6),
       if (pro.passClipsLeft > 0) _infoLine('Pro pass', '${pro.passClipsLeft} clip${pro.passClipsLeft == 1 ? '' : 's'} left with every Pro feature'),
       _note('FREE: manual exposure and focus, Apple Log, 16:9 up to 48 fps, STANDARD recording quality, detail up to MED, '
-          'noise reduction up to LOW, scopes, hot pixel calibration. You can record ${ProService.freeClips} clips, then a short ad gives you ${ProService.freeClips} more.\n'
+          'noise reduction up to LOW, scopes, hot pixel calibration, native ISO analysis. You can record ${ProService.freeClips} clips, then a short ad gives you ${ProService.freeClips} more.\n'
           'PRO: 50 / 60 fps, open gate (4:3) recording, HIGH / MAX recording quality, HIGH detail, HQ oversampling, '
-          'noise reduction above LOW, Native ISO Analysis, and Gyroflow export when it arrives. Unlimited clips, no ads.\n'
+          'noise reduction above LOW, and Gyroflow export when it arrives. Unlimited clips, no ads.\n'
           'Not ready to buy? Choose any Pro feature and watch one ad: you get every Pro feature for your next ${ProService.proPassClips} clips. '
           'A clip that is already recording is never stopped.'),
       const SizedBox(height: 10),
@@ -716,6 +769,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
       if (model.isNotEmpty) _infoLine('Device', android.isEmpty ? model : '$model · Android $android'),
       _infoLine('Recordings', 'Movies/Vesper Cine'),
       const SizedBox(height: 6),
+      _settingRow(
+        'Re-check this phone',
+        widget.deviceCheckSummary.isEmpty
+            ? 'Checks that this phone can run Vesper Cine and which frame rates it handles (about half a minute)'
+            : '${widget.deviceCheckSummary} Check again after a system update or when the phone was warm.',
+        _button('RE-CHECK', widget.onRecheckDevice, icon: Icons.fact_check_outlined),
+      ),
       _note('Vesper Cine records straight from the sensor\'s RAW data: its own colour science, '
           'true Apple Log and noise processing on the GPU, encoded as 10-bit HEVC or AV1.'),
       const SizedBox(height: 14),
@@ -884,7 +944,8 @@ class _Category {
   final IconData icon;
   final String summary;
   final List<Widget> Function() build;
-  const _Category(this.name, this.icon, this.summary, this.build);
+  final bool badge; // something needs attention in this category
+  const _Category(this.name, this.icon, this.summary, this.build, {this.badge = false});
 }
 
 class _Badge extends StatelessWidget {

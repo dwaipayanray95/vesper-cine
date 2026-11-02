@@ -7,6 +7,7 @@ import android.content.ContentValues
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.hardware.display.DisplayManager
+import android.media.MediaCodecInfo.CodecProfileLevel
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
@@ -221,11 +222,13 @@ class MainActivity : FlutterActivity() {
                     result.success(true)
                 }
                 "encoderInfo" -> result.success(encoderInfo())
+                "encoderCheck" -> result.success(encoderCheck(call.argument<List<Int>>("fps") ?: listOf(24, 30, 48, 60)))
                 "deviceInfo" -> {
                     val dir = java.io.File(getExternalFilesDir(null), "calibration").apply { mkdirs() }
                     val pkg = packageManager.getPackageInfo(packageName, 0)
                     result.success(mapOf("model" to Build.MODEL, "device" to Build.DEVICE, "calibrationDir" to dir.absolutePath, "filesDir" to filesDir.absolutePath,
-                        "version" to (pkg.versionName ?: ""), "build" to pkg.longVersionCode.toString(), "android" to Build.VERSION.RELEASE))
+                        "version" to (pkg.versionName ?: ""), "build" to pkg.longVersionCode.toString(), "android" to Build.VERSION.RELEASE,
+                        "sdk" to Build.VERSION.SDK_INT, "manufacturer" to Build.MANUFACTURER))
                 }
                 "publishCalibration" -> {
                     val base = call.argument<String>("base") ?: ""
@@ -359,6 +362,38 @@ class MainActivity : FlutterActivity() {
                         "1080p up to $fps1080 fps, features [${features.joinToString(",")}], profile:level $profiles")
                 } catch (e: Exception) {
                     out.add("${info.name} [$type]: ${e.message}")
+                }
+            }
+        }
+        return out
+    }
+
+    // Device check (0.27.0): one entry per HEVC / AV1 encoder with what the app needs from it:
+    // hardware or software, a 10-bit (Main10) profile, and which of the given frame rates it
+    // reports for 1920x1080. Android has no capability query in the NDK, so this is Kotlin.
+    private fun encoderCheck(fpsList: List<Int>): List<Map<String, Any>> {
+        val out = mutableListOf<Map<String, Any>>()
+        val list = android.media.MediaCodecList(android.media.MediaCodecList.REGULAR_CODECS)
+        for (info in list.codecInfos) {
+            if (!info.isEncoder) continue
+            for (type in info.supportedTypes) {
+                if (type != "video/hevc" && type != "video/av01") continue
+                try {
+                    val caps = info.getCapabilitiesForType(type)
+                    val tenBit = caps.profileLevels.any {
+                        if (type == "video/hevc")
+                            it.profile == CodecProfileLevel.HEVCProfileMain10 || it.profile == CodecProfileLevel.HEVCProfileMain10HDR10 || it.profile == CodecProfileLevel.HEVCProfileMain10HDR10Plus
+                        else
+                            it.profile == CodecProfileLevel.AV1ProfileMain10 || it.profile == CodecProfileLevel.AV1ProfileMain10HDR10 || it.profile == CodecProfileLevel.AV1ProfileMain10HDR10Plus
+                    }
+                    val video = caps.videoCapabilities
+                    val fpsOk = fpsList.filter {
+                        try { video.areSizeAndRateSupported(1920, 1080, it.toDouble()) } catch (e: Exception) { false }
+                    }
+                    out.add(mapOf("name" to info.name, "mime" to type, "hardware" to info.isHardwareAccelerated,
+                        "main10" to tenBit, "fpsOk" to fpsOk))
+                } catch (e: Exception) {
+                    // A codec that cannot even describe itself is of no use to the app.
                 }
             }
         }

@@ -1504,11 +1504,17 @@ void onFrame(const RawFrame& f) {
     if (!ok) ++gCameraDrops;
 }
 
+// Which half of the engine failed to start (device check, 0.27.0).
+bool gInitCameraOk = false, gInitGpuOk = false;
+
 bool ensureInit() {
     if (!gCamera) gCamera = std::make_unique<CameraEngine>();
     if (!gGpu) gGpu = std::make_unique<VulkanEngine>();
     if (!gRecorder) gRecorder = std::make_unique<Recorder>();
-    return gCamera->initialize() && gGpu->initialize();
+    // Both are tried (no short-circuit) so the device check can say which one failed.
+    gInitCameraOk = gCamera->initialize();
+    gInitGpuOk = gGpu->initialize();
+    return gInitCameraOk && gInitGpuOk;
 }
 
 int writeString(const std::string& s, char* out, int32_t maxLen) {
@@ -1544,16 +1550,35 @@ EXPORT int32_t vesper_enumerate_cameras(char* out, int32_t maxLen) {
     auto devices = gCamera->enumerateCameras();
     for (size_t i = 0; i < devices.size(); ++i) {
         const auto& d = devices[i];
-        char buf[256];
+        char buf[512];
         std::snprintf(buf, sizeof(buf),
-                      "{\"id\":\"%s\",\"facing\":%d,\"hwLevel\":%d,\"supportsRaw10\":%s,\"rawWidth\":%d,\"rawHeight\":%d,\"maxFps\":%.2f}",
+                      "{\"id\":\"%s\",\"facing\":%d,\"hwLevel\":%d,\"supportsRaw10\":%s,\"rawWidth\":%d,\"rawHeight\":%d,\"maxFps\":%.2f,"
+                      "\"manualSensor\":%s,\"rawCapability\":%s,\"raw16\":%s,\"tsRealtime\":%s,\"modes\":[",
                       jsonEscape(d.id).c_str(), d.facing, d.hardwareLevel, d.supportsRaw10 ? "true" : "false",
-                      d.largestRaw.width, d.largestRaw.height, d.largestRaw.maxFps());
+                      d.largestRaw.width, d.largestRaw.height, d.largestRaw.maxFps(), d.manualSensor ? "true" : "false",
+                      d.rawCapability ? "true" : "false", d.supportsRaw16 ? "true" : "false", d.timestampRealtime ? "true" : "false");
         json += buf;
+        for (size_t k = 0; k < d.rawModes.size(); ++k) {
+            std::snprintf(buf, sizeof(buf), "%s{\"w\":%d,\"h\":%d,\"maxFps\":%.2f}", k ? "," : "", d.rawModes[k].width,
+                          d.rawModes[k].height, d.rawModes[k].maxFps());
+            json += buf;
+        }
+        json += "]}";
         if (i + 1 < devices.size()) json += ",";
     }
     json += "]";
     return writeString(json, out, maxLen);
+}
+
+// Device check: what the GPU side of the engine offers (works after a failed init too).
+// {"cameraOk":..,"vulkanOk":..,"device":"..","fp16":..,"hqFormat":"R16F|RGBA16F|none"}
+EXPORT int32_t vesper_get_gpu_info(char* out, int32_t maxLen) {
+    char buf[384];
+    const bool ok = gGpu && gInitGpuOk;
+    std::snprintf(buf, sizeof(buf), "{\"cameraOk\":%s,\"vulkanOk\":%s,\"device\":\"%s\",\"fp16\":%s,\"hqFormat\":\"%s\"}",
+                  gInitCameraOk ? "true" : "false", ok ? "true" : "false", ok ? jsonEscape(gGpu->deviceName()).c_str() : "",
+                  ok && gGpu->float16Arithmetic() ? "true" : "false", ok ? gGpu->hqFormatName() : "none");
+    return writeString(buf, out, maxLen);
 }
 
 EXPORT int32_t vesper_open_camera(const char* id) {
@@ -1588,10 +1613,16 @@ RawMode pickMode(int cropMode, double fps) {
         double aspect = static_cast<double>(m.width) / m.height;
         bool fast = m.maxFps() + 0.5 >= fps;
         bool aspectOk = std::fabs(aspect - want) < 0.05 || (cropMode == 0 && aspect < want); // 4:3 can be cropped to 16:9
-        bool fullWidth = m.width >= modes.front().width * 0.9;
+        // "Full width": near the widest mode, or already wide enough for the 1080p quad image (3840 px).
+        bool fullWidth = m.width >= modes.front().width * 0.9 || m.width >= 3840;
         return (fast ? 8 : 0) + (fullWidth ? 4 : 0) + (std::fabs(aspect - want) < 0.05 ? 2 : 0) + (aspectOk ? 1 : 0);
     };
-    for (const auto& m : modes) if (!best || score(m) > score(*best)) best = &m;
+    // Equal scores: the smaller readout (a 50 MP full-resolution mode would cost memcpy time for nothing).
+    for (const auto& m : modes) {
+        if (!best || score(m) > score(*best) ||
+            (score(m) == score(*best) && static_cast<int64_t>(m.width) * m.height < static_cast<int64_t>(best->width) * best->height))
+            best = &m;
+    }
     return best ? *best : RawMode{};
 }
 

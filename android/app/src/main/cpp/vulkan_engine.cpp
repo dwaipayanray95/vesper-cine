@@ -66,8 +66,12 @@ bool hasExtension(const std::vector<VkExtensionProperties>& list, const char* na
 bool VulkanEngine::initialize() {
     std::lock_guard<std::mutex> lock(frameMutex_);
     if (initialized_) return true;
+    // A failed attempt leaves half-built objects behind (a retry would leak a second instance and
+    // device): do not retry, the failure is final for this process.
+    if (initFailed_) return false;
     if (!createInstanceAndDevice() || !createPipelines()) {
         VK_LOGE("Vulkan initialisation failed");
+        initFailed_ = true;
         return false;
     }
     initialized_ = true;
@@ -106,6 +110,13 @@ bool VulkanEngine::createInstanceAndDevice() {
     vkEnumeratePhysicalDevices(instance_, &devCount, devs.data());
     physical_ = devs[0];
     vkGetPhysicalDeviceMemoryProperties(physical_, &memProps_);
+    {
+        VkPhysicalDeviceProperties devProps;
+        vkGetPhysicalDeviceProperties(physical_, &devProps);
+        deviceName_ = devProps.deviceName;
+        VK_LOGI("GPU: %s (Vulkan %u.%u.%u)", devProps.deviceName, VK_VERSION_MAJOR(devProps.apiVersion),
+                VK_VERSION_MINOR(devProps.apiVersion), VK_VERSION_PATCH(devProps.apiVersion));
+    }
 
     // Prefer a universal (graphics + compute) family: it can also blit and
     // present, which lets the viewfinder go straight to a swapchain.
