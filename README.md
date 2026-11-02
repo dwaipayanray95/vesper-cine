@@ -27,6 +27,7 @@ A cinema camera app for Google Pixel phones (developed on a **Pixel 10**). It re
 | **Device check** (first launch, re-run in Settings › Info): static checks (RAW10 back camera, manual + raw capability, Vulkan / 16-bit / HQ format, 10-bit hardware encoder) and a live test at 24 / 30 / 48 / 60 fps with everything on; frame rates the phone can't hold are hidden, "reduced" ones are marked RQ | Working (0.27) |
 | **Calibration memory + "Calibrate this phone"**: remembers which calibrations (hot pixels, native ISO) are done, asks once after an update that adds or improves one | Working (0.27) |
 | Gyroflow motion data (.gcsv + lens profile next to each clip, Pro) | Implemented (0.28.0, needs phone verification) |
+| Send Calibration to Vesper (Settings › Info; offered once after the first calibration): phone check + noise numbers, no hot-pixel map, to the user's own email app | Implemented (0.29.0, needs phone verification) |
 | External SSD, audio levels | Planned |
 
 Performance at 1080p on Pixel 10 (GPU time per frame, everything on): **~29–32 ms** — fits 24/25 fps (41.7/40 ms budgets). At 30 fps the guard first runs alignment at a reduced rate (then pauses it if needed); at 48/60 fps it pauses HQ and NR as well. Details in `CLAUDE.md`.

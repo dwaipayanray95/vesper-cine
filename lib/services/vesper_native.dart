@@ -1023,5 +1023,25 @@ class VesperNative {
     }
   }
 
+  /// Writes [json] to cache/calibration/[fileName] and opens the user's mail app
+  /// (or the share sheet) with it attached. Returns 'email', 'share' or 'failed'.
+  Future<String> sendCalibration(String fileName, String json, String to, String subject, String body) async {
+    if (!Platform.isAndroid) return 'failed';
+    try {
+      return await _channel.invokeMethod<String>('sendCalibration', {
+            'fileName': fileName,
+            'json': json,
+            'to': to,
+            'subject': subject,
+            'body': body,
+          }) ??
+          'failed';
+    } on PlatformException {
+      return 'failed';
+    } on MissingPluginException {
+      return 'failed';
+    }
+  }
+
   void close() => _loaded ? _close() : null;
 }

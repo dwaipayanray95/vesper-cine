@@ -107,4 +107,6 @@ dependencies {
     // Keep the BoM in step with firebase_core's FirebaseSDKVersion.
     implementation(platform("com.google.firebase:firebase-bom:34.19.0"))
     implementation("com.google.firebase:firebase-crashlytics-ndk")
+    // FileProvider (Send calibration, 0.29.0); Gradle picks the newest version already pulled in.
+    implementation("androidx.core:core:1.12.0")
 }

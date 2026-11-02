@@ -68,6 +68,7 @@ class SettingsScreen extends StatefulWidget {
   final VoidCallback? onCalibrate; // opens the guided "Calibrate this phone" screen
   final String deviceCheckSummary; // '' = no device check result yet
   final VoidCallback? onRecheckDevice; // runs the device check again
+  final VoidCallback? onSendCalibration; // null = nothing to send yet (no device check, no calibration)
   final int pretend; // developer: 0 off, 1 pretend unsupported, 2 pretend slow phone
   final ValueChanged<int>? onPretendChanged;
 
@@ -126,6 +127,7 @@ class SettingsScreen extends StatefulWidget {
     this.onCalibrate,
     this.deviceCheckSummary = '',
     this.onRecheckDevice,
+    this.onSendCalibration,
     this.pretend = 0,
     this.onPretendChanged,
   });
@@ -825,6 +827,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ? 'Checks that this phone can run Vesper Cine and which frame rates it handles (about half a minute)'
             : '${widget.deviceCheckSummary} Check again after a system update or when the phone was warm.',
         _button('RE-CHECK', widget.onRecheckDevice, icon: Icons.fact_check_outlined),
+      ),
+      const SizedBox(height: 6),
+      _settingRow(
+        'Send Calibration to Vesper',
+        widget.onSendCalibration == null
+            ? 'Run the phone check or a calibration first. Then you can email your phone\'s measurements to the developer'
+            : 'Emails your phone\'s measurements (phone model, Android version, dates, noise numbers; no photos, no location, no hot-pixel map) to the developer to improve support for your phone model. Your email app opens and nothing is sent until you press send; the developer also sees your email address',
+        _button('SEND', widget.onSendCalibration, icon: Icons.outgoing_mail),
       ),
       _note('Vesper Cine records straight from the sensor\'s RAW data: its own colour science, '
           'true Apple Log and noise processing on the GPU, encoded as 10-bit HEVC or AV1.'),

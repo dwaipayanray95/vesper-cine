@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- FileProvider paths: only cache/calibration (the calibration report the user chooses to send). -->
+<paths>
+    <cache-path name="calibration" path="calibration/" />
+</paths>

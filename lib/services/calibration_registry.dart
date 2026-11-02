@@ -85,19 +85,28 @@ class CalibrationRecord {
   /// App version for which the "New calibration available" card was already shown
   /// (or declined with "Later"): it is not shown again until the app version changes.
   final String promptedAppVersion;
-  const CalibrationRecord({this.steps = const {}, this.promptedAppVersion = ''});
+
+  /// 0.29.0: the "Help Vesper support your phone" (send calibration) offer was shown once.
+  final bool sendOffered;
+  const CalibrationRecord({this.steps = const {}, this.promptedAppVersion = '', this.sendOffered = false});
 
   CalibrationRecord withDone(String id, int version, DateTime now, String appVersion) => CalibrationRecord(
     steps: {...steps, id: StepRecord(version, now.toIso8601String(), appVersion)},
     promptedAppVersion: promptedAppVersion,
+    sendOffered: sendOffered,
   );
 
-  CalibrationRecord withPrompted(String appVersion) => CalibrationRecord(steps: steps, promptedAppVersion: appVersion);
+  CalibrationRecord withPrompted(String appVersion) =>
+      CalibrationRecord(steps: steps, promptedAppVersion: appVersion, sendOffered: sendOffered);
+
+  CalibrationRecord withSendOffered() =>
+      CalibrationRecord(steps: steps, promptedAppVersion: promptedAppVersion, sendOffered: true);
 
   String encode() => const JsonEncoder.withIndent('  ').convert({
     'format': format,
     'steps': {for (final e in steps.entries) e.key: e.value.toJson()},
     'promptedAppVersion': promptedAppVersion,
+    'calibrationSendOffered': sendOffered,
   });
 
   /// Null when [text] isn't a record file.
@@ -110,7 +119,11 @@ class CalibrationRecord {
         final r = StepRecord.fromJson(e.value);
         if (r != null) steps[e.key as String] = r;
       }
-      return CalibrationRecord(steps: steps, promptedAppVersion: j['promptedAppVersion'] as String? ?? '');
+      return CalibrationRecord(
+        steps: steps,
+        promptedAppVersion: j['promptedAppVersion'] as String? ?? '',
+        sendOffered: j['calibrationSendOffered'] == true,
+      );
     } catch (_) {
       return null;
     }

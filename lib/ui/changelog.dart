@@ -7,6 +7,10 @@ class ChangelogEntry {
 }
 
 const changelog = <ChangelogEntry>[
+  ChangelogEntry('0.29.0', [
+    'New: Send Calibration to Vesper (Settings › Info). Emails your phone\'s measurements (phone check, noise numbers, which calibrations were done) to the developer, so the app can be tuned for your phone model. It has no photos, no location and no hot-pixel map. Your own email app opens with the file attached and nothing is sent until you press send there; the developer also sees your email address and uses the report only to improve support for your phone model',
+    'After your first finished calibration the app offers this once ("Help Vesper support your phone"); NOT NOW is fine, the button stays in Settings',
+  ]),
   ChangelogEntry('0.28.0', [
     'New (beta, Pro): Gyroflow motion data. Every clip gets a motion file (.gcsv) and a lens file (_lens.json) with the same name, recorded from the phone\'s gyroscope and accelerometer while you film. They are saved in Download/Vesper Cine. In Gyroflow: open the clip, then load the .gcsv (Motion data › open file) and the _lens.json (Lens profile › open file); or copy the .gcsv next to the clip and Gyroflow pairs it by itself. Switch it in Settings › Recording › Gyroflow Data. Turn Optical Stabilisation off for best results',
     'This is a first version: if the stabilisation moves the wrong way, Gyroflow\'s Motion data panel lets you change the IMU orientation. Please tell us what worked on your footage',

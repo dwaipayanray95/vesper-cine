@@ -61,6 +61,16 @@
         <meta-data
             android:name="firebase_crashlytics_collection_enabled"
             android:value="false" />
+        <!-- Calibration report the user chooses to send (Settings > Send Calibration to Vesper). -->
+        <provider
+            android:name=".VesperFileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/vesper_file_paths" />
+        </provider>
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
@@ -71,6 +81,11 @@
 
          In particular, this is used by the Flutter engine in io.flutter.plugin.text.ProcessTextPlugin. -->
     <queries>
+        <!-- Is there an email app? (calibration report: MainActivity.sendCalibration) -->
+        <intent>
+            <action android:name="android.intent.action.SENDTO"/>
+            <data android:scheme="mailto"/>
+        </intent>
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>

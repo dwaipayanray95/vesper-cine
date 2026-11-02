@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 
 import '../build_flags.dart';
 import '../services/calibration_registry.dart';
+import '../services/calibration_report.dart';
 import '../services/device_check.dart';
 import '../services/gyroflow.dart';
 import '../services/pro_service.dart';
@@ -1036,6 +1037,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     } finally {
       _deviceChecking = false;
       if (mounted && _dcPhase != null && _dcDismiss == null) setState(() => _dcPhase = null);
+      Future.microtask(_maybeOfferSend);
     }
   }
 
@@ -1113,6 +1115,72 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     _calib = _calib.withDone(id, step.version, DateTime.now(), _appVersion);
     _saveCalibration();
     _engine.log('Calibration done: $id v${step.version}', tag: 'Vesper_UI');
+    _sendOfferDue = true;
+    // A single step run from Settings: offer now. Inside the guided flow it comes once at the end.
+    if (_flow == null) Future.microtask(_maybeOfferSend);
+  }
+
+  // --- Send calibration to Vesper (0.29.0) ---------------------------------
+  bool _sendOfferDue = false; // a calibration finished and the one-time offer wasn't shown yet
+
+  Map<String, dynamic>? _readJson(String? path) {
+    try {
+      if (path == null) return null;
+      final f = File(path);
+      if (!f.existsSync()) return null;
+      final j = jsonDecode(f.readAsStringSync());
+      return j is Map<String, dynamic> ? j : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // Once per install, after the first calibration that finishes: "Help Vesper support your phone".
+  Future<void> _maybeOfferSend() async {
+    if (!_sendOfferDue || _calib.sendOffered || !mounted) return;
+    if (_recording || _stopping || _dcPhase != null || _deviceChecking || _settingsOpen) return; // retried when those end
+    _sendOfferDue = false;
+    _calib = _calib.withSendOffered();
+    _saveCalibration();
+    final send = await showSendCalibrationCard(context);
+    if (send && mounted) await _sendCalibration();
+  }
+
+  // Builds the report and hands it to the user's mail app (Kotlin sendCalibration). Never sends by itself.
+  Future<void> _sendCalibration() async {
+    if (_recording || _stopping || !_streaming) return; // the mail app would background the app mid-take
+    var how = 'failed';
+    var bytes = 0;
+    var steps = '';
+    try {
+      final i = _deviceInfoMap;
+      final report = buildCalibrationReport(
+        now: DateTime.now(),
+        appVersion: _appVersion,
+        appBuild: '${i?['build'] ?? ''}',
+        device: i,
+        cameraId: _cameraId ?? '',
+        deviceCheck: _readJson(_deviceCheckFile?.path),
+        sensorProfile: _readJson(_sensorProfilePath),
+        isoAnalysis: _readJson(_isoAnalysisPath),
+        calibration: _readJson(_calibrationRecordPath),
+      );
+      final json = encodeCalibrationReport(report);
+      bytes = utf8.encode(json).length;
+      steps = reportSteps(report).join(',');
+      how = await _engine.sendCalibration(
+        reportFileName(report, DateTime.now()),
+        json,
+        kCalibrationReportEmail,
+        reportSubject(report),
+        reportBody(),
+      );
+    } catch (_) {
+      how = 'failed';
+    }
+    _engine.log('Calibration report: $bytes bytes, steps [$steps], sent via $how', tag: 'Vesper_UI');
+    if (!mounted) return;
+    if (how == 'failed') _toast('Could not open an email app. Please try again later.');
   }
 
   // Opens the guided screen and returns when it is closed.
@@ -1127,6 +1195,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     _flowClosed = Completer<void>();
     setState(() => _flow = f);
     await _flowClosed!.future;
+    await _maybeOfferSend(); // once, after the whole guided flow
   }
 
   void _closeCalibration() {
@@ -1749,6 +1818,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       _stopping = false;
     });
     _engine.lockRotation(false);
+    Future.microtask(_maybeOfferSend);
     _clampToPlan(); // e.g. the last clip of an ad pass has just ended
     switch (reason) {
       case 'thermal':
@@ -1956,6 +2026,15 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                   _openCalibration();
                 }
               : null,
+          onSendCalibration:
+              _streaming &&
+                  !_recording &&
+                  hasCalibrationToSend(
+                    hasDeviceCheck: _deviceCheckFile?.existsSync() ?? false,
+                    stepsDone: _calib.steps.length,
+                  )
+              ? () => _sendCalibration()
+              : null,
           deviceCheckSummary: _deviceCheck == null ? '' : summarize(_deviceCheck!),
           onRecheckDevice: _streaming && !_recording
               ? () {
@@ -1977,6 +2056,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     );
     _settingsOpen = false;
     _engine.setProcessingPaused(false);
+    Future.microtask(_maybeOfferSend);
   }
 
   // Bottom-bar status line. Paused stages say why: the GPU guard paused them

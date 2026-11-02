@@ -88,6 +88,7 @@ Play Console → *App content → Data safety*. Answer as follows (re-check if y
 | App activity → **App interactions** (ad interactions) | Yes (AdMob) | **Yes** (AdMob) | Advertising | No |
 | Financial info → *Purchase history* | **Not collected by you** (Google Play handles it). Leave unticked. | | | |
 
+- **Calibration report (0.29.0):** only when the user taps *Send Calibration to Vesper*, the app hands a small measurements file (device model/codename, Android/app version, camera id, measurement dates, phone-check and noise numbers; no photos, no location, no hot-pixel map) to the user's own email app, which the user sends or discards. The app itself transmits nothing and has no server for it, but the developer receives the report and the sender's email address when the user sends it: consider declaring *Device or other IDs / Email address* as user-initiated, optional, not shared, for app functionality, or confirm with Play's guidance on user-initiated emails. Deletion on request by email (privacy policy point 4).
 - **Not collected:** photos/videos, audio, contacts, precise location, personal info, messages. Camera/microphone content stays on the phone and is never sent off the device ("collected" means leaving the device).
 - **Ads:** *App content → Ads* → **Yes, my app contains ads**.
 - **Target audience:** 13+ / 18+ (not designed for children; avoids the Families policy).

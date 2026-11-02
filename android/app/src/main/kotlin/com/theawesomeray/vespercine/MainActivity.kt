@@ -3,7 +3,9 @@ package com.theawesomeray.vespercine
 import android.Manifest
 import android.content.ContentResolver
 import android.content.ContentUris
+import android.content.ClipData
 import android.content.ContentValues
+import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.hardware.display.DisplayManager
@@ -244,6 +246,17 @@ class MainActivity : FlutterActivity() {
                         "version" to (pkg.versionName ?: ""), "build" to pkg.longVersionCode.toString(), "android" to Build.VERSION.RELEASE,
                         "sdk" to Build.VERSION.SDK_INT, "manufacturer" to Build.MANUFACTURER))
                 }
+                "sendCalibration" -> {
+                    result.success(
+                        sendCalibration(
+                            call.argument<String>("fileName") ?: "VesperCalibration.json",
+                            call.argument<String>("json") ?: "",
+                            call.argument<String>("to") ?: "",
+                            call.argument<String>("subject") ?: "",
+                            call.argument<String>("body") ?: "",
+                        )
+                    )
+                }
                 "publishCalibration" -> {
                     val base = call.argument<String>("base") ?: ""
                     try {
@@ -259,6 +272,46 @@ class MainActivity : FlutterActivity() {
                 }
                 else -> result.notImplemented()
             }
+        }
+    }
+
+    // Calibration report (0.29.0): writes the JSON to cache/calibration and hands it to the
+    // user's mail app (chooser limited to email apps through a mailto: selector); without an
+    // email app the plain share sheet opens. Returns "email", "share" or "failed"; never throws.
+    // Nothing is sent by the app itself: the user presses send in their own mail app.
+    private fun sendCalibration(fileName: String, json: String, to: String, subject: String, body: String): String {
+        try {
+            val dir = File(cacheDir, "calibration").apply { mkdirs() }
+            dir.listFiles()?.forEach { if (it.name.endsWith(".json")) it.delete() }
+            val safe = fileName.replace(Regex("[^A-Za-z0-9._-]"), "_")
+            val file = File(dir, safe)
+            file.writeText(json)
+            val uri = androidx.core.content.FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+            val mailto = Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:"))
+            val hasMail = packageManager.queryIntentActivities(mailto, 0).isNotEmpty()
+            fun sendIntent() = Intent(Intent.ACTION_SEND).apply {
+                type = "application/json"
+                putExtra(Intent.EXTRA_EMAIL, arrayOf(to))
+                putExtra(Intent.EXTRA_SUBJECT, subject)
+                putExtra(Intent.EXTRA_TEXT, body)
+                putExtra(Intent.EXTRA_STREAM, uri)
+                clipData = ClipData.newRawUri(safe, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            if (hasMail) {
+                try {
+                    val email = sendIntent().apply { selector = Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:")) }
+                    startActivity(email)
+                    return "email"
+                } catch (e: Exception) {
+                    android.util.Log.w("Vesper_Calibration", "email intent failed, using share sheet", e)
+                }
+            }
+            startActivity(Intent.createChooser(sendIntent(), "Send calibration").addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
+            return "share"
+        } catch (e: Throwable) {
+            android.util.Log.w("Vesper_Calibration", "sendCalibration failed", e)
+            return "failed"
         }
     }
 

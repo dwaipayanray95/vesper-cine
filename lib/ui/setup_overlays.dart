@@ -450,3 +450,29 @@ Future<bool> showNewCalibrationCard(BuildContext context, List<CalibrationStep> 
   );
   return run == true;
 }
+
+/// "Help Vesper support your phone": offered once after the first finished calibration.
+Future<bool> showSendCalibrationCard(BuildContext context) async {
+  final send = await showDialog<bool>(
+    context: context,
+    barrierDismissible: false,
+    builder: (ctx) => AlertDialog(
+      backgroundColor: const Color(0xFF14171D),
+      title: const Text('Help Vesper support your phone', style: TextStyle(color: Colors.white, fontSize: 15)),
+      content: const Text(
+        'Send your phone\'s measurements to the developer by email. The developer uses them to make Vesper Cine work better '
+        'on your phone model.\n\nThe report has the phone model, Android version, camera id, measurement dates and the '
+        'app\'s measurements: no photos, no location, no hot-pixel map. Your email app opens with the file attached and '
+        'nothing is sent until you press send there; because it comes from your email, the developer also receives your '
+        'email address. Ask by email (ray.vibecoder@gmail.com) and it is deleted.\n\n'
+        'You can do this later in Settings › Info › Send Calibration to Vesper.',
+        style: TextStyle(color: Colors.white70, fontSize: 12),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('NOT NOW')),
+        TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('SEND')),
+      ],
+    ),
+  );
+  return send == true;
+}

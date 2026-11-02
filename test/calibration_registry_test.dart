@@ -69,4 +69,14 @@ void main() {
     expect(text, contains('2 min'));
     expect(promptText(const []), '');
   });
+
+  test('sendOffered round trip through encode/decode', () {
+    const rec = CalibrationRecord();
+    expect(rec.sendOffered, isFalse);
+    final offered = rec.withSendOffered();
+    final back = CalibrationRecord.decode(offered.encode())!;
+    expect(back.sendOffered, isTrue);
+    expect(back.withDone(kHotPixelsStep, 1, now, '0.29.0').sendOffered, isTrue);
+    expect(CalibrationRecord.decode(rec.encode())!.sendOffered, isFalse);
+  });
 }
