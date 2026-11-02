@@ -94,6 +94,7 @@ struct CaptureMetadata {
     double noiseProfile[8] = {0, 0, 0, 0, 0, 0, 0, 0}; // as reported: (S, O) per CFA channel, 2x2 row-major
     int32_t noiseChannels = 0;
     int64_t frameDurationNs = 0;
+    int64_t rollingShutterSkewNs = 0;       // ACAMERA_SENSOR_ROLLING_SHUTTER_SKEW: first to last row exposure start, full readout
     int32_t face[4] = {0, 0, 0, 0};         // largest face (l, t, r, b), pre-correction px; r == 0 if none
 };
 

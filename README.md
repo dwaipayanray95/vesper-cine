@@ -26,7 +26,8 @@ A cinema camera app for Google Pixel phones (developed on a **Pixel 10**). It re
 | **4K (UHD) output** | Engine has a `resolution` setting that upsamples the 2000-px quad image; not exposed in the UI. A real UHD path is the next big feature (see Roadmap). |
 | **Device check** (first launch, re-run in Settings › Info): static checks (RAW10 back camera, manual + raw capability, Vulkan / 16-bit / HQ format, 10-bit hardware encoder) and a live test at 24 / 30 / 48 / 60 fps with everything on; frame rates the phone can't hold are hidden, "reduced" ones are marked RQ | Working (0.27) |
 | **Calibration memory + "Calibrate this phone"**: remembers which calibrations (hot pixels, native ISO) are done, asks once after an update that adds or improves one | Working (0.27) |
-| Gyroflow IMU log, external SSD, audio levels | Planned |
+| Gyroflow motion data (.gcsv + lens profile next to each clip, Pro) | Implemented (0.28.0, needs phone verification) |
+| External SSD, audio levels | Planned |
 
 Performance at 1080p on Pixel 10 (GPU time per frame, everything on): **~29–32 ms** — fits 24/25 fps (41.7/40 ms budgets). At 30 fps the guard first runs alignment at a reduced rate (then pauses it if needed); at 48/60 fps it pauses HQ and NR as well. Details in `CLAUDE.md`.
 
@@ -76,7 +77,7 @@ With adb: `adb logcat -s Vesper Vesper_Camera Vesper_Vulkan Vesper_Recorder Vesp
 ## Roadmap
 
 1. **4K / UHD output**: needs a full-resolution demosaic path (the quad image is 2000 px wide) and enough GPU budget — at 1080p the GPU already uses ~34 of 41.7 ms at 24 fps, so 4K needs a cheaper pipeline (pass merging, 16-bit everywhere it's safe) and probably reduced NR.
-2. Audio levels / mic selection; Gyroflow IMU logging; external USB-C SSD.
+2. Audio levels / mic selection; external USB-C SSD.
 3. Mark unsustainable frame rates in the FPS picker (needs per-setting cost estimates from the guard).
 4. Public release; self-calibration for other phones with per-model profiles; monetisation.
 5. Pending calibration on the Pixel 10: corner brightness after the lens shading map (needs a White sweep with paper over the lens, outdoors), whether ISO 30 is extended, ColorChecker colour (needs a chart). Details in `CLAUDE.md`.

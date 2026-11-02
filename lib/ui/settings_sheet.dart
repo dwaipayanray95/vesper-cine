@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../build_flags.dart';
 import '../services/crash_reporting.dart';
+import '../services/gyroflow.dart';
 import '../services/pro_service.dart';
 import '../services/vesper_native.dart';
 import 'app_log_screen.dart';
@@ -24,6 +25,10 @@ class SettingsScreen extends StatefulWidget {
   final bool isRecording;
   final int powerSaver; // while recording: 0 off, 1 dim screen, 2 dim + viewfinder off
   final ValueChanged<int> onPowerSaverChanged;
+  final String gyroOrientation; // developer: AUTO or an IMU orientation string
+  final ValueChanged<String>? onGyroOrientationChanged;
+  final bool gyroflow; // write a Gyroflow motion file next to each clip (Pro)
+  final ValueChanged<bool>? onGyroflowChanged;
   final bool lensCorrection;
   final ValueChanged<bool> onLensCorrectionChanged;
   final bool hotPixelFix;
@@ -78,6 +83,10 @@ class SettingsScreen extends StatefulWidget {
     required this.isRecording,
     this.powerSaver = 0,
     required this.onPowerSaverChanged,
+    this.gyroOrientation = 'AUTO',
+    this.onGyroOrientationChanged,
+    this.gyroflow = true,
+    this.onGyroflowChanged,
     required this.lensCorrection,
     required this.onLensCorrectionChanged,
     required this.hotPixelFix,
@@ -141,6 +150,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
   late int cropMode = widget.cropMode;
   late int powerSaver = widget.powerSaver;
+  late String gyroOrientation = widget.gyroOrientation;
+  late bool gyroflow = widget.gyroflow;
   late bool lensCorrection = widget.lensCorrection;
   late bool hotPixelFix = widget.hotPixelFix;
   late double temporalNr = widget.temporalNr;
@@ -403,6 +414,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ),
     ),
     _settingRow(
+      'Gyroflow Data',
+      'BETA. Writes a motion file (.gcsv) and a lens file (_lens.json) for each clip into Download/Vesper Cine, for stabilising in Gyroflow: '
+          'open the clip, then load the .gcsv (Motion data › open file) and the _lens.json (Lens profile › open file), '
+          'or copy the .gcsv next to the clip and Gyroflow pairs it by itself. Turn Optical Stabilisation off for best results.',
+      Segmented(
+        options: const ['OFF', 'ON'],
+        selected: gyroflowActive(setting: gyroflow, hasPro: ProService.instance.hasProFeatures) ? 1 : 0,
+        locked: const {1},
+        onSelected: isRecording
+            ? (_) {}
+            : (i) {
+                if (!_gate(i == 1, 'Gyroflow motion data')) return;
+                setState(() => gyroflow = i == 1);
+                widget.onGyroflowChanged?.call(i == 1);
+              },
+      ),
+    ),
+    _settingRow(
       'Sensor Aspect / Crop',
       cropMode == 0 ? '16:9 standard widescreen, 1920x1080' : '4:3 open gate, full sensor height (preview is free; recording needs Pro)',
       Segmented(
@@ -640,6 +669,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   List<Widget> _developer() => [
     _settingRow(
+      'Gyroflow IMU orientation',
+      'AUTO is the app\'s own guess for the gcsv orientation header. If Gyroflow stabilises the wrong way, pick another for the next take (the log shows the one used)',
+      Wrap(
+        spacing: 6,
+        runSpacing: 6,
+        children: [
+          for (final o in gyroOrientationOptions)
+            ChoiceChip(
+              label: Text(o),
+              selected: gyroOrientation == o,
+              onSelected: isRecording
+                  ? null
+                  : (_) {
+                      setState(() => gyroOrientation = o);
+                      widget.onGyroOrientationChanged?.call(o);
+                    },
+            ),
+        ],
+      ),
+    ),
+    _settingRow(
       'GPU Performance Guard',
       gpuGuard
           ? 'AUTO: pauses alignment / HQ / NR when frames would drop, brings them back when they fit'
@@ -721,7 +771,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _note('FREE: manual exposure and focus, Apple Log, 16:9 up to 48 fps, STANDARD recording quality, detail up to MED, '
           'noise reduction up to LOW, scopes, hot pixel calibration, native ISO analysis. You can record ${ProService.freeClips} clips, then a short ad gives you ${ProService.freeClips} more.\n'
           'PRO: 50 / 60 fps, open gate (4:3) recording, HIGH / MAX recording quality, HIGH detail, HQ oversampling, '
-          'noise reduction above LOW, and Gyroflow export when it arrives. Unlimited clips, no ads.\n'
+          'noise reduction above LOW, and Gyroflow motion data. Unlimited clips, no ads.\n'
           'Not ready to buy? Choose any Pro feature and watch one ad: you get every Pro feature for your next ${ProService.proPassClips} clips. '
           'A clip that is already recording is never stopped.'),
       const SizedBox(height: 10),

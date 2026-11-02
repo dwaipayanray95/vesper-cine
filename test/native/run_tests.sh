@@ -13,7 +13,7 @@ g++ -std=c++20 -O1 -Wall -Wextra -I"$CPP" "$CPP/color_science.cpp" "$ROOT/test/n
 # Gradle NDK build.
 if [ -f /usr/include/vulkan/vulkan.h ]; then
   g++ -std=c++20 -Wall -Wextra -Wno-missing-field-initializers -fsyntax-only -I"$ROOT/test/native/android_stubs" -I"$CPP" "$CPP/vulkan_engine.cpp"
-  for f in camera_engine recorder native_bridge focus_controller iso_analysis sensor_calib dng_writer; do
+  for f in camera_engine recorder native_bridge focus_controller iso_analysis sensor_calib dng_writer gyroflow imu_logger; do
     g++ -std=c++20 -Wall -Wextra -Wno-missing-field-initializers -Wno-unused-parameter -fsyntax-only -I"$ROOT/test/native/android_stubs" -I"$CPP" "$CPP/$f.cpp"
   done
   echo "native sources type-check against stub NDK headers"
@@ -45,3 +45,7 @@ g++ -std=c++20 -O1 -Wall -Wextra -I"$CPP" "$CPP/iso_analysis.cpp" "$ROOT/test/na
 g++ -std=c++20 -O2 -Wall -Wextra -I"$CPP" "$CPP/sensor_calib.cpp" "$CPP/dng_writer.cpp" "$ROOT/test/native/sensor_calib_test.cpp" -o "$OUT/sensor_test"
 "$OUT/sensor_test" "$OUT"
 python3 "$ROOT/tools/calibration/test_sensor.py" "$OUT" | tail -1
+
+# Gyroflow: GCSV writer, time alignment, orientation mapping, lens intrinsics.
+g++ -std=c++20 -O1 -Wall -Wextra -I"$CPP" "$CPP/gyroflow.cpp" "$ROOT/test/native/gyroflow_test.cpp" -o "$OUT/gyroflow_test"
+"$OUT/gyroflow_test"

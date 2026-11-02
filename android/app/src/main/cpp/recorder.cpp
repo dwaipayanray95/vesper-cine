@@ -223,17 +223,18 @@ aaudio_data_callback_result_t Recorder::audioCallback(AAudioStream*, void* user,
     return AAUDIO_CALLBACK_RESULT_CONTINUE;
 }
 
-void Recorder::submitVideoFrame(int slot, int64_t ts) {
+bool Recorder::submitVideoFrame(int slot, int64_t ts) {
     {
         std::lock_guard<std::mutex> lk(jobMutex_);
         if (accepting_) {
             jobs_.push_back({slot, ts});
         } else {
             if (gpu_) gpu_->releaseEncoderFrame(slot);
-            return;
+            return false;
         }
     }
     jobCv_.notify_one();
+    return true;
 }
 
 void Recorder::stop(const std::string& reason) {

@@ -247,6 +247,9 @@ class RecordingFile {
   final int fd;
   final String uri;
   final String name;
+  /// Gyroflow motion files of this take are written to `<gyroBase>.gcsv` / `_lens.json` (app storage) and
+  /// published next to the clip afterwards; null when the take has none.
+  String? gyroBase;
   RecordingFile(this.fd, this.uri, this.name);
 }
 
@@ -292,6 +295,9 @@ class VesperNative {
   late final void Function(double) _setHeadroom;
   late final int Function(int, int, int) _startRecording;
   late final void Function() _stopRecording;
+  late final void Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>) _setGyroflowTarget;
+  late final void Function() _gyroflowFinish;
+  late final void Function(Pointer<Utf8>) _setGyroflowOrientation;
   late final int Function(Pointer<Utf8>, int) _status;
   late final void Function() _close;
   late final void Function(double) _focusPullTo;
@@ -392,6 +398,12 @@ class VesperNative {
         'vesper_start_recording',
       );
       _stopRecording = _lib.lookupFunction<Void Function(), void Function()>('vesper_stop_recording');
+      _setGyroflowTarget = _lib.lookupFunction<
+          Void Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>),
+          void Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>)>('vesper_set_gyroflow_target');
+      _gyroflowFinish = _lib.lookupFunction<Void Function(), void Function()>('vesper_gyroflow_finish');
+      _setGyroflowOrientation =
+          _lib.lookupFunction<Void Function(Pointer<Utf8>), void Function(Pointer<Utf8>)>('vesper_set_gyroflow_orientation');
       _status = _lib.lookupFunction<Int32 Function(Pointer<Utf8>, Int32), int Function(Pointer<Utf8>, int)>(
         'vesper_get_status',
       );
@@ -599,11 +611,35 @@ class VesperNative {
 
   /// Creates the output file in Movies/Vesper Cine and starts recording.
   /// codec: 0 = HEVC Main10, 1 = AV1 Main10 (falls back to HEVC if absent).
-  Future<RecordingFile?> startRecording({int codec = 0, bool audio = true}) async {
+  /// [gyroflow]: also log gyro + accelerometer (and a lens profile) next to the clip.
+  Future<RecordingFile?> startRecording({
+    int codec = 0,
+    bool audio = true,
+    bool gyroflow = false,
+    String brand = '',
+    String model = '',
+    String appVersion = '',
+  }) async {
     if (!_loaded) return null;
     final m = await _channel.invokeMapMethod<String, dynamic>('createRecordingFile');
     if (m == null) return null;
     final file = RecordingFile(m['fd'] as int, m['uri'] as String, m['name'] as String);
+    final base = m['gyroBase'] as String?;
+    final ptrs = <Pointer<Utf8>>[
+      (gyroflow && base != null ? base : '').toNativeUtf8(),
+      file.name.toNativeUtf8(),
+      brand.toNativeUtf8(),
+      model.toNativeUtf8(),
+      appVersion.toNativeUtf8(),
+    ];
+    try {
+      _setGyroflowTarget(ptrs[0], ptrs[1], ptrs[2], ptrs[3], ptrs[4]);
+    } finally {
+      for (final p in ptrs) {
+        calloc.free(p);
+      }
+    }
+    if (gyroflow && base != null) file.gyroBase = base;
     if (_startRecording(file.fd, codec, audio ? 1 : 0) != 0) {
       await finalizeRecording(file, keep: false);
       return null;
@@ -612,6 +648,32 @@ class VesperNative {
   }
 
   void stopRecording() => _loaded ? _stopRecording() : null;
+
+  /// Developer override of the gcsv IMU orientation ('' = automatic); applies to the next take.
+  void setGyroflowOrientation(String o) {
+    if (!_loaded) return;
+    final p = o.toNativeUtf8();
+    try {
+      _setGyroflowOrientation(p);
+    } finally {
+      calloc.free(p);
+    }
+  }
+
+  /// Ends the take's motion log (idempotent, <= ~200 ms) and copies the Gyroflow
+  /// files next to the clip. Never throws: the clip itself is already saved.
+  /// Returns the folders the files went to (empty: none written).
+  Future<List<String>> publishGyroflow(RecordingFile file) async {
+    final base = file.gyroBase;
+    if (!_loaded || base == null) return const [];
+    _gyroflowFinish();
+    try {
+      final dirs = await _channel.invokeListMethod<String>('publishGyroflowFiles', {'base': base});
+      return dirs ?? const [];
+    } on PlatformException {
+      return const [];
+    }
+  }
 
   /// Takes left hidden by a crash or a killed app (see MainActivity):
   /// published at launch. Returns (file name, complete) per file.

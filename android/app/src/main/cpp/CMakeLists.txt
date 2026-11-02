@@ -15,6 +15,8 @@ add_library(vesper_engine SHARED
     dng_writer.cpp
     vulkan_engine.cpp
     recorder.cpp
+    gyroflow.cpp
+    imu_logger.cpp
 )
 
 target_include_directories(vesper_engine PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

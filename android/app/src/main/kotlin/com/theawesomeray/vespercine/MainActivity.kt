@@ -25,6 +25,7 @@ import io.flutter.embedding.android.RenderMode
 import io.flutter.embedding.android.TransparencyMode
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -173,6 +174,19 @@ class MainActivity : FlutterActivity() {
                         result.error("file", e.message, null)
                     }
                 }
+                "publishGyroflowFiles" -> {
+                    // Copy on a background thread; the reply goes back on the main thread.
+                    // The clip is already saved: a failure here only means no motion files.
+                    val base = call.argument<String>("base") ?: ""
+                    Thread {
+                        try {
+                            val dirs = publishGyroflowFiles(base)
+                            runOnUiThread { result.success(dirs) }
+                        } catch (e: Exception) {
+                            runOnUiThread { result.error("file", e.message, null) }
+                        }
+                    }.start()
+                }
                 "recoverRecordings" -> {
                     try {
                         result.success(recoverPendingRecordings())
@@ -261,7 +275,50 @@ class MainActivity : FlutterActivity() {
         val collection = MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
         val uri = contentResolver.insert(collection, values) ?: throw IllegalStateException("MediaStore insert failed")
         val pfd = contentResolver.openFileDescriptor(uri, "rw") ?: throw IllegalStateException("open failed")
-        return mapOf("fd" to pfd.detachFd(), "uri" to uri.toString(), "name" to name)
+        return mapOf("fd" to pfd.detachFd(), "uri" to uri.toString(), "name" to name, "gyroBase" to gyroBaseFor(name))
+    }
+
+    // Gyroflow motion files (0.28.0) are written by the native IMU thread into
+    // app storage (filesDir/gyroflow/<clip name>.gcsv and _lens.json) and copied
+    // next to the clip when the take has finished. Returns the base path for
+    // the clip; leftovers of killed takes (also ".part" files) older than 3 days are deleted.
+    private fun gyroBaseFor(clipName: String): String {
+        val dir = File(filesDir, "gyroflow")
+        dir.mkdirs()
+        val now = System.currentTimeMillis()
+        dir.listFiles()?.forEach { if (now - it.lastModified() > 3L * 24 * 3600 * 1000) it.delete() }
+        return File(dir, clipName.removeSuffix(".mp4")).path
+    }
+
+    // Copies <base>.gcsv and <base>_lens.json (final names only: the native logger
+    // writes ".part" files and renames them when complete) to Download/Vesper Cine.
+    // Android 11+ refuses non-media types under Movies/, so they can't sit next to
+    // the mp4. Returns the folders used (empty: nothing to publish).
+    private fun publishGyroflowFiles(base: String): List<String> {
+        val used = mutableListOf<String>()
+        val downloads = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        for ((suffix, mime) in listOf(".gcsv" to "text/plain", "_lens.json" to "application/json")) {
+            val src = File(base + suffix)
+            if (!src.exists()) continue
+            if (src.length() == 0L) { src.delete(); continue }
+            var uri: Uri? = null
+            try {
+                val values = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, File(base).name + suffix)
+                    put(MediaStore.MediaColumns.MIME_TYPE, mime)
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, "Download/Vesper Cine")
+                    put(MediaStore.MediaColumns.IS_PENDING, 1)
+                }
+                uri = contentResolver.insert(downloads, values) ?: continue
+                contentResolver.openOutputStream(uri, "w")!!.use { out -> src.inputStream().use { it.copyTo(out) } }
+                contentResolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
+                used.add("Download/Vesper Cine")
+                src.delete()
+            } catch (e: Exception) {
+                try { if (uri != null) contentResolver.delete(uri, null, null) } catch (ignored: Exception) {}
+            }
+        }
+        return used
     }
 
     // A take whose app was killed or crashed mid-recording stays a hidden

@@ -57,7 +57,8 @@ public:
     bool start(const RecorderConfig& config, VulkanEngine* gpu, std::string* error);
     // Camera thread: hand over a rendered slot. Always consumes the slot
     // (releases it immediately if the recorder isn't accepting frames).
-    void submitVideoFrame(int slot, int64_t sensorTimestampNs);
+    // Returns true when the recorder took the frame (the first one taken is PTS 0 of the clip).
+    bool submitVideoFrame(int slot, int64_t sensorTimestampNs);
     void stop(const std::string& reason);
     bool isRecording() const { return running_.load(); }
     RecorderStatus status();

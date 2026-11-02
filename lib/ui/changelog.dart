@@ -7,6 +7,11 @@ class ChangelogEntry {
 }
 
 const changelog = <ChangelogEntry>[
+  ChangelogEntry('0.28.0', [
+    'New (beta, Pro): Gyroflow motion data. Every clip gets a motion file (.gcsv) and a lens file (_lens.json) with the same name, recorded from the phone\'s gyroscope and accelerometer while you film. They are saved in Download/Vesper Cine. In Gyroflow: open the clip, then load the .gcsv (Motion data › open file) and the _lens.json (Lens profile › open file); or copy the .gcsv next to the clip and Gyroflow pairs it by itself. Switch it in Settings › Recording › Gyroflow Data. Turn Optical Stabilisation off for best results',
+    'This is a first version: if the stabilisation moves the wrong way, Gyroflow\'s Motion data panel lets you change the IMU orientation. Please tell us what worked on your footage',
+    'If the gyroscope fails, your video is never affected',
+  ]),
   ChangelogEntry('0.27.0', [
     'New: a quick phone check the first time you open the app. It tests that your phone can run Vesper Cine and tries 1080p at 24, 30, 48 and 60 fps with all processing on (about half a minute). You see in plain words what works; frame rates your phone cannot handle are hidden, and ones that only work with reduced processing are marked RQ. Run it again any time: Settings › Info › Re-check this phone',
     'New: Calibrate this phone. After the check, a short guided setup runs the lens-covered calibrations (hot pixels, then native ISO) one after the other, with one "cover the lens" step. Also under Settings › Image & NR. A dot on the settings gear shows when a calibration is waiting',

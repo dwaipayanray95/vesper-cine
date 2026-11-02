@@ -539,6 +539,7 @@ void CameraEngine::onCaptureCompleted(const ACameraMetadata* r) {
         m.neutral = {rational(e.data.r[0]), rational(e.data.r[1]), rational(e.data.r[2])};
     }
     if (ACameraMetadata_getConstEntry(r, ACAMERA_SENSOR_EXPOSURE_TIME, &e) == ACAMERA_OK) m.exposureNs = e.data.i64[0];
+    if (ACameraMetadata_getConstEntry(r, ACAMERA_SENSOR_ROLLING_SHUTTER_SKEW, &e) == ACAMERA_OK && e.count >= 1) m.rollingShutterSkewNs = e.data.i64[0];
     if (ACameraMetadata_getConstEntry(r, ACAMERA_SENSOR_SENSITIVITY, &e) == ACAMERA_OK) m.iso = e.data.i32[0];
     if (ACameraMetadata_getConstEntry(r, ACAMERA_LENS_FOCUS_DISTANCE, &e) == ACAMERA_OK) m.focusDiopters = e.data.f[0];
     if (ACameraMetadata_getConstEntry(r, ACAMERA_CONTROL_AF_STATE, &e) == ACAMERA_OK) m.afState = e.data.u8[0];

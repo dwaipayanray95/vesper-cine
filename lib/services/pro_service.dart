@@ -7,7 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 /// What the free plan allows (owner's decision, 7 Oct). Pro, or a "Pro pass"
 /// earned with a rewarded ad (the next [ProService.proPassClips] clips), lifts
-/// every limit. Gyroflow export will join this list when it exists.
+/// every limit. Gyroflow motion data (0.28.0) is Pro too.
 class ProLimits {
   static const maxFps = 48.0; // 50 / 60 fps are Pro
   static const maxTemporalNr = 0.5; // up to LOW

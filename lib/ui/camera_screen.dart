@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import '../build_flags.dart';
 import '../services/calibration_registry.dart';
 import '../services/device_check.dart';
+import '../services/gyroflow.dart';
 import '../services/pro_service.dart';
 import '../services/vesper_native.dart';
 import 'cine_control_tile.dart';
@@ -141,6 +142,8 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
   bool _afContinuous = false;
   bool _faceDetect = false;
   bool _lensCorrection = true;
+  String _gyroOrientation = 'AUTO'; // developer override of the gcsv IMU orientation
+  bool _gyroflow = true; // Gyroflow motion file next to each clip (effective only with Pro)
   bool _hotPixelFix = true;
   // Developer: also use the measured midtone/highlight (shot) noise. OFF by default since 0.20.0:
   // static A/B of 7 Oct (daylight, ISO 30) showed no grain gain and 2-6% less fine texture.
@@ -1267,6 +1270,8 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     'gpuGuard': _gpuGuard,
     'codec': _codec,
     'recordQuality': _recordQuality,
+    'gyroflow': _gyroflow,
+    if (kDevTools) 'gyroOrientation': _gyroOrientation,
     'powerSaver': _powerSaver,
     'tapLocks': _tapLocks,
     'tapSetsExposure': _tapSetsExposure,
@@ -1314,6 +1319,11 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       _gpuGuard = kDevTools ? get('gpuGuard', _gpuGuard) : true; // release: the guard is always on
       _codec = get('codec', _codec).clamp(0, 1);
       _recordQuality = get('recordQuality', _recordQuality).clamp(0, 2);
+      _gyroflow = get('gyroflow', _gyroflow);
+      if (kDevTools) {
+        final go = get('gyroOrientation', _gyroOrientation);
+        _gyroOrientation = gyroOrientationOptions.contains(go) ? go : 'AUTO';
+      }
       _powerSaver = get('powerSaver', _powerSaver).clamp(0, 2);
       _tapLocks = get('tapLocks', _tapLocks);
       _tapSetsExposure = get('tapSetsExposure', _tapSetsExposure);
@@ -1596,7 +1606,15 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     RecordingFile? file;
     try {
       _engine.setRecordingQuality(1.0 + _recordQuality);
-      file = await _engine.startRecording(codec: _codec);
+      final di = _deviceInfoMap;
+      _engine.setGyroflowOrientation(kDevTools ? gyroOrientationForEngine(_gyroOrientation) : '');
+      file = await _engine.startRecording(
+        codec: _codec,
+        gyroflow: gyroflowActive(setting: _gyroflow, hasPro: ProService.instance.hasProFeatures),
+        brand: (di?['manufacturer'] as String?) ?? '',
+        model: (di?['model'] as String?) ?? '',
+        appVersion: _appVersion,
+      );
     } on PlatformException catch (e) {
       _engine.log('Could not create the recording file: ${e.message}', tag: 'Vesper_UI');
     }
@@ -1710,12 +1728,19 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
     _wakeSaver(rearm: false);
     final file = _recordingFile;
     var published = true;
+    var gyroNote = '';
     if (file != null) {
       try {
         await _engine.finalizeRecording(file);
       } on PlatformException catch (e) {
         published = false; // recovered as a pending file at the next launch
         _engine.log('Could not publish ${file.name}: ${e.message}', tag: 'Vesper_UI');
+      }
+      // Motion files after the clip is published; a failure here never affects the clip.
+      try {
+        gyroNote = gyroflowSavedNote(await _engine.publishGyroflow(file)) ?? '';
+      } catch (e) {
+        _engine.log('Gyroflow files not published: $e', tag: 'Vesper_UI');
       }
     }
     if (!mounted) return;
@@ -1733,7 +1758,7 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
       case final r when r.startsWith('error'):
         _toast('Recording stopped (${r.substring(r.indexOf(':') + 1).trim()}). Saved what was recorded: ${file?.name}');
       default:
-        _toast(published ? 'Saved ${file?.name} to Movies/Vesper Cine' : 'Recording saved, but the gallery entry failed: restart the app');
+        _toast(published ? 'Saved ${file?.name} to Movies/Vesper Cine${gyroNote.isEmpty ? '' : '. $gyroNote'}' : 'Recording saved, but the gallery entry failed: restart the app');
     }
   }
 
@@ -1828,6 +1853,10 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
               _wakeSaver(); // apply the new choice from now on
             }
           },
+          gyroOrientation: _gyroOrientation,
+          onGyroOrientationChanged: (v) => setState(() => _gyroOrientation = v),
+          gyroflow: _gyroflow,
+          onGyroflowChanged: (v) => setState(() => _gyroflow = v),
           lensCorrection: _lensCorrection,
           onLensCorrectionChanged: (val) {
             setState(() => _lensCorrection = val);

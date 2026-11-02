@@ -5,6 +5,8 @@
 #include "color_science.h"
 #include "dng_writer.h"
 #include "focus_controller.h"
+#include "gyroflow.h"
+#include "imu_logger.h"
 #include "iso_analysis.h"
 #include "recorder.h"
 #include "sensor_calib.h"
@@ -62,6 +64,17 @@ struct Settings {
 std::unique_ptr<CameraEngine> gCamera;
 std::unique_ptr<VulkanEngine> gGpu;
 std::unique_ptr<Recorder> gRecorder;
+ImuLogger gImu; // Gyroflow motion log of the current take (own thread, see imu_logger.h)
+
+// Set by vesper_set_gyroflow_target() before a take, consumed by vesper_start_recording().
+struct GyroTarget {
+    std::string base;       // path without extension in app storage (the app publishes the files after the take)
+    std::string videoName;  // the mp4's display name
+    std::string brand, model, appVersion;
+};
+GyroTarget gGyroTarget;  // gStateMutex
+std::string gGyroOrientationOverride; // gStateMutex; "" = automatic (developer setting)
+GyroTarget gGyroTake;    // the running take's copy (camera thread reads it; written before the logger starts)
 ColorPipeline gColor;
 
 std::mutex gStateMutex;
@@ -1265,6 +1278,61 @@ void calSweepMain() {
 // camera streaming, so returning is instant and the UI gets the GPU/CPU.
 std::atomic<bool> gProcessingPaused{false};
 
+// Gyroflow (0.28.0): called once per take with the first recorded frame. Builds
+// the GCSV header fields and the lens profile from this frame's geometry; the
+// IMU thread does the file writing.
+void gyroflowFirstFrame(const RawFrame& f, const SensorInfo& info, const Settings& s, const FrameParams& p, int outW,
+                        int outH, int rot) {
+    const CaptureMetadata& m = *f.meta;
+    GcsvHeader h;
+    h.vendor = "Vesper Cine " + gGyroTake.appVersion + " / " + gGyroTake.brand + " " + gGyroTake.model;
+    h.videoFilename = gGyroTake.videoName;
+    std::string override;
+    {
+        std::lock_guard<std::mutex> lk(gStateMutex);
+        override = gGyroOrientationOverride;
+    }
+    const std::string autoOrientation = gcsvOrientation(info.orientation, rot);
+    h.orientation = override.empty() ? autoOrientation : override;
+    LOGI("Gyroflow: IMU orientation %s (%s; sensor orientation %d, output rotation %d, auto would be %s)", h.orientation.c_str(),
+         override.empty() ? "auto" : "developer override", info.orientation, rot, autoOrientation.c_str());
+    h.readoutDirection = readoutDirectionFor(rot);
+    // t = 0 is the start of exposure of the first video frame (camera SENSOR_TIMESTAMP, converted to
+    // BOOTTIME like the sensor events); Gyroflow's sync offset covers the rest.
+    h.note = "t=0 is the first video frame (sensor timestamp = start of exposure); OIS should be off";
+    h.readoutMs = m.rollingShutterSkewNs * readoutFraction(p.cropRect[3], f.height) * 1e-6;
+
+    std::string lensPath, lensJson;
+    const bool rotated = (rot % 180) != 0;
+    if (rotated && !s.lensCorrection) {
+        LOGW("Gyroflow: no lens profile (distortion terms are not converted for rotation %d with Lens Correction off)", rot);
+    } else if (info.hasDistortion && info.intrinsics[0] > 0 && info.intrinsics[1] > 0) {
+        LensProfileInput lp;
+        lp.brand = gGyroTake.brand;
+        lp.model = gGyroTake.model;
+        lp.appVersion = gGyroTake.appVersion;
+        lp.width = outW;
+        lp.height = outH;
+        lp.fps = gCamera ? gCamera->frameRate() : 0;
+        lp.readoutMs = h.readoutMs;
+        lp.cropMode = s.cropMode == 1 ? "4:3 open gate" : "16:9";
+        lp.k = outputIntrinsics(info.intrinsics, p.sensorMap, p.cropRect, outW, outH, rot);
+        lp.lensCorrected = s.lensCorrection;
+        if (!s.lensCorrection) {
+            // The clip still has the lens' own distortion: pass the HAL's Brown-Conrady terms on.
+            if (outputDistortion(info.distortion, rot, lp.dist)) lp.note = "Lens Correction was off: distortion from the camera HAL";
+            else lp.note = "Lens Correction was off; distortion not converted for this rotation";
+        } else {
+            lp.note = "Lens Correction on: the image is already rectilinear, distortion is zero";
+        }
+        lensJson = lensProfileJson(lp);
+        lensPath = gGyroTake.base + "_lens.json";
+    } else {
+        LOGW("Gyroflow: this camera reports no lens calibration, no lens profile written");
+    }
+    gImu.setFirstFrame(f.timestampNs, h, lensPath, lensJson);
+}
+
 void onFrame(const RawFrame& f) {
     if (!gGpu) return;
     // Calibration captures work with Settings open (processing paused) too.
@@ -1500,7 +1568,17 @@ void onFrame(const RawFrame& f) {
     int slot = -1;
     gGpu->setFrameBudgetMs(frameNs * 1e-6);
     bool ok = gGpu->processFrame(in, recording ? &slot : nullptr);
-    if (ok && recording && slot >= 0) gRecorder->submitVideoFrame(slot, f.timestampNs);
+    if (ok && recording && slot >= 0) {
+        // The first frame the recorder ACCEPTS is its PTS 0 (firstVideoNs_): t = 0 of the motion log.
+        if (gRecorder->submitVideoFrame(slot, f.timestampNs) && gImu.waitingForFirstFrame()) {
+            try {
+                gyroflowFirstFrame(f, info, s, p, outW, outH, rot);
+            } catch (...) {
+                LOGW("Gyroflow: could not prepare the motion header, no motion file");
+                gImu.requestStop();
+            }
+        }
+    }
     if (!ok) ++gCameraDrops;
 }
 
@@ -1656,6 +1734,7 @@ EXPORT int32_t vesper_start_stream() {
 
 EXPORT int32_t vesper_stop_stream() {
     if (gRecorder) gRecorder->stop("user");
+    gImu.requestStop(); // only signals: the video path never waits for the motion file
     if (gCamera) gCamera->stopCapture();
     return 0;
 }
@@ -1684,6 +1763,7 @@ EXPORT void vesper_close_camera() {
     stopIsoSweep();
     stopCalSweep();
     if (gRecorder) gRecorder->stop("user");
+    gImu.requestStop(); // only signals: the video path never waits for the motion file
     if (gCamera) gCamera->closeCamera();
 }
 
@@ -2290,7 +2370,45 @@ EXPORT int32_t vesper_start_recording(int32_t fd, int32_t codec, int32_t audio) 
     cfg.audio = audio != 0;
     cfg.timestampRealtime = gCamera->sensorInfo().timestampRealtime;
     std::string error;
-    return gRecorder->start(cfg, gGpu.get(), &error) ? 0 : -1;
+    GyroTarget gyro;
+    {
+        std::lock_guard<std::mutex> lk(gStateMutex);
+        gyro = gGyroTarget;
+        gGyroTarget = GyroTarget{};
+    }
+    // The logger starts first so it is ready before frame 0 reaches the recorder. It runs on its own
+    // thread and reports its own failures: it can never affect the take.
+    const bool withGyro = !gyro.base.empty();
+    if (withGyro) {
+        gGyroTake = gyro;
+        ImuTimeBase tb;
+        tb.cameraRealtime = cfg.timestampRealtime;
+        tb.boottimeMinusMonotonicNs = measureBoottimeMinusMonotonicNs();
+        gImu.start(gyro.base + ".gcsv", tb);
+    }
+    const bool started = gRecorder->start(cfg, gGpu.get(), &error);
+    if (!started && withGyro) gImu.requestStop();
+    return started ? 0 : -1;
+}
+
+// Gyroflow motion data for the NEXT take (0.28.0): `base` = path without
+// extension in app storage (<base>.gcsv and <base>_lens.json are written
+// there and published by the app afterwards), `videoName` = the mp4's name.
+// An empty `base` turns it off. Consumed by vesper_start_recording.
+EXPORT void vesper_set_gyroflow_target(const char* base, const char* videoName, const char* brand, const char* model,
+                                       const char* appVersion) {
+    std::lock_guard<std::mutex> lk(gStateMutex);
+    gGyroTarget.base = base ? base : "";
+    gGyroTarget.videoName = videoName ? videoName : "";
+    gGyroTarget.brand = brand ? brand : "";
+    gGyroTarget.model = model ? model : "";
+    gGyroTarget.appVersion = appVersion ? appVersion : "";
+}
+
+// Ends the motion log of the take (idempotent; <= ~200 ms). The app calls it
+// before publishing the files, also when the recorder stopped by itself.
+EXPORT void vesper_gyroflow_finish() {
+    gImu.requestStop(); // only signals: the video path never waits for the motion file
 }
 
 // Recording Quality: bitrate multiplier for the next take (1 standard, 2 high, 3 max).
@@ -2300,6 +2418,7 @@ EXPORT void vesper_set_recording_quality(double scale) {
 
 EXPORT void vesper_stop_recording() {
     if (gRecorder) gRecorder->stop("user");
+    gImu.requestStop(); // only signals: the video path never waits for the motion file
 }
 
 // --- Heat ---------------------------------------------------------------------
@@ -2425,6 +2544,7 @@ EXPORT void vesper_close() {
     stopIsoSweep();
     stopCalSweep();
     if (gRecorder) gRecorder->stop("user");
+    gImu.requestStop(); // only signals: the video path never waits for the motion file
     if (gCamera) gCamera->closeCamera();
     if (gGpu) gGpu->release();
 }
