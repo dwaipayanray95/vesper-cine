@@ -135,7 +135,7 @@ void threadBody(const std::shared_ptr<ImuLogger::State>& st) {
     // A stop request is noticed at the top of the loop; one wake() pending in the
     // looper (ALooper keeps it) makes a poll return at once, so a stop that
     // arrives before or between polls never costs the full timeout. After a stop
-    // request the loop runs ONE more pass: flush + drain the sensor queue, open
+    // request the loop runs ONE more pass: drain the sensor queue, open
     // the file if the first frame became known meanwhile, write everything.
     bool stopping = false;
     while (!failed) {
@@ -143,7 +143,7 @@ void threadBody(const std::shared_ptr<ImuLogger::State>& st) {
             std::lock_guard<std::mutex> lk(st->mutex);
             if (st->stopRequested) stopping = true;
         }
-        if (stopping) ASensorEventQueue_flush(queue); // push out batched events (API 26+)
+        // (The NDK has no queue flush; the 20 ms poll below lets the last batched events arrive.)
         int fd, ev;
         void* data;
         ALooper_pollOnce(stopping ? 20 : 200, &fd, &ev, &data);

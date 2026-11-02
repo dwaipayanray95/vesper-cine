@@ -17,7 +17,7 @@ CI runs the same checks on every push (`.github/workflows/checks.yml`: native te
 - `test/native/run_tests.sh` (colour science, native type-check, GPU pipeline on lavapipe, calibration, focus, ISO analysis, sensor calibration statistics + DNG + `sensor.py`)
 - `flutter analyze` and `flutter test`; then `git checkout analysis_options.yaml pubspec.lock` (the Flutter tool rewrites them). If `flutter` isn't on PATH, look for an SDK (e.g. `/tmp/flutter/bin`) before concluding Dart can't be checked.
 - After editing any `.comp`/`.glsl`: `android/app/src/main/cpp/shaders/compile_shaders.sh` to regenerate the `*_spv.h` headers (green.comp has 4 variants: R16F/RGBA16F × fp32/fp16, plus probe and test-reference variants; 32x16-quad tiles, dispatch width /32).
-- New NDK functions used in native code need a declaration in `test/native/android_stubs/`.
+- New NDK functions used in native code need a declaration in `test/native/android_stubs/`, copied from the real NDK header (check it exists in the NDK first: 0.28.0 declared a non-existent `ASensorEventQueue_flush` in the stub, the host type-check passed and the APK build failed).
 - Git: commit and push directly to `main` (owner's choice).
 
 ## Builds and testing

@@ -27,7 +27,6 @@ ASensorEventQueue* ASensorManager_createEventQueue(ASensorManager* manager, ALoo
 int ASensorManager_destroyEventQueue(ASensorManager* manager, ASensorEventQueue* queue);
 int ASensorEventQueue_registerSensor(ASensorEventQueue* queue, ASensor const* sensor, int32_t samplingPeriodUs,
                                      int64_t maxBatchReportLatencyUs);
-int ASensorEventQueue_flush(ASensorEventQueue* queue);
 int ASensorEventQueue_disableSensor(ASensorEventQueue* queue, ASensor const* sensor);
 ssize_t ASensorEventQueue_getEvents(ASensorEventQueue* queue, ASensorEvent* events, size_t count);
 const char* ASensor_getName(ASensor const* sensor);
