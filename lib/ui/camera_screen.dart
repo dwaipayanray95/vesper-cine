@@ -291,7 +291,13 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
         // On a phone: the graphics driver (Vulkan) or the camera service didn't start. That is a device-check result.
         await _runDeviceCheck(startup: true);
       }
-      if (mounted) setState(() => _statusMessage = 'NATIVE ENGINE UNAVAILABLE (ANDROID ONLY)');
+      final err = _engine.loadError;
+      if (err != null) debugPrint('Native engine failed to load: $err');
+      if (mounted) {
+        setState(() => _statusMessage = err == null
+            ? 'NATIVE ENGINE UNAVAILABLE (ANDROID ONLY)'
+            : 'NATIVE ENGINE FAILED TO LOAD — PLEASE REPORT: ${err.length > 160 ? err.substring(0, 160) : err}');
+      }
       return;
     }
     // Wait for the camera permission before touching the camera: on first

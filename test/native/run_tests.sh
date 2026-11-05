@@ -49,3 +49,15 @@ python3 "$ROOT/tools/calibration/test_sensor.py" "$OUT" | tail -1
 # Gyroflow: GCSV writer, time alignment, orientation mapping, lens intrinsics.
 g++ -std=c++20 -O1 -Wall -Wextra -I"$CPP" "$CPP/gyroflow.cpp" "$ROOT/test/native/gyroflow_test.cpp" -o "$OUT/gyroflow_test"
 "$OUT/gyroflow_test"
+
+# Every native function the Dart side looks up must be exported by the engine:
+# one missing symbol makes the whole FFI binding fail and the app shows
+# "NATIVE ENGINE UNAVAILABLE" with no camera (0.28.0-0.29.0: vesper_set_gyroflow_orientation).
+missing=$(comm -23 \
+    <(grep -o "'vesper_[a-z0-9_]*'" "$ROOT/lib/services/vesper_native.dart" | tr -d "'" | sort -u) \
+    <(grep -ho 'EXPORT [^(]*\bvesper_[a-z0-9_]*(' "$CPP"/*.cpp | grep -o 'vesper_[a-z0-9_]*' | sort -u))
+if [ -n "$missing" ]; then
+    echo "FAIL: Dart looks up native functions the engine does not export: $missing" >&2
+    exit 1
+fi
+echo "all Dart FFI symbols are exported"

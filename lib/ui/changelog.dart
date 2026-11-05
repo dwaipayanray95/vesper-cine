@@ -7,6 +7,9 @@ class ChangelogEntry {
 }
 
 const changelog = <ChangelogEntry>[
+  ChangelogEntry('0.29.1', [
+    'Fix: since 0.28.0 the camera did not start ("native engine unavailable", no picture). One engine function was missing from the build. If the engine ever fails to load again, the screen now says why',
+  ]),
   ChangelogEntry('0.29.0', [
     'New: Send Calibration to Vesper (Settings › Info). Emails your phone\'s measurements (phone check, noise numbers, which calibrations were done) to the developer, so the app can be tuned for your phone model. It has no photos, no location and no hot-pixel map. Your own email app opens with the file attached and nothing is sent until you press send there; the developer also sees your email address and uses the report only to improve support for your phone model',
     'After your first finished calibration the app offers this once ("Help Vesper support your phone"); NOT NOW is fine, the button stays in Settings',

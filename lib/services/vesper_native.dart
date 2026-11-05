@@ -261,6 +261,8 @@ class VesperNative {
   late final DynamicLibrary _lib;
   bool _loaded = false;
   bool get isLoaded => _loaded;
+  /// Why the native library couldn't be bound (e.g. a missing symbol); null when loaded.
+  String? loadError;
 
   late final int Function() _init;
   late final int Function(Pointer<Utf8>, int) _enumerate;
@@ -472,8 +474,9 @@ class VesperNative {
           _lib.lookupFunction<Void Function(Double), void Function(double)>('vesper_set_recording_quality');
       _useColorProfile = _lib.lookupFunction<Void Function(Int32), void Function(int)>('vesper_use_color_profile');
       _loaded = true;
-    } catch (_) {
+    } catch (e) {
       _loaded = false;
+      loadError = '$e';
     }
   }
 

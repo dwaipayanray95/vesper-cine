@@ -2395,6 +2395,14 @@ EXPORT int32_t vesper_start_recording(int32_t fd, int32_t codec, int32_t audio) 
 // extension in app storage (<base>.gcsv and <base>_lens.json are written
 // there and published by the app afterwards), `videoName` = the mp4's name.
 // An empty `base` turns it off. Consumed by vesper_start_recording.
+// Developer override of the gcsv IMU orientation ("" or an invalid string = automatic).
+EXPORT void vesper_set_gyroflow_orientation(const char* orientation) {
+    std::string o = orientation ? orientation : "";
+    if (!o.empty() && !validOrientation(o)) o.clear();
+    std::lock_guard<std::mutex> lk(gStateMutex);
+    gGyroOrientationOverride = o;
+}
+
 EXPORT void vesper_set_gyroflow_target(const char* base, const char* videoName, const char* brand, const char* model,
                                        const char* appVersion) {
     std::lock_guard<std::mutex> lk(gStateMutex);
