@@ -364,6 +364,34 @@ class _SettingsScreenState extends State<SettingsScreen> {
     ),
   );
 
+  Future<void> _pickGyroOrientation() async {
+    final picked = await showDialog<String>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        backgroundColor: const Color(0xFF14171D),
+        title: const Text('Gyroflow IMU orientation', style: TextStyle(color: Colors.white, fontSize: 15)),
+        children: [
+          for (final o in gyroOrientationOptions)
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(ctx, o),
+              child: Row(
+                children: [
+                  Icon(o == gyroOrientation ? Icons.radio_button_checked : Icons.radio_button_unchecked,
+                      size: 16, color: o == gyroOrientation ? Colors.amber : Colors.white38),
+                  const SizedBox(width: 10),
+                  Text(o == 'AUTO' ? 'AUTO (app\'s guess)' : o,
+                      style: const TextStyle(color: Colors.white, fontSize: 13, fontFamily: 'monospace')),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+    if (picked == null || !mounted) return;
+    setState(() => gyroOrientation = picked);
+    widget.onGyroOrientationChanged?.call(picked);
+  }
+
   Widget _button(String label, VoidCallback? onPressed, {IconData? icon}) => OutlinedButton.icon(
     icon: Icon(icon ?? Icons.chevron_right, size: 14, color: Colors.amber),
     label: Text(label, style: const TextStyle(color: Colors.amber, fontSize: 11)),
@@ -423,7 +451,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       Segmented(
         options: const ['OFF', 'ON'],
         selected: gyroflowActive(setting: gyroflow, hasPro: ProService.instance.hasProFeatures) ? 1 : 0,
-        locked: const {1},
+        locked: ProService.instance.hasProFeatures ? const {} : const {1},
         onSelected: isRecording
             ? (_) {}
             : (i) {
@@ -671,25 +699,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   List<Widget> _developer() => [
     _settingRow(
-      'Gyroflow IMU orientation',
-      'AUTO is the app\'s own guess for the gcsv orientation header. If Gyroflow stabilises the wrong way, pick another for the next take (the log shows the one used)',
-      Wrap(
-        spacing: 6,
-        runSpacing: 6,
-        children: [
-          for (final o in gyroOrientationOptions)
-            ChoiceChip(
-              label: Text(o),
-              selected: gyroOrientation == o,
-              onSelected: isRecording
-                  ? null
-                  : (_) {
-                      setState(() => gyroOrientation = o);
-                      widget.onGyroOrientationChanged?.call(o);
-                    },
-            ),
-        ],
-      ),
+      'Gyroflow IMU Orientation',
+      'Axis order written into the motion file. AUTO = the app\'s own guess. '
+          'If Gyroflow stabilises the wrong way, pick another before the next take (the app log shows the one used)',
+      _button(gyroOrientation, isRecording ? null : _pickGyroOrientation, icon: Icons.screen_rotation_alt),
     ),
     _settingRow(
       'GPU Performance Guard',

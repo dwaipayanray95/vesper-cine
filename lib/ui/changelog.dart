@@ -7,6 +7,10 @@ class ChangelogEntry {
 }
 
 const changelog = <ChangelogEntry>[
+  ChangelogEntry('0.29.2', [
+    'New: GYRO button in the left panel, under STAB (OIS). It switches Gyroflow motion data on and off for the next take, same as Settings › Recording › Gyroflow Data (Pro)',
+    'Developer: the Gyroflow IMU orientation setting is now one button that opens a list, instead of a block of chips',
+  ]),
   ChangelogEntry('0.29.1', [
     'Fix: since 0.28.0 the camera did not start ("native engine unavailable", no picture). One engine function was missing from the build. If the engine ever fails to load again, the screen now says why',
   ]),

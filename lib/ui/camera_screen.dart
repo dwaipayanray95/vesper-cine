@@ -1413,6 +1413,17 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
 
   // Called from the status poll (4x/s) and when the app goes to the background:
   // writes only when something actually changed.
+  // Left-rack GYRO tile: turning it on needs Pro (or the ad pass).
+  Future<void> _toggleGyroflow() async {
+    final turnOn = !gyroflowActive(setting: _gyroflow, hasPro: ProService.instance.hasProFeatures);
+    if (turnOn && !ProService.instance.hasProFeatures) {
+      if (!await showProUpsell(context, 'Gyroflow motion data')) return;
+      if (!mounted || !ProService.instance.hasProFeatures) return;
+    }
+    setState(() => _gyroflow = turnOn);
+    _saveSettings();
+  }
+
   void _saveSettings() {
     final f = _settingsFile;
     if (f == null) return;
@@ -2698,6 +2709,20 @@ class _CameraScreenState extends State<CameraScreen> with SingleTickerProviderSt
                         _engine.setOis(_ois);
                       },
                     ),
+
+                    // Gyroflow motion data (Pro; same setting as Settings › Recording › Gyroflow Data)
+                    Builder(builder: (context) {
+                      final on = gyroflowActive(setting: _gyroflow, hasPro: ProService.instance.hasProFeatures);
+                      return CineControlTile(
+                        label: 'GYRO',
+                        value: on ? 'DATA ON' : 'DATA OFF',
+                        subtitle: ProService.instance.hasProFeatures ? null : 'PRO',
+                        active: on,
+                        enabled: !_recording,
+                        accentColor: on ? Colors.greenAccent : Colors.white24,
+                        onTap: _recording ? null : _toggleGyroflow,
+                      );
+                    }),
                   ],
                 ),
               ),
